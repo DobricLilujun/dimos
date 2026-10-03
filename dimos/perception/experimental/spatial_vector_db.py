@@ -189,6 +189,22 @@ class SpatialVectorDB:
         )
         return self._process_query_results(results)
 
+    def update_metadata(self, vector_id: str, updates: dict[str, Any]) -> None:
+        """
+        Merge ``updates`` into the existing metadata for ``vector_id``.
+
+        ChromaDB's ``update`` call replaces the entire metadata document, so we
+        fetch the current metadata first and merge the new fields on top.
+        """
+        existing = self.image_collection.get(ids=[vector_id], include=["metadatas"])
+        metadatas = existing.get("metadatas")
+        if not metadatas:
+            raise ValueError(f"No metadata found for vector {vector_id}")
+        merged = dict(metadatas[0])
+        merged.update(updates)
+        self.image_collection.update(ids=[vector_id], metadatas=[merged])
+        logger.info(f"Updated metadata for {vector_id}: {updates}")
+
     def tag_location(self, location: RobotLocation) -> None:
         """
         Tag a location with a semantic name/description for text-based retrieval.

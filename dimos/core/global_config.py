@@ -161,6 +161,9 @@ class GlobalConfig(BaseSettings):
     typesafe_api_key: str | None = Field(
         default=None, validation_alias=AliasChoices("TYPESAFE_API_KEY", "typesafe_api_key")
     )
+    openai_api_key: str | None = Field(
+        default=None, validation_alias=AliasChoices("OPENAI_API_KEY", "openai_api_key")
+    )
     dimos_upload_codec: str = "lz4"
     dimos_upload_retries: int = 2
     dimos_upload_chunk_mb: int | None = None

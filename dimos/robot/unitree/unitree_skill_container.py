@@ -31,7 +31,9 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.navigation.base import NavigationState
 from dimos.navigation.go2.replanning_a_star.spec import NavigationInterfaceSpec
+from dimos.perception.experimental.spatial_memory_spec import SpatialMemorySpec
 from dimos.robot.unitree.go2.connection_spec import GO2ConnectionSpec
+from dimos.types.robot_location import RobotLocation
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -218,12 +220,74 @@ class UnitreeSkillContainer(Module):
 
     _navigation: NavigationInterfaceSpec
     _connection: GO2ConnectionSpec
+    _spatial_memory: SpatialMemorySpec
 
     tf: In[TFMessage]
 
     @rpc
     def stop(self) -> None:
         super().stop()
+
+    @skill
+    def go_to_place(self, place_name: str) -> str:
+        """Navigate to a named place that was previously tagged in the spatial memory.
+
+        The place name is matched against locations stored by the VLM auto-tagging
+        feature (e.g. "kitchen", "living room") or manually tagged locations.
+
+        Args:
+            place_name: Name of the place to navigate to.
+
+        Returns:
+            Outcome message with the target position.
+        """
+        return self._go_to_named_location(place_name, kind="place")
+
+    @skill
+    def go_to_object(self, object_name: str) -> str:
+        """Navigate to an object that was previously seen and tagged in 3D.
+
+        The object name is matched against objects detected by the VLM and projected
+        into world coordinates (e.g. "red chair", "trash can", "sofa").
+
+        Args:
+            object_name: Name of the object to navigate to.
+
+        Returns:
+            Outcome message with the target position.
+        """
+        return self._go_to_named_location(object_name, kind="object")
+
+    def _go_to_named_location(self, name: str, kind: str) -> str:
+        name = str(name).strip()
+        if not name:
+            return f"{kind.capitalize()} name cannot be empty."
+
+        # Try exact name first, then semantic query.
+        location = self._spatial_memory.find_robot_location(name)
+        if location is None:
+            location = self._spatial_memory.query_tagged_location(name)
+
+        if location is None:
+            return f"No known {kind} named '{name}'. Available: {self._list_place_names()}"
+
+        goal = PoseStamped(
+            position=Vector3(*location.position),
+            orientation=Quaternion.from_euler(Vector3(*location.rotation)),
+            frame_id="world",
+        )
+        self._navigation.set_goal(goal)
+        outcome = self._wait_for_goal()
+        return f"{outcome}. Goal was {kind} '{name}' at {_pose_text(goal)}."
+
+    def _list_place_names(self) -> str:
+        """Return a comma-separated list of known place/object names."""
+        try:
+            locations = self._spatial_memory.get_robot_locations()
+            names = sorted({loc.name for loc in locations})
+            return ", ".join(names) if names else "(none)"
+        except Exception as e:
+            return f"(could not list: {e})"
 
     @skill
     def move_to(

@@ -141,7 +141,14 @@ class VisualMemory:
         if not filename:
             filename = "visual_memory.pkl"
 
-        output_path = os.path.join(self.output_dir, filename)
+        if os.path.isabs(filename) or self.output_dir is None:
+            output_path = filename
+        else:
+            output_path = os.path.join(self.output_dir, filename)
+
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
 
         try:
             with open(output_path, "wb") as f:
