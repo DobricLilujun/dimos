@@ -16,14 +16,20 @@
 
 Talks to any OpenAI-compatible vision endpoint (e.g. vLLM).  Captions are
 returned as plain text and can be stored alongside spatial-memory embeddings.
+The official OpenAI endpoint uses max_completion_tokens; other compatible
+endpoints retain max_tokens.
+HTTP failures log up to 4096 characters of the response body after redacting
+the configured API key and image data.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import re
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 import numpy as np
@@ -35,9 +41,9 @@ logger = setup_logger()
 DEFAULT_VLM_PROMPT = (
     "Describe this scene in one concise sentence, identify the room or area type, "
     "and list up to 5 prominent objects with 2D bounding boxes. "
-    "Reply as JSON: {\"caption\": \"...\", \"place\": \"...\", "
-    "\"place_bbox\": [x1, y1, x2, y2], \"items\": "
-    "[{\"name\": \"...\", \"bbox\": [x1, y1, x2, y2]}]}. "
+    'Reply as JSON: {"caption": "...", "place": "...", '
+    '"place_bbox": [x1, y1, x2, y2], "items": '
+    '[{"name": "...", "bbox": [x1, y1, x2, y2]}]}. '
     "Coordinates are integer pixel values in the original image. "
     "Use null for place if unknown; omit items if none are visible. "
     "Use place_bbox only for a visible localized area or entrance; use null for a room "
@@ -82,6 +88,11 @@ class VlmCaptionProvider:
             return None
 
         b64 = base64.b64encode(encoded.tobytes()).decode("utf-8")
+        token_parameter = (
+            "max_completion_tokens"
+            if urlsplit(self.base_url).hostname == "api.openai.com"
+            else "max_tokens"
+        )
         payload = {
             "model": self.model,
             "messages": [
@@ -96,7 +107,7 @@ class VlmCaptionProvider:
                     ],
                 }
             ],
-            "max_tokens": self.max_tokens,
+            token_parameter: self.max_tokens,
         }
 
         headers = {"Content-Type": "application/json"}
@@ -112,7 +123,27 @@ class VlmCaptionProvider:
         try:
             with urlopen(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError) as e:
+        except HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except OSError as read_error:
+                logger.warning(
+                    f"VlmCaptionProvider: request failed: {e}; "
+                    f"could not read error response: {read_error}"
+                )
+                return None
+            finally:
+                e.close()
+            body = re.sub(r"data:image/[^\"'\s]+", "[redacted image]", body)
+            body = body.replace(b64, "[redacted image]")
+            if self.api_key:
+                body = body.replace(self.api_key, "[redacted]")
+            body = body[:4096]
+            logger.warning(
+                f"VlmCaptionProvider: request failed: {e}; response body: {body or '[empty]'}"
+            )
+            return None
+        except (URLError, TimeoutError) as e:
             logger.warning(f"VlmCaptionProvider: request failed: {e}")
             return None
         except json.JSONDecodeError as e:

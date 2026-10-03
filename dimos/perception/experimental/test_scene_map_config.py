@@ -147,6 +147,9 @@ def memory(tmp_path, mocker):
     module = SpatialMemory(db_path=str(tmp_path / "db"), output_dir=str(tmp_path))
     _created.append(module)
     mocker.patch.object(module, "vector_db", mocker.Mock())
+    stored = []
+    module.vector_db.tag_location.side_effect = stored.append
+    module.vector_db.get_robot_locations.return_value = stored
     mocker.patch.object(module, "_tf", mocker.Mock())
     return module
 
@@ -183,11 +186,12 @@ def test_async_result_registers_captured_targets_and_writes_immediately(memory, 
         "projection_context": captured_context,
     })
     assert memory.find_robot_location("chair").position == (1.0, 2.0, 7.0)
-    assert memory.find_robot_location("kitchen").position == (1.0, 2.0, 7.0)
+    assert memory.find_robot_location("kitchen").position == (1.0, 2.0, 3.0)
     report = json.loads(memory._vlm_report_path.read_text())
     assert report["objects"] == {"chair": [1.0, 2.0, 7.0]}
     assert report["object_estimates"]["chair"]["method"] == "pointcloud_bbox"
-    assert report["place_position"] == [1.0, 2.0, 7.0]
+    assert report["place_position"] == [1.0, 2.0, 3.0]
+    assert report["place_estimate"] == {"method": "robot_observation_pose"}
 
 
 def test_place_without_box_uses_observation_pose(memory):

@@ -205,6 +205,231 @@ dimos run unitree-go2-relocalization \
 | Nav works but map looks misaligned | Low fitness accepted in debug mode | Raise `fitness_threshold` back to default `0.45` |
 | PGO map looks wrong | Bad odometry in recording | Run `dimos map replay` or `summary` and re-record with smoother motion |
 
+## Supervised persistent maps with the Go2 agent
+
+`unitree-go2-agentic-persistent` is an opt-in variant of the agentic stack.
+It saves a live column-carving map, restores it on the next run, and transforms
+new lidar, odometry, and root TF into the **original session's world frame**.
+The planner and SpatialMemory therefore use the same stable coordinates.
+The original `unitree-go2-agentic` blueprint is unchanged.
+
+Matching with Go2's built-in lidar is **experimental**: the existing alignment
+preset was measured on MID360, not this sensor. A candidate passing the
+algorithm's threshold is not proof of a correct match. This variant requires
+human approval on every restored session; approval is an RPC, not an LLM tool.
+It does not add loop closure or eliminate subsequent odometry drift.
+
+### First run: create a map
+
+Use a new scene-memory directory for the first persistent session. Previously
+collected scene memories may belong to a different odometry origin; a `.pc2.lcm`
+map must be collected in the same coordinate system as its semantic memory.
+An old ChromaDB or VLM report alone cannot reconstruct the missing lidar map.
+
+```bash
+dimos run unitree-go2-agentic-persistent \
+  --robot-ip "$ROBOT_IP" \
+  --persistentgo2map.map-file=assets/scene_maps/sedan_office_persistent/map.pc2.lcm \
+  --persistentgo2map.create-new=true \
+  --spatialmemory.scene-map-dir=assets/scene_maps/sedan_office_persistent \
+  --mcpclient.model=gpt-4o-mini
+```
+
+Add your usual `--spatialmemory.vlm-*` flags to annotate new frames if needed.
+The first session defines the persistent coordinates; no alignment approval is
+needed for a new map. `create_new` refuses to replace an existing file.
+The map saves every 30 seconds and on graceful shutdown (`Ctrl+C` or
+`dimos stop`). A force kill can lose changes since the last save.
+
+For an explicit save, open `dimos shell` in another terminal:
+
+```python
+app.PersistentGo2Map.save_map()
+```
+
+Saving before any accepted scan is an error. Save the map and stop normally
+before returning to the space.
+
+### Next run: restore, inspect, and approve
+
+Use the same paths, **without** `create_new`:
+
+```bash
+dimos run unitree-go2-agentic-persistent \
+  --robot-ip "$ROBOT_IP" \
+  --persistentgo2map.map-file=assets/scene_maps/sedan_office_persistent/map.pc2.lcm \
+  --spatialmemory.scene-map-dir=assets/scene_maps/sedan_office_persistent \
+  --mcpclient.model=gpt-4o-mini
+```
+
+A missing or invalid map fails startup rather than silently creating a new one.
+Before approval, aligned sensor forwarding, planner goals, semantic observations,
+and map saves are blocked. Existing low-level/manual robot controls are not
+disabled: do not ask the agent to move while checking alignment.
+
+Place the robot in a distinctive overlapping area. In Rerun compare:
+
+- `world/alignment_scan`: live lidar in this session's coordinates.
+- `world/alignment_preview`: the saved map placed into those coordinates by
+  the candidate. Walls, corners, and floor should agree, not just one surface.
+
+#### Optional startup scan rotation
+
+For a restored map, add these flags to the restore command:
+
+```bash
+--persistentgo2map.startup-rotation=true \
+--persistentgo2map.rotation-speed=0.15 \
+--persistentgo2map.rotation-duration=20.0
+```
+
+This opt-in capture starts after fresh lidar and odometry arrive, commands only
+yaw (zero translation), and turns for at most 20 seconds (about 172 degrees
+at the requested rate, not a measured angle). It retains a voxelized union of
+the whole sweep, rather than only the last 3–7 scans. The robot receives a zero
+velocity command before matching begins. Human alignment approval is still
+required. New-map sessions never run this rotation.
+
+**Clear the robot's entire turning footprint and supervise it.** This capture
+does not perform obstacle avoidance. It stops on stale lidar/odometry (default
+1 second), module shutdown, a stop-movement message, or another nonzero velocity
+command routed through this blueprint. Direct robot RPC controls bypass that
+routing; do not issue agent movement commands during capture.
+
+To cancel from `dimos shell`:
+
+```python
+app.PersistentGo2Map.cancel_startup_rotation()
+```
+
+Cancellation or sensor loss leaves alignment blocked and never restarts rotation
+automatically; stop and restart to retry. Rejecting a completed candidate retries
+matching the captured sweep without another rotation. Leave `startup-rotation`
+disabled for manual scan acquisition. Rotation improves coverage but cannot
+guarantee a correct match in repetitive geometry or fix odometry drift.
+
+#### Manual walking and turning capture
+
+To collect scans while you remotely drive the robot, use
+`--persistentgo2map.manual-capture=true` instead of `startup-rotation=true`.
+The two options cannot be enabled together. This mode commands no automatic
+motion and keeps the voxelized union of all scans until you finish capture.
+It only applies to restored maps; new-map sessions are unchanged.
+
+Drive slowly through a clear, overlapping part of the saved map and turn to
+observe different walls and corners. Supervise the robot: this mode adds no
+obstacle avoidance. Navigation and map updates remain blocked.
+
+**Release your remote controls and stop the robot first**, then in `dimos shell`:
+
+```python
+app.PersistentGo2Map.alignment_status()  # Captured scan and point counts
+app.PersistentGo2Map.finish_startup_capture()
+```
+
+Finishing also publishes a zero velocity command, but cannot override a held
+physical remote control. Too few points produces an error and leaves capture
+active so you can continue. Matching starts only after finishing; a rejected
+candidate retries the same captured cloud without moving the robot. Restart
+to collect a different sweep if needed.
+
+Open `dimos shell` and inspect:
+
+```python
+app.PersistentGo2Map.alignment_status()
+```
+
+If the match is correct:
+
+```python
+app.PersistentGo2Map.confirm_alignment()
+```
+
+If it is wrong:
+
+```python
+app.PersistentGo2Map.reject_alignment()
+```
+
+Rejecting leaves navigation blocked and resumes matching. If matching repeatedly
+fails, stop and collect a recording for tuning; do not reduce the threshold to
+force a placement. Approval clears the preview entities and publishes the old
+map on `world/global_map`. New observations replace seen voxel columns while
+unobserved parts of the old map remain, and saves retain the original coordinates.
+To undo an approved placement, stop and restart; do not change coordinates
+mid-navigation.
+
+After approval, send commands from another terminal:
+
+```bash
+dimos agent-send "List the remembered locations without moving."
+dimos agent-send "Navigate to office."
+```
+
+The requested location must exist in the paired semantic memory. Check alignment
+in Rerun and ensure the path is clear before requesting physical navigation.
+
+### Query stored tags and navigate to a selected tag
+
+The agent exposes two additional MCP tools:
+
+- `query_memory_tags(query="")`: read-only inventory of persisted tags, including
+  IDs, names, estimated world coordinates, category, description, and counts.
+  An empty query returns all tags; a nonempty query is a case-insensitive name
+  substring filter. Use the stored names, not translated names.
+- `navigate_to_memory_tag(location_id=...)`: load the selected tag from memory
+  and submit its horizontal coordinates to the existing planner. The goal uses
+  current odometry height, not object height. Alignment approval remains required.
+  If multiple tags match, the agent should ask which one unless the user supplied
+  a selection criterion. This tool starts navigation; it does not wait for arrival.
+
+```bash
+dimos agent-send "List the objects tagged in memory and their coordinates. Do not move."
+dimos agent-send "How many fire extinguisher tags are stored? List each ID and position."
+dimos agent-send "Navigate to the fire extinguisher."
+
+dimos mcp call query_memory_tags --json-args '{"query":"fire extinguisher"}'
+dimos mcp call navigate_to_memory_tag --json-args '{"location_id":"<ID from query>"}'
+```
+
+Restart the stack after updating code so the agent fetches the new tools.
+Queries do not trigger navigation and include tags from previous sessions.
+Counts describe stored tags, not a verified count of physical objects. New VLM
+object tags with the same name and estimated positions within 1 metre are merged;
+more distant observations are kept as separate tags. Older tags are retained and
+may have unknown category. Previously discarded same-name objects cannot be
+recovered without observing them again. Estimates can be wrong or stale; inspect
+the map before navigating. The planner may choose a reachable point near an object
+rather than its occupied position.
+
+### Tag the object, not the robot's observation location
+
+Use `tag_object` for a visible object:
+
+```bash
+dimos agent-send "Use tag_object to mark the visible fire extinguisher. Do not move."
+dimos mcp call tag_object --json-args '{"object_name":"fire extinguisher"}'
+```
+
+`tag_location` intentionally records the **robot's current location**; it is for
+named waypoints, not physical objects. `tag_object` detects an image box, refines
+it with the configured segmenter when available, projects time-aligned lidar
+points through calibrated camera intrinsics into that region, and transforms
+the foreground surface estimate into `world`. Geometry is captured before model
+inference, so subsequent robot motion does not change the observation's frame.
+Automatic VLM object tags use the same depth requirement.
+Room/place tags instead use the robot's position when the room was observed,
+even if a place bounding box is provided. They represent a return waypoint in
+the room, not its geometric centre or the position of a wall.
+
+No valid lidar hit means an explicit failure (or a logged skipped automatic tag),
+not a robot-position or fixed-distance fallback. Camera calibration, camera TF,
+and lidar/image time alignment must be available after map alignment approval.
+This is a lidar-supported surface estimate, not a guaranteed object centre.
+When instance segmentation is unavailable, bounding-box depth is less selective
+and can include background; inspect the result. Existing incorrectly placed tags
+are not automatically deleted or repaired.
+
 ## Related docs
 
 For hardware setup, simulation, and the full blueprint list, see the [Go2 platform guide](/docs/platforms/quadruped/go2/index.md). The [v0.0.13 release notes](https://github.com/dimensionalOS/dimos/releases/tag/v0.0.13) summarize the PGO, `dimos map`, and relocalization work this guide builds on.

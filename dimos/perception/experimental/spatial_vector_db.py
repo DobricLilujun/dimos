@@ -220,6 +220,15 @@ class SpatialVectorDB:
             ids=[location_id], documents=[location.name], metadatas=[metadata]
         )
 
+    def get_robot_locations(self) -> list[RobotLocation]:
+        """Read all persisted tags, including multiple tags with the same name."""
+        results = self.location_collection.get(include=["metadatas"])
+        return [
+            RobotLocation.from_vector_metadata(metadata)
+            for metadata in results["metadatas"] or []
+            if metadata is not None
+        ]
+
     def query_tagged_location(self, query: str) -> tuple[RobotLocation | None, float]:
         """
         Query for a tagged location using semantic text search.

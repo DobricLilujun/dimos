@@ -12,13 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Protocol
+from typing import Any, Protocol
 
+from dimos.msgs.sensor_msgs.Image import Image
 from dimos.spec.utils import Spec
 from dimos.types.robot_location import RobotLocation
 
 
 class SpatialMemorySpec(Spec, Protocol):
+    def capture_object_observation(self) -> tuple[Image, dict[str, Any]]: ...
+    def tag_object_from_observation(
+        self, name: str, bbox: list[int], image: Image, context: dict[str, Any]
+    ) -> str: ...
     def tag_location(self, robot_location: RobotLocation) -> bool: ...
     def query_tagged_location(self, query: str) -> RobotLocation | None: ...
     def find_robot_location(self, name: str) -> RobotLocation | None: ...

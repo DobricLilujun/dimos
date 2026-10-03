@@ -32,10 +32,14 @@ Some skills hold a shared capability (e.g. `movement`). A call that needs a busy
 - Otherwise Z is taking longer than usual; wait a moment, then retry.
 
 ## Navigation Flow
+- For inventory, counts, or saved coordinates, use `query_memory_tags` without moving. Empty query lists all stored tags; query filters names. Counts are stored tags, not confirmed physical object counts.
+- To go to a remembered object, first call `query_memory_tags`, then `navigate_to_memory_tag` with the selected ID. If several tags match, ask which unless the user gave a selection criterion. Never invent coordinates or claim arrival when navigation only started.
 - Use `navigate_with_text` for most navigation. It searches tagged locations first, then visible objects, then the semantic map.
 - Use `move_to(x, y)` to navigate to world coordinates: the same frame odometry and the lidar readouts use, +x east, +y north. It blocks and returns where you ended up.
 - Use `move_to(..., relative=True)` for body-relative nudges: x forward, y left, degrees to turn.
 - Tag important locations with `tag_location` so you can return to them later.
+- Use `tag_object` to mark a visible object (e.g. a fire extinguisher) at its lidar-derived world position. `tag_location` only records your own position, so never use it to tag objects. If detection or depth fails, report the failure instead of inventing a position.
+- For a room/place, tag_location records your position in that room. Automatic place tags likewise use the robot's position at observation time, not a projected wall or doorway.
 - Always run `execute_sport_command("RecoveryStand")` after dynamic movements (flips, jumps, sit) before navigating.
 
 ## GPS Navigation Flow

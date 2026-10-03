@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import math
 import time
 from typing import Any
 
@@ -78,9 +80,101 @@ class NavigationSkillContainer(Module):
         self._latest_odom = odom
 
     @skill
+    def query_memory_tags(self, query: str = "") -> str:
+        """List persisted tags and world coordinates without moving the robot.
+
+        Empty query lists all tags. Otherwise match tag names by case-insensitive
+        substring (use names returned by this tool, not translated names).
+        Returns every matching tag's ID, name, position, source category, and
+        description. Count means stored tags, not verified physical objects.
+        Old tags may have an unknown source. Object positions are estimates;
+        location tags can be robot observation positions. Never use navigation
+        tools merely to answer an inventory or coordinate question.
+        """
+        locations = self._spatial_memory.get_robot_locations()
+        matches = [
+            location
+            for location in locations
+            if query.strip().casefold() in location.name.casefold()
+        ]
+        return json.dumps(
+            {
+                "frame": "world",
+                "query": query,
+                "total_stored_tags": len(locations),
+                "matching_tag_count": len(matches),
+                "tags": [
+                    {
+                        "id": location.location_id,
+                        "name": location.name,
+                        "position": location.position,
+                        "kind": location.metadata.get("kind", "unknown"),
+                        "description": location.metadata.get("description", ""),
+                    }
+                    for location in matches
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    @skill(uses=[CAP_MOVEMENT])
+    def navigate_to_memory_tag(self, location_id: str) -> str:
+        """Navigate to a saved tag selected using query_memory_tags.
+
+        Only call when the user requests movement. If multiple same-name tags
+        exist, ask which one unless the user supplied a selection criterion.
+        Uses the saved world coordinates and the existing planner, including
+        its map-alignment gate. Object coordinates are estimates; the planner
+        may choose a reachable nearby goal. Returning started is not arrival.
+        """
+        if not self._skill_started:
+            raise ValueError(f"{self} has not been started.")
+        for location in self._spatial_memory.get_robot_locations():
+            if location.location_id == location_id:
+                if not all(
+                    math.isfinite(value) for value in (*location.position, *location.rotation)
+                ):
+                    raise ValueError(f"Tag {location_id} has invalid coordinates")
+                pose = PoseStamped(
+                    position=make_vector3(
+                        location.position[0],
+                        location.position[1],
+                        self._latest_odom.position.z if self._latest_odom is not None else 0.0,
+                    ),
+                    orientation=Quaternion.from_euler(Vector3(*location.rotation)),
+                    frame_id="world",
+                )
+                return self._navigate_to(
+                    pose, f"Selected saved tag '{location.name}' ({location_id})"
+                )
+        raise ValueError(f"No saved tag with ID {location_id!r}; query_memory_tags again")
+
+    @skill
+    def tag_object(self, object_name: str) -> str:
+        """Locate and tag a visible object's actual estimated world position without moving.
+
+        Detects its image bounding box, refines it with the configured segmenter,
+        and uses timestamp-aligned camera TF, intrinsics, and lidar points to
+        estimate the object surface in world coordinates. Requires a clear view
+        and valid depth; never substitutes robot position or a default distance.
+        Use this for objects such as fire extinguishers, not tag_location.
+        """
+        if not self._skill_started:
+            raise ValueError(f"{self} has not been started.")
+        image, context = self._spatial_memory.capture_object_observation()
+        bbox = get_object_bbox_from_image(self._vl_model, image, object_name)
+        if bbox is None:
+            raise RuntimeError(f"No visible object matching '{object_name}'")
+        return self._spatial_memory.tag_object_from_observation(
+            object_name, [round(value) for value in bbox], image, context
+        )
+
+    @skill
     def tag_location(self, location_name: str) -> str:
         """Tag this location in the spatial memory with a name.
 
+        Records the ROBOT's current position, not an object's position.
+        For a fire extinguisher or another visible object, use tag_object instead.
         This associates the current location with the given name in the spatial memory, allowing you to navigate back to it.
 
         Args:
@@ -169,7 +263,10 @@ class NavigationSkillContainer(Module):
         logger.info(
             f"Navigating to pose: ({pose.position.x:.2f}, {pose.position.y:.2f}, {pose.position.z:.2f})"
         )
-        self._navigation.set_goal(pose)
+        if not self._navigation.set_goal(pose):
+            return (
+                "Navigation refused. Check map alignment and navigation readiness before retrying."
+            )
 
         return (
             f"{message}. Started navigating to that position. "

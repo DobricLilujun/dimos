@@ -38,7 +38,7 @@ from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
-from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.perception.experimental.image_embedding import ImageEmbeddingProvider
@@ -114,6 +114,7 @@ class SpatialConfig(ModuleConfig):
     object_max_distance_m: float = 10.0  # Ignore lidar hits beyond this
     object_sensor_time_tolerance_s: float = 1.0
     object_segmenter: str = "auto"  # "auto" | "vlm" | "yolo"
+
 
 def _vlm_worker(
     config: dict[str, Any],
@@ -317,8 +318,7 @@ class SpatialMemory(Module):
                 report_dir = Path(self.config.output_dir or _SPATIAL_MEMORY_DIR)
             report_dir.mkdir(parents=True, exist_ok=True)
             self._vlm_report_path = (
-                report_dir
-                / f"vlm_tags_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+                report_dir / f"vlm_tags_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
             )
             self._vlm_thread = threading.Thread(
                 target=_vlm_worker,
@@ -390,12 +390,7 @@ class SpatialMemory(Module):
         timestamp = result.get("timestamp")
         context = result.get("projection_context")
         frame_bgr = result.get("frame_bgr")
-        place_estimate = None
-        if place and result.get("place_bbox") and context is not None:
-            place_estimate = self._estimate_target(
-                result["place_bbox"], place, frame_bgr, context
-            )
-        place_position = place_estimate["position"] if place_estimate else position
+        place_position = position
 
         # Update the vector DB metadata if the frame is still present.
         if frame_id is not None and caption:
@@ -435,17 +430,18 @@ class SpatialMemory(Module):
                     continue
                 if context is None:
                     continue
-                estimate = self._estimate_target(bbox, item_name, frame_bgr, context)
+                estimate = self._estimate_target(
+                    bbox, item_name, frame_bgr, context, require_depth=True
+                )
                 if estimate is None:
                     continue
                 world_pos = estimate["position"]
-                if self.find_robot_location(item_name) is None:
-                    self.add_named_location(
-                        name=item_name,
-                        position=world_pos,
-                        rotation=rotation,
-                        description=f"Object '{item_name}' seen in {place or 'scene'}: {caption}",
-                    )
+                self._tag_object_location(
+                    item_name,
+                    world_pos,
+                    rotation,
+                    f"Object '{item_name}' seen in {place or 'scene'}: {caption}",
+                )
                 object_positions[item_name] = world_pos
                 object_estimates[item_name] = estimate
 
@@ -458,7 +454,7 @@ class SpatialMemory(Module):
             "timestamp": timestamp,
             "coordinate_frame": "world",
             "place_position": place_position,
-            "place_estimate": place_estimate or {"method": "robot_observation_pose"},
+            "place_estimate": {"method": "robot_observation_pose"},
             "detections": result.get("items") or [],
         }
         if object_positions:
@@ -546,8 +542,10 @@ class SpatialMemory(Module):
         pixels = camera_points @ intrinsics.T
         pixels = pixels[:, :2] / pixels[:, 2:3]
         inside = (
-            (pixels[:, 0] >= left) & (pixels[:, 0] < right)
-            & (pixels[:, 1] >= top) & (pixels[:, 1] < bottom)
+            (pixels[:, 0] >= left)
+            & (pixels[:, 0] < right)
+            & (pixels[:, 1] >= top)
+            & (pixels[:, 1] < bottom)
         )
         mask = context.get("mask")
         if mask is not None:
@@ -564,8 +562,7 @@ class SpatialMemory(Module):
             foreground = candidates[
                 np.abs(candidates[:, 2] - front_depth) <= max(0.3, front_depth * 0.1)
             ]
-            depth = float(np.median(foreground[:, 2]))
-            camera_target = ray * depth
+            camera_target = np.median(foreground, axis=0)
             method = "pointcloud_bbox"
             point_count = len(foreground)
         else:
@@ -578,7 +575,13 @@ class SpatialMemory(Module):
         }
 
     def _estimate_target(
-        self, bbox: list[int], name: str, frame: np.ndarray | None, context: dict[str, Any]
+        self,
+        bbox: list[int],
+        name: str,
+        frame: np.ndarray | None,
+        context: dict[str, Any],
+        *,
+        require_depth: bool = False,
     ) -> dict[str, Any] | None:
         """Refine a captured image region and estimate its world position."""
         if self._object_segmenter is not None and frame is not None:
@@ -588,9 +591,49 @@ class SpatialMemory(Module):
                     context = {**context, "mask": mask}
             except Exception as error:
                 logger.warning(f"Segmentation failed for '{name}': {error}")
-        return self._project_bbox_position(
+        estimate = self._project_bbox_position(
             bbox, context, self.config.object_max_distance_m, self.config.object_default_distance_m
         )
+        if require_depth and (estimate is None or estimate["point_count"] == 0):
+            logger.warning(
+                "Object tag skipped: no valid lidar points inside detected region", name=name
+            )
+            return None
+        return estimate
+
+    @rpc
+    def capture_object_observation(self) -> tuple[Image, dict[str, Any]]:
+        """Capture an image and its aligned geometry before slow object detection."""
+        observation = self._latest_observation
+        if observation is None or observation[1] is None:
+            raise RuntimeError(
+                "No image with aligned camera geometry; check map alignment and sensors"
+            )
+        frame, context, timestamp = observation
+        assert context is not None
+        if len(context["world_points"]) == 0:
+            raise RuntimeError("No timestamp-aligned lidar available for object tagging")
+        return Image.from_numpy(frame.copy(), format=ImageFormat.BGR, ts=timestamp), context
+
+    @rpc
+    def tag_object_from_observation(
+        self, name: str, bbox: list[int], image: Image, context: dict[str, Any]
+    ) -> str:
+        """Store the object's lidar-derived world position, never the robot position."""
+        estimate = self._estimate_target(bbox, name, image.to_opencv(), context, require_depth=True)
+        if estimate is None:
+            raise RuntimeError(
+                f"Cannot locate '{name}': no valid object depth. Move to a better view and retry."
+            )
+        position = estimate["position"]
+        if not self._tag_object_location(
+            name,
+            position,
+            [0.0, 0.0, 0.0],
+            f"Object '{name}': lidar-derived surface position from image at {image.ts}",
+        ):
+            raise RuntimeError(f"Failed to save object tag '{name}'")
+        return json.dumps({"name": name, "frame": "world", **estimate}, ensure_ascii=False)
 
     def _capture_projection_context(
         self, frame: np.ndarray, timestamp: float
@@ -601,8 +644,11 @@ class SpatialMemory(Module):
             return None
         tolerance = self.config.object_sensor_time_tolerance_s
         camera_tf = self.tfbuffer.get(
-            "world", info.frame_id or "camera_optical",
-            time_point=timestamp, time_tolerance=tolerance, warn=False,
+            "world",
+            info.frame_id or "camera_optical",
+            time_point=timestamp,
+            time_tolerance=tolerance,
+            warn=False,
         )
         if camera_tf is None:
             return None
@@ -617,8 +663,11 @@ class SpatialMemory(Module):
                 world_points = points
             elif cloud.frame_id:
                 cloud_tf = self.tfbuffer.get(
-                    "world", cloud.frame_id, time_point=cloud.ts,
-                    time_tolerance=tolerance, warn=False,
+                    "world",
+                    cloud.frame_id,
+                    time_point=cloud.ts,
+                    time_tolerance=tolerance,
+                    warn=False,
                 )
                 if cloud_tf is not None:
                     world_points = points @ cloud_tf.rotation.to_rotation_matrix().T + np.array(
@@ -668,18 +717,14 @@ class SpatialMemory(Module):
                 )
                 if mask is not None and mask.sum() > 0:
                     cx, cy = mask_centroid(mask)
-                    logger.info(
-                        f"Segmenter refined '{item_name}' center to ({cx:.1f}, {cy:.1f})"
-                    )
+                    logger.info(f"Segmenter refined '{item_name}' center to ({cx:.1f}, {cy:.1f})")
                     return cx, cy
             except Exception as e:
                 logger.warning(f"Object segmenter failed for '{item_name}': {e}")
 
         return (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
-    def _query_pointcloud_distance(
-        self, origin: Vector3, ray: np.ndarray
-    ) -> float | None:
+    def _query_pointcloud_distance(self, origin: Vector3, ray: np.ndarray) -> float | None:
         """Return distance to the nearest lidar point roughly along ``ray``.
 
         Searches the latest pointcloud for points within an angular cone of the
@@ -726,21 +771,16 @@ class SpatialMemory(Module):
 
     @rpc
     def start(self) -> None:
-        import cv2
-
         super().start()
 
         # Subscribe to LCM streams
         def set_video(image_msg: Image) -> None:
             # Convert Image message to numpy array
             if hasattr(image_msg, "data"):
-                frame = image_msg.data
-                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                frame = image_msg.to_opencv().copy()
                 self._latest_video_frame = frame
                 self._latest_video_frame_bgr = frame.copy()
-                context = None
-                if self.config.vlm_enable_object_tagging or self.config.vlm_enable_place_tagging:
-                    context = self._capture_projection_context(frame, image_msg.ts)
+                context = self._capture_projection_context(frame, image_msg.ts)
                 self._latest_observation = (frame, context, image_msg.ts)
             else:
                 logger.warning("Received image message without data attribute")
@@ -787,8 +827,11 @@ class SpatialMemory(Module):
                 return
             frame, projection_context, image_timestamp = observation
             tf = self.tfbuffer.get(
-                "world", "base_link", time_point=image_timestamp,
-                time_tolerance=self.config.object_sensor_time_tolerance_s, warn=False,
+                "world",
+                "base_link",
+                time_point=image_timestamp,
+                time_tolerance=self.config.object_sensor_time_tolerance_s,
+                warn=False,
             )
         else:
             if self._latest_video_frame is None:
@@ -1076,16 +1119,27 @@ class SpatialMemory(Module):
             True if successfully added, False otherwise
         """
         try:
-            # Add to our list of robot locations
-            self.robot_locations.append(location)
             # Also persist it to the vector DB so it can be queried by name/text.
-            self.tag_location(location)
+            if not self.tag_location(location):
+                return False
+            self.robot_locations.append(location)
             logger.info(f"Added robot location '{location.name}' at position {location.position}")
             return True
 
         except Exception as e:
             logger.error(f"Error adding robot location: {e}")
             return False
+
+    def _tag_object_location(
+        self, name: str, position: list[float], rotation: list[float] | None, description: str
+    ) -> bool:
+        for existing in self.get_robot_locations():
+            if (
+                existing.name.casefold() == name.casefold()
+                and np.linalg.norm(np.asarray(existing.position) - position) <= 1.0
+            ):
+                return True
+        return self.add_named_location(name, position, rotation, description, kind="object")
 
     @rpc
     def add_named_location(
@@ -1094,6 +1148,7 @@ class SpatialMemory(Module):
         position: list[float] | None = None,
         rotation: list[float] | None = None,
         description: str | None = None,
+        kind: str = "location",
     ) -> bool:
         """
         Add a named robot location to spatial memory using current or specified position.
@@ -1103,6 +1158,7 @@ class SpatialMemory(Module):
             position: Optional position [x, y, z], uses current position if None
             rotation: Optional rotation [roll, pitch, yaw], uses current rotation if None
             description: Optional description of the location
+            kind: Tag source category, such as object or location
 
         Returns:
             True if successfully added, False otherwise
@@ -1113,7 +1169,11 @@ class SpatialMemory(Module):
                 logger.error("No position available for robot location")
                 return False
             if position is None:
-                position = [float(tf.translation.x), float(tf.translation.y), float(tf.translation.z)]
+                position = [
+                    float(tf.translation.x),
+                    float(tf.translation.y),
+                    float(tf.translation.z),
+                ]
             if rotation is None:
                 euler = tf.rotation.to_euler()
                 rotation = [float(euler.x), float(euler.y), float(euler.z)]
@@ -1122,7 +1182,7 @@ class SpatialMemory(Module):
             position=(float(position[0]), float(position[1]), float(position[2])),
             rotation=(float(rotation[0]), float(rotation[1]), float(rotation[2])),
             timestamp=time.time(),
-            metadata={"description": description or f"Location: {name}"},
+            metadata={"description": description or f"Location: {name}", "kind": kind},
         )
 
         return self.add_robot_location(location)
@@ -1135,7 +1195,7 @@ class SpatialMemory(Module):
         Returns:
             List of RobotLocation objects
         """
-        return self.robot_locations
+        return self.vector_db.get_robot_locations()
 
     @rpc
     def find_robot_location(self, name: str) -> RobotLocation | None:
@@ -1149,7 +1209,7 @@ class SpatialMemory(Module):
             RobotLocation object if found, None otherwise
         """
         # Simple search through our list of locations
-        for location in self.robot_locations:
+        for location in self.get_robot_locations():
             if location.name.lower() == name.lower():
                 return location
 
@@ -1171,6 +1231,7 @@ class SpatialMemory(Module):
         try:
             self.vector_db.tag_location(robot_location)
         except Exception:
+            logger.exception("Failed to persist location tag", name=robot_location.name)
             return False
         return True
 
