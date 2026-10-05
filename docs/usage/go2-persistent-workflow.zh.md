@@ -620,19 +620,47 @@ Settings 只读显示固定掩码与是否配置，API 不返回密钥原文，�
 | 取消导航 | Stop navigation；不是硬件急停 |
 | 导航状态 | Navigation state；开始导航不代表到达 |
 | 配准采集 | 主界面选择 Restore，Settings 选择 manual → 遥控采集 → 停稳 → Finish startup capture |
-| 配准检查 | Alignment status 与中央 Rerun 的 alignment_scan/alignment_preview |
-| 配准确认/拒绝 | Confirm alignment / Reject alignment，均需要人工确认 |
+| 配准检查 | Alignment 面板显示阶段、候选编号、匹配指标和失败原因；View candidate 打开彩色叠加与朝向预览，Back to normal view 返回原视图 |
+| 配准确认/拒绝 | Confirm alignment / Reject alignment，均需要人工确认；没有候选时禁用，确认绑定当前候选编号 |
 | 取消原地旋转 | Cancel rotation |
 | 保存地图 | Save map，显示 RPC 返回值或明确错误 |
 | 暂停/继续永久地图融合 | Pause map fusion / Resume map fusion，需人工确认；不停止机器人、不冻结位姿 |
 | 查看地图融合状态 | Map fusion status 与 Map 区状态文字，显示原因及 accepted/skipped 帧数 |
-| 正常停止 | Stop / 保存并正常停止；不强制杀进程 |
+| 正常停止 | Save and stop 先取得地图保存结果，再正常停止；保存失败不会自动退出，不强制杀进程 |
 | 聊天 | 右侧输入框，Enter 发送、Shift+Enter 换行；显示回复、配对工具输入输出和实时工具进度 |
 | 日志 | 左侧 Operation log；Rerun 下方常驻 Backend console，显示后台输出、操作和工具进度，可清空显示 |
 | 全屏 | 页头 Full screen / Exit full screen；也可用 Esc 退出 |
 | 手动键盘控制 | 中央视图区下方 Enable keyboard，人工确认后按住 Space + W/S 前后、A/D 横移、Q/E 转向；Esc 停止并禁用 |
 | 自动标注开关 | Tagging 中 Automatic tagging；首次点击读取状态，再次点击暂停/恢复 Settings 中已配置的自动物品/房间标注，手动标注不受影响 |
 | 起点查询/返回 | Memory 中 Starting location 查询本次运行首个对齐后的 world 位姿；Navigation 中 Return to start 经确认后发起导航。Agent 可调用同名查询和返回工具 |
+
+#### Alignment 候选检查
+
+Restore 采集结束后，Alignment 面板会显示 `waiting`、`matching`、`candidate` 或
+`ready`，并显示扫描数、点数、匹配次数及失败原因。候选出现后点击 **View candidate**：
+蓝色是变换到本次会话坐标中的旧地图，橙色是扫描，绿色箭头是机器人当前前进方向。
+面板的位置与角度则是候选对应的**旧地图坐标**（+X 为 0°），不是预览中的会话坐标。
+没有机器人位姿时无法显示朝向，应等待位姿并人工检查后再确认。
+
+请同时检查墙面、拐角、机器人位置和实际朝向。Fitness、RMSE 只是匹配指标，
+不是正确率；对称走廊可能出现高分但朝向错误的候选。确认按钮绑定弹窗打开时的候选，
+候选发生变化时必须重新检查。拒绝后会用后续扫描重试；手动采集模式重试使用之前冻结的
+采集云，如果需要重新采集，应停止并重新 Restore。本次不修改匹配算法或阈值。
+
+#### Restore 后保存同一场景
+
+**Save and stop** 更新 Settings 配置的同一场景中的 `map.pc2.lcm`，
+不创建另一个地图文件，不清空标签，也不重设坐标。地图保留未观察的旧区域，
+并更新本次已配准且已融合的观察；UI 显示保存路径、accepted/skipped 扫描数和结果。
+保存成功后停止接收新地图帧，避免最后一次保存结果与退出写入不一致。
+
+尚未确认 Alignment、没有 accepted 扫描、PGO 同步失败或写文件失败时，
+界面显示明确错误并保留运行中的栈，不假装已经保存。尤其是 Fusion paused 时，
+Rerun 中的实时扫描变化不代表永久地图已增长：先查看融合状态与 accepted 数。
+不会自动开启融合或绕过配准。若不需要保存本次观察，可单独点击
+**Stop without saving** 并确认；这会保留最近一次已保存的文件（包括此前自动保存），
+不会回滚已有文件。关闭整个 Console 的原有清理行为不变；希望保留本次地图时请先执行
+Save and stop。上述停止操作均不是硬件急停。
 | Go2 回复播报 | Agent chat 顶部 Go2 speaker，默认 Off；确认后以 Go2 最大音量 10/10 播报后续最终回复，再点击可关闭并暂停播放 |
 
 未完成配准时，UI 禁用标记与导航入口；底层规划器仍保留原有对齐门控。

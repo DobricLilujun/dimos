@@ -426,6 +426,158 @@ def test_confirmed_map_preserves_unobserved_regions_and_updates_seen_columns(ses
     assert saved.frame_id == "world"
 
 
+@pytest.mark.parametrize("pgo_enabled", [False, True])
+def test_restore_final_save_stop_reload_keeps_old_and_new_points(
+    session, tmp_path, mocker, pgo_enabled
+):
+    path = tmp_path / "office.pc2.lcm"
+    save_premap(path)
+    tags = tmp_path / "tags.json"
+    tags.write_text('{"office": [4, 2, 0]}')
+    if pgo_enabled:
+        pgo = mocker.patch.object(persistent, "PGOMap").return_value
+        pgo.add.return_value = False
+        pgo.graph.return_value = PoseGraph()
+        pgo.global_map.return_value = cloud([[7, 0, 0]])
+    module = session(pgo_enabled=pgo_enabled)
+    module._relocalizer.relocalize.return_value = Transform.from_matrix(
+        np.eye(4), frame_id="world", child_frame_id="map"
+    )
+    module._match(cloud([[0, 0, 0]]))
+    module.confirm_alignment()
+    module._on_lidar(cloud([[7, 0, 0]]))
+
+    result = module.prepare_map_shutdown()
+    saved = path.read_bytes()
+    spy = mocker.spy(module, "save_map")
+    assert module.prepare_map_shutdown() == result
+    module._on_lidar(cloud([[8, 0, 0]]))
+    module._autosave()
+    module.stop()
+    reloaded = session()
+    points = reloaded._premap.points_f32()
+
+    assert result["state"] == "saved"
+    assert result["path"] == str(path)
+    assert result["accepted_frames"] == 1
+    spy.assert_not_called()
+    assert path.read_bytes() == saved
+    assert tags.read_text() == '{"office": [4, 2, 0]}'
+    assert any(np.allclose(point, [0, 0, 0], atol=0.1) for point in points)
+    assert any(np.allclose(point, [7, 0, 0], atol=0.1) for point in points)
+    assert not any(np.allclose(point, [8, 0, 0], atol=0.1) for point in points)
+    assert not module.navigation_ready()
+
+
+def test_final_save_failure_does_not_seal_ingestion_or_replace_old_map(session, tmp_path, mocker):
+    path = tmp_path / "office.pc2.lcm"
+    save_premap(path)
+    original = path.read_bytes()
+    module = session()
+    module._relocalizer.relocalize.return_value = Transform.from_matrix(
+        np.eye(4), frame_id="world", child_frame_id="map"
+    )
+    module._match(cloud([[0, 0, 0]]))
+    module.confirm_alignment()
+    module._on_lidar(cloud([[7, 0, 0]]))
+    replacement = mocker.patch.object(Path, "replace", side_effect=OSError("disk full"))
+    with pytest.raises(OSError, match="disk full"):
+        module.prepare_map_shutdown()
+    mocker.stop(replacement)
+    assert path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [path]
+    assert module.navigation_ready()
+    module._on_lidar(cloud([[8, 0, 0]]))
+    assert module._frames == 2
+
+
+def test_no_accepted_scans_explains_fusion_pause_and_explicit_stop_preserves_file(
+    session, tmp_path
+):
+    path = tmp_path / "office.pc2.lcm"
+    save_premap(path)
+    original = path.read_bytes()
+    module = session()
+    with pytest.raises(RuntimeError, match="alignment has not been approved"):
+        module.prepare_map_shutdown()
+    module._relocalizer.relocalize.return_value = Transform.from_matrix(
+        np.eye(4), frame_id="world", child_frame_id="map"
+    )
+    module._match(cloud([[0, 0, 0]]))
+    module.confirm_alignment()
+    module.pause_fusion()
+    module._on_lidar(cloud([[7, 0, 0]]))
+    with pytest.raises(RuntimeError, match="no accepted scans.*Skipped 1"):
+        module.prepare_map_shutdown()
+    assert module.prepare_map_shutdown(save=False)["state"] == "not_saved"
+    module.stop()
+    assert path.read_bytes() == original
+
+
+def test_explicit_stop_without_saving_does_not_autosave_new_frames(session, tmp_path):
+    path = tmp_path / "office.pc2.lcm"
+    save_premap(path)
+    original = path.read_bytes()
+    module = session()
+    module._relocalizer.relocalize.return_value = Transform.from_matrix(
+        np.eye(4), frame_id="world", child_frame_id="map"
+    )
+    module._match(cloud([[0, 0, 0]]))
+    module.confirm_alignment()
+    module._on_lidar(cloud([[7, 0, 0]]))
+    assert module.prepare_map_shutdown(save=False)["accepted_frames"] == 1
+    module._autosave()
+    module.stop()
+    assert path.read_bytes() == original
+
+
+def test_candidate_details_heading_and_stale_confirmation(session, tmp_path):
+    save_premap(tmp_path / "office.pc2.lcm")
+    module = session()
+    matrix = np.eye(4)
+    matrix[:3, :3] = Rotation.from_euler("z", 90, degrees=True).as_matrix()
+    matrix[:3, 3] = [10, 5, 0]
+    module._relocalizer.relocalize.return_value = Transform.from_matrix(
+        matrix, frame_id="world", child_frame_id="map"
+    )
+    module._relocalizer.last_fitness = 0.85
+    module._relocalizer.last_rmse = 0.12
+    module._on_odom(PoseStamped(frame_id="world", ts=12, position=[10, 6, 0]))
+    module._match(cloud([[10, 6, 0]]))
+    details = module.alignment_details()
+    assert details["phase"] == "candidate"
+    assert details["metrics"] == {"fitness": 0.85, "rmse_m": 0.12}
+    np.testing.assert_allclose(details["robot_in_saved_map"]["position_m"], [1, 0, 0], atol=1e-6)
+    assert details["robot_in_saved_map"]["yaw_deg"] == pytest.approx(-90)
+    heading = module.alignment_heading.publish.call_args.args[0].points_f32()
+    np.testing.assert_allclose(heading[0], [10, 6, 0])
+    np.testing.assert_allclose(heading[29], [11, 6, 0])
+    preview = module.alignment_preview.publish.call_args.args[0]
+    scan = module.alignment_scan.publish.call_args.args[0]
+    assert not np.allclose(preview.as_numpy()[1][0], scan.as_numpy()[1][0])
+    module.reject_alignment_candidate(details["candidate_id"])
+    module._match(cloud([[10, 6, 0]]))
+    with pytest.raises(RuntimeError, match="candidate changed"):
+        module.confirm_alignment_candidate(details["candidate_id"])
+    assert not module.navigation_ready()
+    module.confirm_alignment_candidate(module.alignment_details()["candidate_id"])
+    assert module.alignment_details()["phase"] == "ready"
+    assert module.alignment_details()["candidate_id"] is None
+    assert len(module.alignment_heading.publish.call_args.args[0]) == 0
+
+
+def test_alignment_failure_reason_is_visible_and_navigation_stays_blocked(session, tmp_path):
+    save_premap(tmp_path / "office.pc2.lcm")
+    module = session()
+    module._relocalizer.relocalize.side_effect = RuntimeError("ICP unavailable")
+    module._match(cloud([[0, 0, 0]]))
+    details = module.alignment_details()
+    assert details["reason"] == "ICP unavailable"
+    assert details["attempts"] == 1
+    assert details["candidate_id"] is None
+    assert not module.navigation_ready()
+
+
 def test_failed_atomic_save_preserves_existing_map(session, tmp_path, monkeypatch):
     module = session(create_new=True)
     module._on_lidar(cloud([[0, 0, 0]]))

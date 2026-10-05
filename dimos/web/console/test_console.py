@@ -148,8 +148,9 @@ async def test_camera_reports_unavailable_and_returns_fresh_jpeg(client, module,
     assert (await client.get("/api/camera.jpg")).text == "Camera stream is stale"
 
 
-async def test_console_3d_blueprint_is_available_without_changing_original_viewer(client):
-    response = await client.get("/api/view/3d.rbl")
+@pytest.mark.parametrize("view", ["3d", "alignment"])
+async def test_console_blueprint_is_available_without_changing_original_viewer(client, view):
+    response = await client.get(f"/api/view/{view}.rbl")
     assert response.status_code == 200
     assert response.content[:4] == b"RRF2"
     assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:9878"
@@ -400,11 +401,104 @@ async def test_action_rpc(monkeypatch: pytest.MonkeyPatch, module: RobotConsoleM
     transport = httpx.ASGITransport(app=module._build_app())
     async with httpx.AsyncClient(transport=transport, base_url=f"http://localhost:{PORT}") as c:
         r = await c.post(
-            "/api/action", json={"name": "confirm_alignment", "args": {}, "confirmed": True}
+            "/api/action",
+            json={
+                "name": "confirm_alignment",
+                "args": {},
+                "confirmed": True,
+                "candidate_id": "candidate-1",
+            },
         )
     assert r.status_code == 200
     assert r.json()["ok"] is True
-    assert calls and calls[0][0] == "PersistentGo2Map/confirm_alignment"
+    assert calls == [
+        ("PersistentGo2Map/confirm_alignment_candidate", {"candidate_id": "candidate-1"})
+    ]
+
+
+@pytest.mark.parametrize("key", ["confirm_alignment", "reject_alignment"])
+async def test_alignment_action_without_candidate_is_not_dispatched(client, module, mocker, key):
+    rpc = mocker.patch.object(module, "_call_rpc")
+    response = await client.post("/api/action", json={"name": key, "confirmed": True})
+    assert response.json() == {"ok": False, "error": "Inspect an alignment candidate first"}
+    rpc.assert_not_called()
+
+
+@pytest.mark.parametrize("state", ["saved", "not_saved", "failure"])
+async def test_console_stop_requires_save_acknowledgement(module, tmp_path, mocker, state):
+    runtime = ConsoleRuntime(tmp_path, tmp_path / "console.json")
+    module.runtime = runtime
+    child = mocker.Mock(pid=123456)
+    child.poll.return_value = None
+    mocker.patch.object(runtime, "_process", child)
+    stop = mocker.patch.object(runtime, "stop", return_value={"state": "stopped"})
+    details = {"state": state, "path": str(tmp_path / "map.pc2.lcm"), "accepted_frames": 2}
+    rpc = mocker.patch.object(
+        module,
+        "_call_rpc",
+        return_value={"ok": False, "error": "disk full"}
+        if state == "failure"
+        else {"ok": True, "result": details},
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=module._build_app()),
+        base_url=f"http://localhost:{PORT}",
+        headers={"x-console-token": module._csrf_token},
+    ) as c:
+        response = await c.post(
+            "/api/stack/stop",
+            json={"confirmed": True, "save": state != "not_saved", "confirm_without_save": True},
+        )
+    assert rpc.call_args.args[1] == {"save": state != "not_saved"}
+    if state == "failure":
+        assert response.json() == {"ok": False, "error": "disk full"}
+        stop.assert_not_called()
+    else:
+        assert response.json()["map_save"] == details
+        assert response.json()["state"] == "stopped"
+        stop.assert_called_once_with()
+
+
+async def test_console_retries_stop_timeout_without_repeating_final_save(module, tmp_path, mocker):
+    runtime = ConsoleRuntime(tmp_path, tmp_path / "console.json")
+    module.runtime = runtime
+    child = mocker.Mock(pid=123456)
+    child.poll.return_value = None
+    mocker.patch.object(runtime, "_process", child)
+    stop = mocker.patch.object(
+        runtime, "stop", side_effect=[ValueError("Graceful stop timed out"), {"state": "stopped"}]
+    )
+    rpc = mocker.patch.object(
+        module,
+        "_call_rpc",
+        return_value={"ok": True, "result": {"state": "saved", "accepted_frames": 2}},
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=module._build_app()),
+        base_url=f"http://localhost:{PORT}",
+        headers={"x-console-token": module._csrf_token},
+    ) as c:
+        first = await c.post("/api/stack/stop", json={"confirmed": True})
+        second = await c.post("/api/stack/stop", json={"confirmed": True})
+    assert first.json() == {"ok": False, "error": "Graceful stop timed out"}
+    assert second.json()["map_save"]["state"] == "saved"
+    assert rpc.call_count == 1
+    assert stop.call_count == 2
+
+
+async def test_stop_without_save_requires_separate_confirmation(module, tmp_path, mocker):
+    module.runtime = ConsoleRuntime(tmp_path, tmp_path / "console.json")
+    rpc = mocker.patch.object(module, "_call_rpc")
+    stop = mocker.patch.object(module.runtime, "stop")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=module._build_app()),
+        base_url=f"http://localhost:{PORT}",
+        headers={"x-console-token": module._csrf_token},
+    ) as c:
+        response = await c.post("/api/stack/stop", json={"confirmed": True, "save": False})
+    assert response.json() == {"ok": False, "error": "Confirm stopping without saving separately"}
+    rpc.assert_not_called()
+    stop.assert_not_called()
 
 
 async def test_action_mcp(monkeypatch: pytest.MonkeyPatch, module: RobotConsoleModule) -> None:
@@ -655,13 +749,15 @@ def test_status_probe_reports_fusion_state_and_explicit_rpc_failure(mocker):
         ("Ready:", unsubscribe),
         (True, unsubscribe),
         (status, unsubscribe),
+        ({"phase": "ready"}, unsubscribe),
     ]
     assert _status_probe(rpc, "PersistentGo2Map", {})["fusion_status"] == status
-    rpc.call_sync.assert_called_with("PersistentGo2Map/fusion_status", ([], {}), rpc_timeout=10.0)
+    rpc.call_sync.assert_any_call("PersistentGo2Map/fusion_status", ([], {}), rpc_timeout=10.0)
     rpc.call_sync.side_effect = [
         ("Ready:", unsubscribe),
         (True, unsubscribe),
         RuntimeError("offline"),
+        ({"phase": "ready"}, unsubscribe),
     ]
     assert _status_probe(rpc, "PersistentGo2Map", {})["fusion_status"] == "error: offline"
 

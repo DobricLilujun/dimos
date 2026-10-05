@@ -22,6 +22,7 @@ import tempfile
 from threading import Event, RLock, Thread, current_thread
 import time
 from typing import Any
+import uuid
 
 from dimos_lcm.std_msgs import Bool, String
 import numpy as np
@@ -101,6 +102,7 @@ class PersistentGo2Map(Module):
     global_map: Out[PointCloud2]
     alignment_preview: Out[PointCloud2]
     alignment_scan: Out[PointCloud2]
+    alignment_heading: Out[PointCloud2]
     pgo_stop: Out[Bool]
     _pgo_memory: PGOMemorySpec | None = None
     _pgo_navigation: PGONavigationSpec | None = None
@@ -113,6 +115,14 @@ class PersistentGo2Map(Module):
         self._relocalizer: LidarRelocalizer | None = None
         self._premap: PointCloud2 | None = None
         self._candidate: Transform | None = None
+        self._candidate_id: str | None = None
+        self._matching = False
+        self._match_attempts = 0
+        self._match_started: float | None = None
+        self._match_error: str | None = None
+        self._match_metrics: dict[str, float | None] = {"fitness": None, "rmse_m": None}
+        self._shutdown_prepared = False
+        self._shutdown_result: dict[str, Any] | None = None
         self._placement: Transform | None = None
         self._latest_odom: PoseStamped | None = None
         self._latest_tf: TFMessage | None = None
@@ -234,11 +244,13 @@ class PersistentGo2Map(Module):
             )
 
     def _on_match_error(self, error: Exception) -> None:
+        with self._lock:
+            self._match_error = f"Matching stream failed: {error}; restart capture to retry."
         logger.error("Persistent map matching stream failed", error=str(error))
 
     def _on_cmd_vel(self, command: Twist) -> None:
         with self._lock:
-            if self._stopping:
+            if self._stopping or self._shutdown_prepared:
                 return
             if self.config.auto_pause_fusion:
                 self._fusion_gate.on_command(command, time.monotonic())
@@ -362,6 +374,8 @@ class PersistentGo2Map(Module):
         with self._lock:
             if (
                 self._stopping
+                or self._shutdown_prepared
+                or self._matching
                 or self._placement is not None
                 or self._candidate is not None
                 or self._rotation_armed
@@ -371,25 +385,62 @@ class PersistentGo2Map(Module):
             ):
                 return
         if len(cloud) < self.config.min_local_points:
+            with self._lock:
+                self._match_error = (
+                    f"Not enough points: {len(cloud)} / {self.config.min_local_points}"
+                )
             logger.info(
                 "Waiting for enough lidar points to match the saved map", n_points=len(cloud)
             )
             return
         assert self._relocalizer is not None
+        with self._lock:
+            self._matching = True
+            self._match_attempts += 1
+            self._match_started = time.monotonic()
+            self._match_error = None
+            self._match_metrics = {"fitness": None, "rmse_m": None}
         try:
             candidate = self._relocalizer.relocalize(cloud.pointcloud, "world", "map")
-        except (RuntimeError, ValueError):
+        except (RuntimeError, ValueError) as exc:
+            with self._lock:
+                self._match_error = str(exc)
             logger.exception("Persistent map alignment failed")
             return
+        finally:
+            with self._lock:
+                self._matching = False
+        with self._lock:
+            for key, value in (
+                ("fitness", self._relocalizer.last_fitness),
+                ("rmse_m", self._relocalizer.last_rmse),
+            ):
+                self._match_metrics[key] = (
+                    float(value)
+                    if isinstance(value, (float, int)) and math.isfinite(value)
+                    else None
+                )
         if candidate is None:
+            with self._lock:
+                self._match_error = "No match above the fitness threshold; collecting/retrying."
             logger.info("No acceptable map alignment; retrying")
             return
         with self._lock:
-            if self._stopping or self._placement is not None or self._rotation_aborted:
+            if (
+                self._stopping
+                or self._shutdown_prepared
+                or self._placement is not None
+                or self._rotation_aborted
+            ):
                 return
             self._candidate = candidate
+            self._candidate_id = uuid.uuid4().hex
             assert self._premap is not None
-            self.alignment_preview.publish(self._premap.transform(candidate))
+            self.alignment_preview.publish(
+                self._colored_cloud(self._premap.transform(candidate), (0.2, 0.7, 1.0))
+            )
+            self.alignment_scan.publish(self._colored_cloud(cloud, (1.0, 0.55, 0.15)))
+            self._publish_alignment_heading()
         logger.warning(
             "Alignment candidate ready. Compare alignment_preview with alignment_scan "
             "in Rerun, then use confirm_alignment() or reject_alignment() in dimos shell."
@@ -407,7 +458,7 @@ class PersistentGo2Map(Module):
             logger.error("Persistent Go2 mapping requires world-frame lidar", frame=cloud.frame_id)
             return
         with self._lock:
-            if self._stopping:
+            if self._stopping or self._shutdown_prepared:
                 return
             if self._pgo_error is not None:
                 self.cmd_vel.publish(Twist())
@@ -432,7 +483,11 @@ class PersistentGo2Map(Module):
                     elif self._capture_cloud is not None:
                         self._scans.on_next(self._capture_cloud)
                     return
-                self.alignment_scan.publish(cloud)
+                self.alignment_scan.publish(
+                    self._colored_cloud(cloud, (1.0, 0.55, 0.15))
+                    if self._candidate is not None
+                    else cloud
+                )
                 self._scans.on_next(cloud)
                 return
             assert self._grid is not None
@@ -545,6 +600,8 @@ class PersistentGo2Map(Module):
                 logger.error("Invalid odometry; permanent map fusion paused")
                 return
             self._latest_odom = pose
+            if self._candidate is not None and self._placement is None:
+                self._publish_alignment_heading()
             self._last_odom_rx = time.monotonic()
             if self._placement is not None:
                 if pose.frame_id != "world":
@@ -635,7 +692,98 @@ class PersistentGo2Map(Module):
     def navigation_ready(self) -> bool:
         """Whether the map placement has been approved (or this is a new map)."""
         with self._lock:
-            return not self._stopping and self._placement is not None and self._pgo_error is None
+            return (
+                not self._stopping
+                and not self._shutdown_prepared
+                and self._placement is not None
+                and self._pgo_error is None
+            )
+
+    @staticmethod
+    def _colored_cloud(cloud: PointCloud2, color: tuple[float, float, float]) -> PointCloud2:
+        geometry = PointCloud2.from_numpy(cloud.points_f32()).pointcloud
+        geometry.paint_uniform_color(color)
+        return PointCloud2(geometry, frame_id="world", ts=time.time())
+
+    def _publish_alignment_heading(self) -> None:
+        if self._latest_odom is None:
+            return
+        pose = Transform.from_pose("base_link", self._latest_odom).to_matrix()
+        # A sampled arrow uses the same point-cloud transport as the two preview clouds.
+        lines = [
+            np.linspace([0, 0, 0], [1, 0, 0], 30),
+            np.linspace([1, 0, 0], [0.7, 0.2, 0], 10),
+            np.linspace([1, 0, 0], [0.7, -0.2, 0], 10),
+        ]
+        points = np.concatenate(lines) @ pose[:3, :3].T + pose[:3, 3]
+        self.alignment_heading.publish(
+            self._colored_cloud(PointCloud2.from_numpy(points), (0.3, 1.0, 0.5))
+        )
+
+    @rpc
+    def alignment_details(self) -> dict[str, Any]:
+        """Structured human inspection state; quality metrics do not prove a correct heading."""
+        with self._lock:
+            phase = (
+                "error"
+                if self._pgo_error or self._rotation_aborted
+                else "ready"
+                if self._placement is not None
+                else "candidate"
+                if self._candidate is not None
+                else "capturing"
+                if self._manual_capture_active
+                or self._rotation_armed
+                or self._rotation_started is not None
+                else "matching"
+                if self._matching
+                else "waiting"
+            )
+            robot = None
+            if self._candidate is not None and self._latest_odom is not None:
+                pose = (
+                    self._candidate.inverse() + Transform.from_pose("base_link", self._latest_odom)
+                ).to_matrix()
+                robot = {
+                    "position_m": pose[:3, 3].tolist(),
+                    "yaw_deg": math.degrees(math.atan2(pose[1, 0], pose[0, 0])),
+                }
+            return {
+                "phase": phase,
+                "candidate_id": self._candidate_id if self._placement is None else None,
+                "candidate_matrix": self._candidate.to_matrix().tolist()
+                if self._candidate is not None and self._placement is None
+                else None,
+                "robot_in_saved_map": robot,
+                "metrics": dict(self._match_metrics),
+                "attempts": self._match_attempts,
+                "elapsed_s": time.monotonic() - self._match_started
+                if self._matching and self._match_started is not None
+                else None,
+                "capture_scans": self._capture_frames,
+                "capture_points": len(self._capture_grid)
+                if self._capture_grid is not None
+                else len(self._capture_cloud)
+                if self._capture_cloud is not None
+                else 0,
+                "reason": self._pgo_error or self._match_error or self.alignment_status(),
+            }
+
+    @rpc
+    def confirm_alignment_candidate(self, candidate_id: str) -> str:
+        """Approve only the candidate the human inspected."""
+        with self._lock:
+            if self._candidate is None or candidate_id != self._candidate_id:
+                raise RuntimeError("Alignment candidate changed; inspect the current candidate")
+            return self.confirm_alignment()
+
+    @rpc
+    def reject_alignment_candidate(self, candidate_id: str) -> str:
+        """Reject only the candidate the human inspected."""
+        with self._lock:
+            if self._candidate is None or candidate_id != self._candidate_id:
+                raise RuntimeError("Alignment candidate changed; inspect the current candidate")
+            return self.reject_alignment()
 
     @rpc
     def alignment_status(self) -> str:
@@ -675,6 +823,7 @@ class PersistentGo2Map(Module):
             )
             self.alignment_preview.publish(empty)
             self.alignment_scan.publish(empty)
+            self.alignment_heading.publish(empty)
             self._placement = Transform.from_matrix(
                 self._candidate.inverse().to_matrix(),
                 frame_id="world",
@@ -699,6 +848,11 @@ class PersistentGo2Map(Module):
                 PointCloud2.from_numpy(np.empty((0, 3)), frame_id="world", timestamp=time.time())
             )
             self._candidate = None
+            self._candidate_id = None
+            self._match_error = "Candidate rejected; retrying with incoming scans."
+            self.alignment_heading.publish(
+                PointCloud2.from_numpy(np.empty((0, 3)), timestamp=time.time())
+            )
         logger.info("Human rejected map alignment; matching will retry")
         return "Rejected. Waiting for another candidate."
 
@@ -736,6 +890,8 @@ class PersistentGo2Map(Module):
 
     def _autosave(self) -> None:
         with self._lock:
+            if self._shutdown_prepared:
+                return
             if self._placement is None or self._frames == 0 or self._grid is None:
                 return
             if self._pgo_error is not None:
@@ -745,6 +901,42 @@ class PersistentGo2Map(Module):
                 self.save_map()
             except OSError:
                 logger.exception("Could not save persistent Go2 map")
+
+    @rpc
+    def prepare_map_shutdown(self, save: bool = True) -> dict[str, Any]:
+        """Seal ingestion after an acknowledged final save, or explicit stop without saving."""
+        with self._lock:
+            if self._shutdown_prepared:
+                assert self._shutdown_result is not None
+                if self._shutdown_result["state"] != ("saved" if save else "not_saved"):
+                    raise RuntimeError("Map shutdown already prepared with a different save choice")
+                return dict(self._shutdown_result)
+            self.cmd_vel.publish(Twist())
+            self.pgo_stop.publish(Bool(True))
+            if save:
+                if self._placement is None:
+                    raise RuntimeError("Map not saved: alignment has not been approved")
+                if self._frames == 0:
+                    raise RuntimeError(
+                        "Map not saved: no accepted scans in this session. "
+                        f"Skipped {self._fusion_skipped}; fusion: {self.fusion_status()['reason']}"
+                    )
+                self.save_map()
+            if self._rotation_armed or self._rotation_started is not None:
+                self._cancel_rotation("Map shutdown stopped startup rotation")
+            self._shutdown_prepared = True
+            result = {
+                "state": "saved" if save else "not_saved",
+                "path": str(Path(self.config.map_file or "").resolve()),
+                "accepted_frames": self._frames,
+                "skipped_frames": self._fusion_skipped,
+                "reason": "Final map saved; ingestion sealed."
+                if save
+                else "Human chose stop without saving; existing map retained.",
+            }
+            logger.info("Persistent map shutdown prepared", **result)
+            self._shutdown_result = result
+            return result
 
     @rpc
     def stop(self) -> None:

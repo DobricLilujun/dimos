@@ -728,6 +728,34 @@ class RobotConsoleModule(Module):
                     },
                 )
 
+        @app.get("/api/view/alignment.rbl")
+        def alignment_blueprint() -> Response:
+            blueprint = rrb.Blueprint(
+                rrb.Spatial3DView(
+                    origin="world",
+                    name="Alignment: blue saved map / orange scan / green heading",
+                    contents=[
+                        "world/alignment_preview",
+                        "world/alignment_scan",
+                        "world/alignment_heading",
+                    ],
+                ),
+                rrb.BlueprintPanel(state="hidden"),
+                rrb.SelectionPanel(state="hidden"),
+                rrb.TimePanel(state="hidden"),
+                collapse_panels=True,
+            )
+            with tempfile.TemporaryDirectory(prefix="dimos-console-alignment-") as directory:
+                path = Path(directory) / "alignment.rbl"
+                blueprint.save("dimos", path)
+                return Response(
+                    path.read_bytes(),
+                    media_type="application/octet-stream",
+                    headers={
+                        "Access-Control-Allow-Origin": f"http://127.0.0.1:{self.config.rerun_web_port}"
+                    },
+                )
+
         @app.websocket("/api/teleop")
         async def teleop(socket: WebSocket) -> None:
             if (
@@ -973,6 +1001,14 @@ class RobotConsoleModule(Module):
                 return {"ok": False, "error": "Robot stack is not ready"}
             if OPERATIONS[key].human_only and payload.get("confirmed") is not True:
                 return {"ok": False, "error": "Human confirmation is required"}
+            if key in {"confirm_alignment", "reject_alignment"}:
+                candidate_id = payload.get("candidate_id")
+                if not isinstance(candidate_id, str) or not candidate_id:
+                    return {"ok": False, "error": "Inspect an alignment candidate first"}
+                return await self._call_rpc(
+                    Operation(key, "", "rpc", "", method=f"{key}_candidate"),
+                    {"candidate_id": candidate_id},
+                )
             return await self._dispatch(key, args)
 
         @app.post("/api/chat")
@@ -997,7 +1033,13 @@ class RobotConsoleModule(Module):
             return await self._refresh_status()
 
         if self.runtime is not None:
-            register_runtime_routes(app, self.runtime)
+
+            async def prepare_shutdown(save: bool) -> dict[str, Any]:
+                return await self._call_rpc(
+                    Operation("prepare_map_shutdown", "", "rpc", ""), {"save": save}
+                )
+
+            register_runtime_routes(app, self.runtime, prepare_shutdown)
 
         @app.get("/api/diagnostics")
         async def api_diagnostics() -> dict[str, Any]:
@@ -1140,6 +1182,7 @@ class RobotConsoleModule(Module):
                         agent_idle=None,
                         navigation_ready=None,
                         alignment_status=None,
+                        alignment_details=None,
                         fusion_status=None,
                         exploration_status=None,
                     )
@@ -1172,7 +1215,12 @@ def _status_probe(rpc: Any, map_module: str, base: dict[str, Any]) -> dict[str, 
     status: dict[str, Any] = dict(base)
     status["timestamp"] = time.time()
     try:
-        for method in ("alignment_status", "navigation_ready", "fusion_status"):
+        for method in (
+            "alignment_status",
+            "navigation_ready",
+            "fusion_status",
+            "alignment_details",
+        ):
             address = f"{map_module}/{method}"
             try:
                 result, unsub = rpc.call_sync(address, ([], {}), rpc_timeout=10.0)

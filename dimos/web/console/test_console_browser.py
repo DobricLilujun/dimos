@@ -50,6 +50,18 @@ def console_server(tmp_path, mocker):
     live_speed = {"enabled": True, "speed_mps": 0.55}
 
     async def rpc(op, args):
+        if op.key == "prepare_map_shutdown":
+            calls.append((op.key, args))
+            return {
+                "ok": True,
+                "result": {
+                    "state": "saved" if args["save"] else "not_saved",
+                    "path": str(tmp_path / "map.pc2.lcm"),
+                    "accepted_frames": 2,
+                    "skipped_frames": 0,
+                    "reason": "Final map saved.",
+                },
+            }
         if op.key == "navigation_speed_status":
             return {"ok": True, "result": dict(live_speed)}
         if op.key == "set_navigation_speed":
@@ -269,6 +281,13 @@ def test_settings_save_all_workflow_parameters_without_exposing_keys(page, conso
 
 
 def test_alignment_still_requires_explicit_confirmation(page, console_server):
+    console_server[1]._status["alignment_details"] = {
+        "phase": "candidate",
+        "candidate_id": "candidate-1",
+        "attempts": 1,
+        "metrics": {"fitness": 0.85, "rmse_m": 0.12},
+        "robot_in_saved_map": {"position_m": [1, 2, 0], "yaw_deg": 90},
+    }
     start_stack(page)
     button = page.locator('[data-operation="confirm_alignment"]')
     button.click()
@@ -278,7 +297,81 @@ def test_alignment_still_requires_explicit_confirmation(page, console_server):
     with page.expect_response("**/api/action") as response:
         page.locator("#operation-form button[type=submit]").click()
     assert response.value.json()["ok"] is True
-    assert console_server[3] == [("confirm_alignment", {})]
+    assert console_server[3] == [("confirm_alignment", {"candidate_id": "candidate-1"})]
+
+
+def test_alignment_candidate_panel_and_focus_preserve_normal_view(page, console_server):
+    module = console_server[1]
+    module._status["alignment_details"] = {
+        "phase": "candidate",
+        "candidate_id": "candidate-1",
+        "attempts": 1,
+        "reason": "Inspect position and heading",
+        "metrics": {"fitness": 0.85, "rmse_m": 0.12},
+        "robot_in_saved_map": {"position_m": [1, 2, 0], "yaw_deg": 90},
+    }
+    start_stack(page)
+    page.locator("#alignment-phase").get_by_text("candidate", exact=True).wait_for()
+    assert "Fitness 0.850" in page.locator("#alignment-quality").inner_text()
+    assert "Heading 90.0°" in page.locator("#alignment-heading").inner_text()
+    normal = page.locator("#rr").get_attribute("src")
+    page.locator("#alignment-view").click()
+    assert "alignment.rbl" in page.locator("#rr").get_attribute("src")
+    assert "proxy" in page.locator("#rr").get_attribute("src")
+    page.locator("#alignment-world-view").click()
+    assert page.locator("#rr").get_attribute("src") == normal
+    module._emit(
+        {
+            "type": "status",
+            "alignment_details": {
+                "phase": "waiting",
+                "candidate_id": None,
+                "reason": "No acceptable match",
+            },
+        }
+    )
+    page.locator("#alignment-phase").get_by_text("waiting", exact=True).wait_for()
+    assert page.locator('[data-operation="confirm_alignment"]').is_disabled()
+    assert page.locator('[data-operation="reject_alignment"]').is_disabled()
+    assert page.locator("#alignment-view").is_disabled()
+    assert page.locator("#alignment-heading").inner_text() == ""
+
+
+def test_alignment_without_candidate_disables_confirmation(page, console_server):
+    start_stack(page)
+    assert page.locator('[data-operation="confirm_alignment"]').is_disabled()
+    assert page.locator('[data-operation="reject_alignment"]').is_disabled()
+    assert page.locator("#alignment-view").is_disabled()
+
+
+def test_save_failure_keeps_stack_running_and_explicit_stop_without_save_works(
+    page, console_server, mocker
+):
+    module, runtime = console_server[1:3]
+    rpc = module._call_rpc.side_effect
+
+    async def fail_save(op, args):
+        if op.key == "prepare_map_shutdown" and args["save"]:
+            return {"ok": False, "error": "Map not saved: no accepted scans"}
+        return await rpc(op, args)
+
+    mocker.patch.object(module, "_call_rpc", side_effect=fail_save)
+    start_stack(page)
+    page.locator("#stack-stop").click()
+    page.locator("#operation-form button[type=submit]").click()
+    page.locator("#map-save-detail").get_by_text(
+        "Save/stop failed: Map not saved: no accepted scans", exact=True
+    ).wait_for()
+    runtime.stop.assert_not_called()
+    assert page.locator("#b-stack").inner_text() == "running"
+    page.locator("#stack-stop-without-save").click()
+    page.locator("#operation-cancel").click()
+    runtime.stop.assert_not_called()
+    page.locator("#stack-stop-without-save").click()
+    page.locator("#operation-form button[type=submit]").click()
+    page.locator("#b-stack").get_by_text("stopped", exact=True).wait_for()
+    assert "not_saved:" in page.locator("#map-save-detail").inner_text()
+    runtime.stop.assert_called_once_with()
 
 
 def test_fusion_controls_require_confirmation_and_show_pause_reason(page, console_server):
@@ -730,6 +823,8 @@ def test_stop_keeps_console_open_and_disables_robot_controls(page, console_serve
     page.locator("#b-stack").get_by_text("stopped", exact=True).wait_for()
 
     assert console_server[2].stop.call_count == 1
+    assert "saved:" in page.locator("#map-save-detail").inner_text()
+    assert "Accepted 2" in page.locator("#map-save-detail").inner_text()
     assert page.locator("#settings-open").is_enabled()
     assert page.locator("#stack-start").is_enabled()
     assert page.locator("#input").is_disabled()

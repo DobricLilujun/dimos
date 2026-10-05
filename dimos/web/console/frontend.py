@@ -304,10 +304,20 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
         </label>
         <button class="btn primary" id="stack-start" data-help="Choose New map for the first run and Restore when reconnecting. Restore starts directly; rotation capture may rotate the robot automatically. Automatic tagging may call your model service. Supervise and keep the area clear.">Start robot stack</button>
         <button class="btn human" id="stack-stop" data-help="Save and stop only the robot stack launched by this console. This is not a hardware emergency stop.">Save and stop</button>
+        <button class="btn human" id="stack-stop-without-save" data-help="Explicitly stop without a final map save. Any earlier autosaved file is retained. Use only after inspecting the save error.">Stop without saving</button>
+        <div id="map-save-detail" role="status"></div>
       </div>
       <h2>Control deck</h2>
       <div id="deck-groups"></div>
-      <div id="alignment-detail" role="status"></div>
+      <div class="group" id="alignment-panel">
+        <h2>Alignment <span class="badge" id="alignment-phase">unknown</span></h2>
+        <div id="alignment-detail" role="status"></div>
+        <div id="alignment-quality"></div>
+        <div id="alignment-heading"></div>
+        <small>Blue: saved map · Orange: scan · Green: robot forward. Check position AND heading; fitness is not certainty.</small>
+        <button class="btn" id="alignment-view" disabled>View candidate</button>
+        <button class="btn" id="alignment-world-view">Back to normal view</button>
+      </div>
       <div class="inventory" id="inventory"></div>
       <div class="group">
         <button class="btn" id="diagnostics" data-help="Inspect available MCP tools and modules without moving the robot.">MCP tools and modules</button>
@@ -486,6 +496,14 @@ function setupRerun(url) {
   const link = $("#rr-link"); if (link) link.href = url;
   $("#viz-refresh").onclick = () => setupRerun(url);
 }
+function showAlignmentView() {
+  const url=new URL(CONFIG.rerun_url);
+  const sources=url.searchParams.getAll("url").filter(source=>!source.endsWith(".rbl"));
+  url.searchParams.delete("url");
+  for(const source of sources)url.searchParams.append("url",source);
+  url.searchParams.append("url",new URL("/api/view/alignment.rbl",location.href).href);
+  setupRerun(url.href);
+}
 
 // ---------- operations / control deck ----------
 function buildDeck() {
@@ -603,6 +621,10 @@ function requestOperation(op, preset = {}) {
   });
 }
 async function runOp(op, btn, preset = {}) {
+  const candidateId=["confirm_alignment","reject_alignment"].includes(op.key)?state.candidateId:null;
+  if(["confirm_alignment","reject_alignment"].includes(op.key) && !candidateId){
+    addSystem("No current alignment candidate. Wait for matching, then inspect the preview.");return;
+  }
   let args = preset;
   const fields = (op.schema && op.schema.properties) || {};
   if (op.human_only || Object.keys(fields).length) {
@@ -614,7 +636,7 @@ async function runOp(op, btn, preset = {}) {
   try {
     const card = addTool(makeToolCard(op.key, pretty(args), null, "call"));
     try {
-      const res = await api("/api/action", {name:op.key,args,confirmed:op.human_only});
+      const res = await api("/api/action", {name:op.key,args,confirmed:op.human_only,...(candidateId?{candidate_id:candidateId}:{})});
       card.querySelector(".out pre").textContent = typeof res.result === "string" ? res.result : pretty(res.result);
       card.querySelector(".st").textContent = "result";
       log("ok", op.key, "done");
@@ -752,6 +774,22 @@ function applyStatus(s) {
     setBadge("b-align", aligned ? "ok" : "warn", aligned ? "aligned" : "aligning");
     $("#alignment-detail").textContent=st;
   } else {setBadge("b-align","","alignment unknown");$("#alignment-detail").textContent="";setBadge("b-nav","","nav unknown");}
+  const alignment=s.alignment_details;
+  state.candidateId=alignment && alignment.phase==="candidate"?alignment.candidate_id:null;
+  $("#alignment-phase").textContent=alignment && typeof alignment==="object"?alignment.phase:"unknown";
+  $("#alignment-quality").textContent="";
+  $("#alignment-heading").textContent="";
+  if(alignment && typeof alignment==="object"){
+    $("#alignment-detail").textContent=alignment.reason || "";
+    const metrics=alignment.metrics || {};
+    $("#alignment-quality").textContent=`Candidate: ${state.candidateId?state.candidateId.slice(0,8):"none"} · Attempts ${alignment.attempts || 0} · Scans ${alignment.capture_scans || 0} · Points ${alignment.capture_points || 0}`+
+      (Number.isFinite(metrics.fitness)?` · Fitness ${metrics.fitness.toFixed(3)}`:"")+
+      (Number.isFinite(metrics.rmse_m)?` · RMSE ${metrics.rmse_m.toFixed(3)} m`:"")+
+      (Number.isFinite(alignment.elapsed_s)?` · Matching ${alignment.elapsed_s.toFixed(0)} s`:"");
+    const pose=alignment.robot_in_saved_map;
+    $("#alignment-heading").textContent=pose?`Saved-map robot position: ${pose.position_m.map(x=>x.toFixed(2)).join(", ")} m · Heading ${pose.yaw_deg.toFixed(1)}° (+X = 0°)`:
+      state.candidateId?"Robot pose unavailable; do not approve until heading can be checked.":"";
+  }else if(typeof alignment==="string")$("#alignment-detail").textContent=alignment;
   const fusion=s.fusion_status;
   if($("#fusion-detail")) {
     $("#fusion-detail").textContent=fusion && typeof fusion==="object"
@@ -786,10 +824,13 @@ function updateControls() {
   $("#stack-start").disabled=stackBusy;
   $("#stack-map-mode").disabled=stackBusy;
   if(state.lifecycleBusy)$("#stack-stop").disabled=true;
+  $("#stack-stop-without-save").disabled=state.lifecycleBusy || !["running","starting","stopping"].includes(state.stack);
   const ready = !CONFIG.standalone || state.stack==="running";
   for (const btn of document.querySelectorAll("[data-operation]")) {
     btn.disabled=!ready || (["tag_object","tag_location","navigate_near_memory_tag","navigate_to_memory_tag","return_to_starting_location","begin_demo_exploration"].includes(btn.dataset.operation) && !state.nav);
+    if(["confirm_alignment","reject_alignment"].includes(btn.dataset.operation))btn.disabled=!ready || !state.candidateId;
   }
+  $("#alignment-view").disabled=!ready || !state.candidateId;
   if($("#tagging-toggle"))$("#tagging-toggle").disabled=!ready;
   $("#speaker-toggle").disabled=!ready || !CONFIG.standalone;
   $("#navigation-distance").disabled=!ready;
@@ -944,6 +985,9 @@ async function boot() {
   $("#settings-form").onsubmit = saveSettings;
   $("#stack-start").onclick = () => lifecycle("start");
   $("#stack-stop").onclick = () => lifecycle("stop");
+  $("#stack-stop-without-save").onclick = () => lifecycle("stop",false);
+  $("#alignment-view").onclick=showAlignmentView;
+  $("#alignment-world-view").onclick=()=>setupRerun(CONFIG.rerun_url);
   $("#diagnostics").onclick = async () => {try{$("#diagnostic-output").textContent=pretty(await api("/api/diagnostics"));}catch(e){addSystem(e.message);}};
   $("#input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
@@ -1061,7 +1105,7 @@ async function saveSettings(e) {
   }catch(err){$("#settings-error").textContent=err.message;}
   finally{$("#settings-save").disabled=false;}
 }
-async function lifecycle(action) {
+async function lifecycle(action,save=true) {
   if(state.lifecycleBusy)return;
   state.lifecycleBusy=true;updateControls();
   let overwriteToken;
@@ -1080,12 +1124,17 @@ async function lifecycle(action) {
         if(!useExistingMap)overwriteToken=plan.overwrite_token;
       }
   } else {
-    const approved=await requestOperation({label:"Stop robot stack",human_only:true,description:"Stops only the stack launched by this console. Graceful shutdown saves the map when permitted."});
+    const approved=await requestOperation({label:save?"Save and stop robot stack":"Stop WITHOUT saving",human_only:true,description:save?"Save the updated scene map first, then stop this console's stack. If saving fails, the stack stays running and the error is shown.":"Stop this console's stack without a final map write. New unsaved observations will be discarded; earlier autosaves are retained. This is not an emergency stop."});
     if(approved===null)return;
   }
-  const result=await api("/api/stack/"+action,{confirmed:true,overwrite_token:overwriteToken,...(useExistingMap?{use_existing_map:true}:{})});applyStack(result);await refreshStatus();
+  const result=await api("/api/stack/"+action,{confirmed:true,overwrite_token:overwriteToken,...(useExistingMap?{use_existing_map:true}:{}),...(action==="stop"?{save,confirm_without_save:!save}:{})});
+  if(result.map_save){
+    $("#map-save-detail").textContent=`${result.map_save.state}: ${result.map_save.path}. Accepted ${result.map_save.accepted_frames}, skipped ${result.map_save.skipped_frames}. ${result.map_save.reason}`;
+    addSystem($("#map-save-detail").textContent);
   }
-  catch(e){addSystem(e.message);}
+  applyStack(result);await refreshStatus();
+  }
+  catch(e){if(action==="stop")$("#map-save-detail").textContent="Save/stop failed: "+e.message;addSystem(e.message);}
   finally{state.lifecycleBusy=false;await refreshStatus();updateControls();}
 }
 function appendStackLog(text) {

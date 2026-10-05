@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 import ipaddress
 import math
 import os
@@ -531,7 +531,14 @@ class ConsoleRuntime:
         logger.info("Console robot stack stopped")
 
 
-def register_runtime_routes(app: FastAPI, runtime: ConsoleRuntime) -> None:
+def register_runtime_routes(
+    app: FastAPI,
+    runtime: ConsoleRuntime,
+    prepare_shutdown: Callable[[bool], Awaitable[dict[str, Any]]] | None = None,
+) -> None:
+    lifecycle_lock = asyncio.Lock()
+    shutdown_result: dict[str, Any] | None = None
+
     @app.get("/api/settings")
     def get_settings() -> dict[str, Any]:
         return runtime.public_settings()
@@ -573,10 +580,18 @@ def register_runtime_routes(app: FastAPI, runtime: ConsoleRuntime) -> None:
 
     @app.post("/api/stack/{action}")
     async def stack_action(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        nonlocal shutdown_result
         if action not in {"start", "stop"}:
             return {"ok": False, "error": "Unknown lifecycle action"}
         if payload.get("confirmed") is not True:
             return {"ok": False, "error": "Human confirmation is required"}
+        save = payload.get("save", True)
+        if type(save) is not bool:
+            return {"ok": False, "error": "save must be a boolean"}
+        if not save and payload.get("confirm_without_save") is not True:
+            return {"ok": False, "error": "Confirm stopping without saving separately"}
+        if lifecycle_lock.locked():
+            return {"ok": False, "error": "A stack lifecycle operation is already running"}
         try:
             token = payload.get("overwrite_token")
             if token is not None and not isinstance(token, str):
@@ -584,18 +599,34 @@ def register_runtime_routes(app: FastAPI, runtime: ConsoleRuntime) -> None:
             use_existing_map = payload.get("use_existing_map", False)
             if type(use_existing_map) is not bool:
                 return {"ok": False, "error": "use_existing_map must be a boolean"}
-            result = (
-                await asyncio.to_thread(runtime.start, token, use_existing_map=True)
-                if action == "start" and use_existing_map
-                else await asyncio.to_thread(runtime.start, token)
-                if action == "start"
-                else await asyncio.to_thread(runtime.stop)
-            )
+            async with lifecycle_lock:
+                if action == "start":
+                    result = (
+                        await asyncio.to_thread(runtime.start, token, use_existing_map=True)
+                        if use_existing_map
+                        else await asyncio.to_thread(runtime.start, token)
+                    )
+                    shutdown_result = None
+                else:
+                    if prepare_shutdown is not None and runtime.status().get("pid"):
+                        if shutdown_result is None:
+                            acknowledgement = await prepare_shutdown(save)
+                            if not acknowledgement.get("ok"):
+                                return acknowledgement
+                            details = acknowledgement.get("result")
+                            if not isinstance(details, dict) or details.get("state") != (
+                                "saved" if save else "not_saved"
+                            ):
+                                return {"ok": False, "error": "Invalid map save acknowledgement"}
+                            shutdown_result = details
+                    result = await asyncio.to_thread(runtime.stop)
+                    if shutdown_result is not None:
+                        result["map_save"] = shutdown_result
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
         except OSError:
             return {
                 "ok": False,
-                "error": "Could not launch the stack; check Python and project directory",
+                "error": "Stack lifecycle failed; check the stack logs and project directory",
             }
         return {"ok": True, **result}
