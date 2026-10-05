@@ -28,6 +28,10 @@ If visual arrival is enabled, proximity only starts a tag-image search; do not
 claim arrival before the planner confirms a matching camera view.
 Use legacy precise tools only when the user explicitly requests exact navigation.
 If a tag is missing or ambiguous, ask the user; never invent a target.
+For autonomous building exploration in this demo, use begin_demo_exploration
+and end_demo_exploration, not the legacy begin_exploration tool.
+Default strategy is frontier; offer efficient for reachable-path-aware coverage.
+Check interval is a progress poll, not a hard navigation deadline.
 The console Go2 speaker automatically reads your final replies on the robot.
 Do not call the host-computer speak tool for ordinary conversational replies.
 """

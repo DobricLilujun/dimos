@@ -44,6 +44,7 @@ from dimos.web.console.module import (
     RobotConsoleModule,
     _content_to_text,
     _normalize_message,
+    _status_probe,
     serialize_message,
 )
 from dimos.web.console.settings import ConsoleRuntime
@@ -114,6 +115,9 @@ async def test_index_and_config(client: httpx.AsyncClient) -> None:
         "confirm_alignment",
         "reject_alignment",
         "save_map",
+        "pause_fusion",
+        "resume_fusion",
+        "fusion_status",
         "finish_startup_capture",
         "cancel_startup_rotation",
         "alignment_status",
@@ -317,6 +321,27 @@ async def test_navigation_distance_api_passes_valid_radius_and_rejects_invalid_v
         result = await client.post("/api/navigation-distance", json={"distance_m": distance})
         assert result.json()["ok"] is False
     assert call.call_count == 1
+
+
+async def test_navigation_speed_api_passes_live_limit_and_rejects_invalid_values(
+    client, module, mocker
+):
+    call = mocker.patch.object(
+        module,
+        "_call_rpc",
+        return_value={"ok": True, "result": {"enabled": True, "speed_mps": 0.25}},
+    )
+    response = await client.get("/api/navigation-speed")
+    assert response.json()["result"]["speed_mps"] == 0.25
+    assert call.call_args.args[0].method == "navigation_speed_status"
+    response = await client.post("/api/navigation-speed", json={"speed_mps": 0.25})
+    assert response.json()["ok"] is True
+    assert call.call_args.args[0].method == "set_navigation_speed"
+    assert call.call_args.args[1] == {"speed_mps": 0.25}
+    for value in (True, "0.25", 0.09, 0.56, None):
+        response = await client.post("/api/navigation-speed", json={"speed_mps": value})
+        assert response.json()["ok"] is False
+    assert call.call_count == 2
 
 
 async def test_visual_search_api_requires_rotation_consent_and_passes_switch(
@@ -544,6 +569,32 @@ async def test_human_operations_require_confirmation(client, module, mocker, key
 
 
 @pytest.mark.parametrize(
+    "field,value",
+    [
+        ("strategy", "invalid"),
+        ("min_goals", True),
+        ("min_goals", 2.5),
+        ("gain_percent", -1),
+        ("check_interval", 0),
+        ("no_gain_attempts", 0),
+    ],
+)
+async def test_demo_exploration_rejects_invalid_arguments_before_mcp(module, mocker, field, value):
+    call = mocker.patch.object(module, "_call_mcp", new_callable=mocker.AsyncMock)
+    args = {
+        "strategy": "frontier",
+        "min_goals": 10,
+        "gain_percent": 1,
+        "no_gain_attempts": 2,
+        "check_interval": 3,
+    }
+    args[field] = value
+    result = await module._dispatch("begin_demo_exploration", args)
+    assert result == {"ok": False, "error": f"Invalid {field}"}
+    call.assert_not_called()
+
+
+@pytest.mark.parametrize(
     "args", [{"tag": "office"}, {}, {"object_name": ""}, {"object_name": 12}, []]
 )
 async def test_invalid_arguments_never_reach_mcp(client, module, mocker, args):
@@ -594,6 +645,43 @@ async def test_status_refresh_is_cached_without_overwriting_live_idle(module, mo
     assert status["navigation_ready"] is True
     assert module._status["navigation_ready"] is True
     assert module._status["agent_idle"] is True
+
+
+def test_status_probe_reports_fusion_state_and_explicit_rpc_failure(mocker):
+    rpc = mocker.Mock()
+    status = {"fusion_enabled": False, "reason": "Manual pause", "accepted_frames": 12}
+    unsubscribe = mocker.Mock()
+    rpc.call_sync.side_effect = [
+        ("Ready:", unsubscribe),
+        (True, unsubscribe),
+        (status, unsubscribe),
+    ]
+    assert _status_probe(rpc, "PersistentGo2Map", {})["fusion_status"] == status
+    rpc.call_sync.assert_called_with("PersistentGo2Map/fusion_status", ([], {}), rpc_timeout=10.0)
+    rpc.call_sync.side_effect = [
+        ("Ready:", unsubscribe),
+        (True, unsubscribe),
+        RuntimeError("offline"),
+    ]
+    assert _status_probe(rpc, "PersistentGo2Map", {})["fusion_status"] == "error: offline"
+
+
+@pytest.mark.parametrize("key", ["pause_fusion", "resume_fusion"])
+async def test_confirmed_fusion_controls_use_map_rpc_not_mcp(client, module, mocker, key):
+    rpc = mocker.patch.object(
+        module,
+        "_call_rpc",
+        new_callable=mocker.AsyncMock,
+        return_value={"ok": True, "result": "done"},
+    )
+    mcp = mocker.patch.object(module, "_call_mcp", new_callable=mocker.AsyncMock)
+    mocker.patch.object(module, "_refresh_status", new_callable=mocker.AsyncMock)
+    result = (
+        await client.post("/api/action", json={"name": key, "args": {}, "confirmed": True})
+    ).json()
+    assert result == {"ok": True, "result": "done"}
+    rpc.assert_called_once_with(OPERATIONS[key], {})
+    mcp.assert_not_called()
 
 
 def test_message_serialization_preserves_tool_call_ids_and_args():

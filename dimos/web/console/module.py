@@ -140,6 +140,50 @@ class Operation:
 
 # Order matters: it is the control-deck layout.
 OPERATIONS: dict[str, Operation] = {
+    "begin_demo_exploration": Operation(
+        "begin_demo_exploration",
+        "Explore building",
+        "mcp",
+        "Exploration",
+        human_only=True,
+        schema={
+            "type": "object",
+            "properties": {
+                "strategy": {
+                    "type": "string",
+                    "enum": ["frontier", "efficient"],
+                    "default": "frontier",
+                },
+                "min_goals": {"type": "integer", "default": 10, "minimum": 0, "maximum": 1000},
+                "gain_percent": {"type": "number", "default": 1, "minimum": 0, "maximum": 100},
+                "no_gain_attempts": {"type": "integer", "default": 2, "minimum": 1, "maximum": 100},
+                "check_interval": {"type": "number", "default": 3, "minimum": 0.1, "maximum": 60},
+            },
+            "required": [
+                "strategy",
+                "min_goals",
+                "gain_percent",
+                "no_gain_attempts",
+                "check_interval",
+            ],
+        },
+        description="Autonomous movement: supervise and keep the area clear. frontier uses classic scoring; efficient uses information per reachable path metre. min_goals counts successful arrivals before low-gain checks (not a trip limit). gain_percent is percent, e.g. 1 = 1%. check_interval polls progress; navigation failures retry immediately, not after a fixed target timeout.",
+    ),
+    "end_demo_exploration": Operation(
+        "end_demo_exploration",
+        "Stop exploration",
+        "mcp",
+        "Exploration",
+        description="Stop exploration and cancel its navigation goal.",
+    ),
+    "exploration_status": Operation(
+        "exploration_status",
+        "Exploration status",
+        "rpc",
+        "Exploration",
+        module="DemoExplorer",
+        description="Current exploration phase, stop reason and successful goal count.",
+    ),
     "query_starting_location": Operation(
         "query_starting_location",
         "Starting location",
@@ -188,6 +232,29 @@ OPERATIONS: dict[str, Operation] = {
         description="Human-only: discard the current alignment candidate.",
     ),
     # ---- Map capture ----
+    "fusion_status": Operation(
+        "fusion_status",
+        "Map fusion status",
+        "rpc",
+        "Map",
+        description="Permanent map updates only; live pose drift is not corrected.",
+    ),
+    "pause_fusion": Operation(
+        "pause_fusion",
+        "Pause map fusion",
+        "rpc",
+        "Map",
+        human_only=True,
+        description="Stop permanent map updates. Does not save or stop robot motion.",
+    ),
+    "resume_fusion": Operation(
+        "resume_fusion",
+        "Resume map fusion",
+        "rpc",
+        "Map",
+        human_only=True,
+        description="Release manual pause; automatic stationary gating still applies.",
+    ),
     "save_map": Operation(
         "save_map",
         "Save map",
@@ -342,6 +409,7 @@ class RobotConsoleModule(Module):
         self._camera_transport: PubSubTransport[Any] | None = None
         self._puppy_transport: PubSubTransport[Any] | None = None
         self._navigation_transport: PubSubTransport[Any] | None = None
+        self._exploration_transport: PubSubTransport[Any] | None = None
         self._arrival_sequence = 0
         self._camera_jpeg: bytes | None = None
         self._camera_timestamp = 0.0
@@ -420,6 +488,9 @@ class RobotConsoleModule(Module):
             self._navigation_transport = make_transport("/navigation_state", String)
             self._navigation_transport.start()
             self._navigation_transport.subscribe(self._on_navigation_state)
+            self._exploration_transport = make_transport("/exploration_state", String)
+            self._exploration_transport.start()
+            self._exploration_transport.subscribe(self._on_exploration_state)
         except Exception:
             logger.exception("console: failed to set up agent streams")
             self._teardown_agent_streams()
@@ -436,6 +507,7 @@ class RobotConsoleModule(Module):
             self._camera_transport,
             self._puppy_transport,
             self._navigation_transport,
+            self._exploration_transport,
         ):
             if transport is None:
                 continue
@@ -469,6 +541,11 @@ class RobotConsoleModule(Module):
             )
         else:
             self._emit({"type": "tool", "name": "Puppy", "text": str(event.get("content", ""))})
+
+    def _on_exploration_state(self, state: String) -> None:
+        self._status["exploration_status"] = state.data
+        self._emit({"type": "status", **self._status})
+        self._emit({"type": "tool", "name": "Exploration", "text": state.data})
 
     def _on_navigation_state(self, state: String) -> None:
         self._emit({"type": "tool", "name": "Navigation", "text": state.data})
@@ -781,6 +858,27 @@ class RobotConsoleModule(Module):
                 Operation(method, "", "rpc", "", module="PersistentGo2Planner"), args
             )
 
+        @app.api_route("/api/navigation-speed", methods=["GET", "POST"])
+        async def api_navigation_speed(request: Request) -> dict[str, Any]:
+            if self.runtime is not None and not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            args = {}
+            method = "navigation_speed_status"
+            if request.method == "POST":
+                payload = await request.json()
+                speed = payload.get("speed_mps") if isinstance(payload, dict) else None
+                if (
+                    not isinstance(speed, (int, float))
+                    or isinstance(speed, bool)
+                    or not math.isfinite(speed)
+                    or not 0.1 <= speed <= 0.55
+                ):
+                    return {"ok": False, "error": "Speed must be between 0.10 and 0.55 m/s"}
+                method, args = "set_navigation_speed", {"speed_mps": float(speed)}
+            return await self._call_rpc(
+                Operation(method, "", "rpc", "", module="PersistentGo2Planner"), args
+            )
+
         @app.api_route("/api/visual-arrival", methods=["GET", "POST"])
         async def api_visual_arrival(request: Request) -> dict[str, Any]:
             if self.runtime is not None and not self.runtime.ready:
@@ -944,10 +1042,29 @@ class RobotConsoleModule(Module):
         if set(args) - set(properties):
             return {"ok": False, "error": "Unknown arguments"}
         for name in op.schema.get("required", []):
-            if not isinstance(args.get(name), str) or not args[name].strip():
+            if name not in args:
                 return {"ok": False, "error": f"{name} is required"}
-        if any(not isinstance(value, str) for value in args.values()):
-            return {"ok": False, "error": "Arguments must be text"}
+        for name, value in args.items():
+            spec = properties[name]
+            kind = spec.get("type", "string")
+            if kind == "string":
+                if not isinstance(value, str):
+                    return {"ok": False, "error": "Arguments must be text"}
+                if name in op.schema.get("required", []) and not value.strip():
+                    return {"ok": False, "error": f"{name} is required"}
+            elif kind in ("number", "integer"):
+                if (
+                    type(value) not in (int, float)
+                    or not math.isfinite(value)
+                    or (kind == "integer" and type(value) is not int)
+                    or value < spec.get("minimum", -math.inf)
+                    or value > spec.get("maximum", math.inf)
+                ):
+                    return {"ok": False, "error": f"Invalid {name}"}
+            else:
+                return {"ok": False, "error": f"Unsupported argument type for {name}"}
+            if "enum" in spec and value not in spec["enum"]:
+                return {"ok": False, "error": f"Invalid {name}"}
         if op.kind == "rpc":
             return await self._call_rpc(op, args)
         if op.kind == "mcp":
@@ -1020,7 +1137,11 @@ class RobotConsoleModule(Module):
                 self._status.update(stack=self.runtime.status())
                 if not self.runtime.ready:
                     self._status.update(
-                        agent_idle=None, navigation_ready=None, alignment_status=None
+                        agent_idle=None,
+                        navigation_ready=None,
+                        alignment_status=None,
+                        fusion_status=None,
+                        exploration_status=None,
                     )
                     return dict(self._status)
             status = await self._run_blocking(
@@ -1051,7 +1172,7 @@ def _status_probe(rpc: Any, map_module: str, base: dict[str, Any]) -> dict[str, 
     status: dict[str, Any] = dict(base)
     status["timestamp"] = time.time()
     try:
-        for method in ("alignment_status", "navigation_ready"):
+        for method in ("alignment_status", "navigation_ready", "fusion_status"):
             address = f"{map_module}/{method}"
             try:
                 result, unsub = rpc.call_sync(address, ([], {}), rpc_timeout=10.0)

@@ -573,7 +573,7 @@ python -m dimos.web.console
 | --- | --- |
 | 连接 | Robot IP、Replay、回放数据集、机载避障；只读显示 `.env` 密钥是否已配置 |
 | 模型服务 | Agent API base URL、Agent model、VLM API URL、VLM model |
-| 地图 | Scene directory、New/Restore、手动或旋转采集、旋转速度/时长、PGO loop correction |
+| 地图 | Scene directory、手动或旋转采集、旋转速度/时长、PGO loop correction；New/Restore 在主界面 Robot stack 中选择 |
 | 自动标签 | 房间标签开关、物品标签开关、移动距离阈值、分割器 |
 | 服务 | MCP 端口、Rerun Web Viewer 端口、Rerun data port (gRPC) |
 
@@ -593,9 +593,10 @@ Settings 只读显示固定掩码与是否配置，API 不返回密钥原文，�
 这两个字段不再从启动终端继承。不要提交 `.env` 或在聊天中输入密钥；
 建议将 `.env` 文件权限设为仅本人可读写。
 
-保存后点击 **Start / 启动机器人栈**，阅读提示并确认。运行中修改设置需要先正常停止再启动。
-恢复旧地图时，Settings 保持同一 Scene directory 并选择 Restore。
-创建新地图时，空目录直接使用；已有地图或标签时，Start 会额外弹出覆盖确认。
+保存后在主界面 **Robot stack → Map mode** 选择 **New map** 或 **Restore saved map**，
+然后点击 **Start / 启动机器人栈**。运行中修改设置或模式需要先正常停止。
+恢复旧地图时，Settings 保持同一 Scene directory，主界面选择 Restore；直接启动，不弹出地图选择提示。
+创建新地图时，始终显示确认：空目录显示 **Create new map?**，已有地图或标签显示覆盖确认。
 取消不会修改旧数据或启动栈；确认后旧场景整体移至同级 `.backup-<唯一编号>` 目录，
 新栈仍使用原场景路径，不加载旧标签。备份位置显示在 Backend console 中。
 原有 CLI/demo 的建图保护保持不变。若启动进程失败，控制台恢复旧目录。
@@ -618,11 +619,13 @@ Settings 只读显示固定掩码与是否配置，API 不返回密钥原文，�
 | 按 ID 导航 | 查询结果的 Navigate，或 Navigate to tag → `location_id`；需人工确认 |
 | 取消导航 | Stop navigation；不是硬件急停 |
 | 导航状态 | Navigation state；开始导航不代表到达 |
-| 配准采集 | Settings 选择 Restore/manual → 遥控采集 → 停稳 → Finish startup capture |
+| 配准采集 | 主界面选择 Restore，Settings 选择 manual → 遥控采集 → 停稳 → Finish startup capture |
 | 配准检查 | Alignment status 与中央 Rerun 的 alignment_scan/alignment_preview |
 | 配准确认/拒绝 | Confirm alignment / Reject alignment，均需要人工确认 |
 | 取消原地旋转 | Cancel rotation |
 | 保存地图 | Save map，显示 RPC 返回值或明确错误 |
+| 暂停/继续永久地图融合 | Pause map fusion / Resume map fusion，需人工确认；不停止机器人、不冻结位姿 |
+| 查看地图融合状态 | Map fusion status 与 Map 区状态文字，显示原因及 accepted/skipped 帧数 |
 | 正常停止 | Stop / 保存并正常停止；不强制杀进程 |
 | 聊天 | 右侧输入框，Enter 发送、Shift+Enter 换行；显示回复、配对工具输入输出和实时工具进度 |
 | 日志 | 左侧 Operation log；Rerun 下方常驻 Backend console，显示后台输出、操作和工具进度，可清空显示 |
@@ -633,6 +636,51 @@ Settings 只读显示固定掩码与是否配置，API 不返回密钥原文，�
 | Go2 回复播报 | Agent chat 顶部 Go2 speaker，默认 Off；确认后以 Go2 最大音量 10/10 播报后续最终回复，再点击可关闭并暂停播放 |
 
 未完成配准时，UI 禁用标记与导航入口；底层规划器仍保留原有对齐门控。
+
+### 静止时地图继续变厚、漂移：自动融合门控
+
+独立控制台默认启用 Settings 中的 **Auto-pause permanent map on low-speed odometry**。
+它使用已有 Go2 WebRTC 里程计做低速判断，无需启动额外的 `point_lio_unilidar`；
+只控制对齐后永久地图的写入，实时点云、odom 和 TF 仍继续更新。不是定位纠偏，
+也不能保证导航位姿正确。位姿明显漂移时应停止导航、检查定位，而不是继续使用地图门控掩盖问题。
+原有非 Console CLI/蓝图默认不启用自动门控；可通过
+`--persistentgo2map.auto-pause-fusion=true` 显式启用。
+
+默认初始参数如下，**未经过当前机器人实机标定**，需要根据静止噪声与实际最低移动速度调整：
+
+| 参数 | 默认值 |
+| --- | --- |
+| Motion window | 0.5 秒 |
+| Stationary dwell | 1 秒 |
+| Odometry timeout | 1 秒，必须不小于窗口 |
+| Stationary / Resume speed | 0.02 / 0.04 m/s |
+| Stationary / Resume rotation | 2 / 3 deg/s |
+
+低速持续满足条件后暂停；平移或转向超过恢复阈值时继续融合。恢复阈值必须高于静止阈值，
+以免反复切换。判定使用短窗口而非距最后融合位置的累计位移，避免缓慢漂移周期性恢复融合。
+尚未完成运动判定、odom 过期或异常时暂停写图，界面显示原因；有新鲜有效 odom 时，
+允许第一个对齐扫描作为地图种子。确认静止前仍存在窗口与 dwell 带来的检测延迟。
+近期运动指令可延迟进入静止，但没有指令不等于机器人静止，指令本身也不能解除已确认的静止暂停。
+
+- **Pause map fusion** 手动锁定暂停，检测到移动也不会自动解除。
+- **Resume map fusion** 只解除手动暂停；若自动规则仍判断静止/数据不足，地图仍暂停。
+- 要在静止时继续融合环境变化，在 Settings 关闭自动门控并正常重启机器人栈。
+- 启动配准的手动/旋转采集不受此门控影响，仍须按原流程完成采集、检查并确认配准。
+- PGO 开关两种模式均受融合门控控制；已有图修正仍应用于实时流，但暂停期间不插入新的 PGO 帧。
+- Save map 可保存当前已融合地图，但**不会暂停后续融合**；Restore 也不是只读模式。
+  自动保存与正常退出保存仍按原规则执行。无已接受扫描时保持原有不可保存的明确错误。
+- 暂停不等于 Save map，也不等于急停。需要保留当前地图时，先暂停，再保存。
+  已污染的地图不会自动修复，需人工选择干净备份或新场景重建。
+
+人工看护下的验收：先观察静止状态，再静止 60 秒；自动暂停后 accepted 帧数应不再增长，
+保存地图应不继续膨胀，而 skipped 与实时传感器流继续更新。检查正常平移、原地转向后能恢复，
+停下后再次暂停。慢速运动被误判时降低阈值或关闭自动门控。
+如果静止漂移超过恢复阈值，此启发式可能把漂移当移动；使用手动暂停止损，
+记录上游位姿/点云后再评估机载 LIO、独立运动观测或扫描配准。不能将 PGO 开关、
+增大体素或降低显示频率当作已经验证的静止漂移根治方案。
+
+无需此功能的临时止损流程是：完成必要采集 → Save map → 正常停止机器人栈。
+
 聊天发送成功只代表传输提交，不代表 Agent 已完成回复或机器人动作。
 控制台通过 Viewer URL 的 `url` 参数连接 Settings 中的 Rerun 数据端口，
 不只打开 Viewer 首页。若只显示 Welcome to Rerun，检查数据服务是否运行及端口是否一致，
@@ -732,6 +780,69 @@ PGO 回环暂停会中断搜索，地图与 tag 同步完成后按同一目标�
 保存/配准失败不会显示为成功，按错误提示处理后重试。
 
 ### 17.4 离线测试与实机验收
+
+#### Demo 的新版探索
+
+Settings 的 Mapping & tagging 中新增 **Demo planner width**：
+默认 0.30 m，可配置范围 0.30–1.00 m，保存并重启机器人栈生效。
+只通过 `persistentgo2planner.robot-width` 覆盖 demo 启动的规划器，
+不修改全局默认值、原有蓝图、机载避障或旋转净空。
+从较大值调回 0.30 m 可减小路径膨胀和路径净空要求，但默认本来就是 0.30 m；
+不得低于实际机身及载荷所需宽度。这个值不会提高行走速度，
+也不修改探索模块固定的 25 cm 障碍物膨胀或到达距离阈值。
+
+聊天区域的 **Live navigation speed limit** 滑块提供实时速度上限：
+0.10–0.55 m/s，默认 0.55 m/s。松开滑块后 RPC 更新立即作用于随后发布的导航
+平移指令，包括正在进行的精确导航、附近导航和探索，不取消或重建当前目标。
+这是平移速度上限，转弯时或受原控制器/`nerf_speed` 限制时实际速度可能更低；
+不会改变遥控、原地旋转、视觉搜索转向或机载避障。
+低于控制器原有最低速度 0.20 m/s 的设置也会在输出端限幅，不会被最低速度抬高。
+设置失败显示错误并回退滑块；未运行栈或未启用此功能的旧蓝图禁用滑块。
+实时调节仅本次运行生效；Settings 的 **Navigation speed limit** 用于保存下次启动默认值。
+原有非 demo 蓝图默认不启用限速覆盖，行为保持不变。增大上限不会自动开始运动，
+但可能使正在导航的机器狗加速，请现场看护并保持净空。
+
+独立控制台启动 `unitree-go2-agentic-persistent-demo`；嵌入控制台的蓝图也使用
+`DemoExplorer`。原有 `unitree-go2-agentic-persistent` 和 Wavefront 探索保持不变。
+
+地图配准完成后，在 **Exploration → Explore building** 中选择策略和本次参数：
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| strategy | frontier | 沿用前沿大小、距离、障碍物距离、方向等综合评分；只选择可达自由空间目标 |
+| min_goals | 10 | 成功到达这么多个目标后开始检查低收益，不是总目标数上限；失败不计数 |
+| gain_percent | 1 | 每次成功导航的地图信息增长百分比阈值，1 表示 1% |
+| no_gain_attempts | 2 | 连续低收益次数达到此值时结束 |
+| check_interval | 3 秒 | 进度检查间隔，不是单个目标的硬超时；明确的失败反馈立即唤醒并换目标 |
+
+**efficient** 策略使用可通行自由空间上的 Dijkstra 路径距离，按边界收益与实际
+路径距离评分，不用穿墙的直线距离估计成本；对角线不能穿越障碍物角点。
+已到达区域被排除，但同一长边界的其他区域仍可继续探索。失败区域冷却 60 秒，
+避免反复选同一不可达点。两种模式均保留 25 cm 障碍物膨胀，不绕过机载避障。
+这是局部选择策略，不保证全局最短巡游或所有房间都可达，实机效率仍需现场验证。
+
+默认 15 秒没有至少 15 cm 的平移进展会取消当前目标并换点；里程计超过
+5 秒未更新会停止并报错。地图必须存在，暂停融合时允许沿用静态地图。
+连续 10 次找不到合格目标会结束并显示原因。
+恢复的大地图可能仍较快触发低收益条件，可以降低 gain_percent 或增大
+min_goals/no_gain_attempts。参数用于本次探索，可再次打开表单修改。
+状态和停止原因显示在 Exploration 面板及工具日志；**Stop exploration** 取消探索。
+PGO 故障或遥控停止信号仍会终止探索，不自动恢复，以免意外运动。
+
+主界面选择 New 时始终弹出确认。首次创建且目录为空时，选择 **Yes — create new map**；
+无旧地图可恢复时不显示 No。目录已经存在地图/标记时，**Overwrite existing scene?** 对话框提供：
+
+- **Yes — overwrite**：备份旧目录后创建新地图。
+- **No — use existing map**：本次启动改为 Restore，保留原地图和标记，然后按
+  Settings 的手动/旋转采集模式进行 alignment。不会备份或替换目录。
+  只有目录含 `map.pc2.lcm` 才显示这个选项。
+- **Cancel**：取消启动，不改变目录。
+
+选择 No 后直接进行 Restore 启动和配准，不再弹出第二个启动确认，也不改写主界面的 New 选择。
+主界面模式会在启动或保存设置时保存；若希望下次默认沿用旧地图，请在主界面选择 Restore。
+Restore 不弹出地图选择提示；如果缺少 `map.pc2.lcm`，明确报错且不会自动创建或覆盖数据。
+点击 Start 表示同意启动：Restore 的旋转采集可能自动转动机器人，自动标签可能调用模型服务，
+启动前应查看主界面安全提示并现场看护。
 
 不调用云模型的基础回归：
 

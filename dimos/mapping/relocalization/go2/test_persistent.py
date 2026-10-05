@@ -85,6 +85,110 @@ def cloud(points):
     return PointCloud2.from_numpy(np.asarray(points, dtype=np.float32), timestamp=12.0)
 
 
+def test_stationary_gate_prevents_map_pollution_but_keeps_live_streams(session, mocker):
+    clock = mocker.patch.object(persistent.time, "monotonic", return_value=0.0)
+    module = session(create_new=True, auto_pause_fusion=True)
+    for i in range(41):
+        clock.return_value = i * 0.125
+        pose = PoseStamped(frame_id="world", position=[i * 0.001, 0, 0], ts=i * 0.125)
+        module._on_odom(pose)
+        module._on_tf(TFMessage(Transform.from_pose("base_link", pose)))
+        module._on_lidar(cloud([[i, 0, 0]]))
+        if i == 20:
+            before = module._current_map().lcm_encode()
+            accepted = module._frames
+
+    assert module._current_map().lcm_encode() == before
+    assert module._frames == accepted
+    assert module.fusion_status()["motion_state"] == "stationary"
+    assert module.lidar.publish.call_count == 41
+    assert module.odom.publish.call_count == 41
+    assert module.tf.publish.call_count == 41
+    module.save_map()
+    assert Path(module.config.map_file).read_bytes() == before
+
+
+@pytest.mark.parametrize("pgo_enabled", [False, True])
+def test_manual_pause_blocks_fusion_not_lidar_and_resume_restores_legacy_behavior(
+    session, mocker, pgo_enabled
+):
+    pgo = mocker.patch.object(persistent, "PGOMap").return_value
+    pgo.add.return_value = False
+    pgo.graph.return_value = PoseGraph()
+    pgo.global_map.return_value = cloud([[0, 0, 0]])
+    module = session(create_new=True, pgo_enabled=pgo_enabled)
+    module._on_lidar(cloud([[0, 0, 0]]))
+    module.pause_fusion()
+    for i in range(3):
+        module._on_odom(PoseStamped(frame_id="world", position=[i, 0, 0]))
+        module._on_lidar(cloud([[i + 1, 0, 0]]))
+    assert module._frames == 1
+    assert module.lidar.publish.call_count == 4
+    assert module.fusion_status()["skipped_frames"] == 3
+    if pgo_enabled:
+        assert pgo.add.call_count == 1
+        assert module.pgo_raw_lidar.publish.call_count == 4
+    else:
+        assert len(module._current_map()) == 1
+    module.resume_fusion()
+    module._on_lidar(cloud([[4, 0, 0]]))
+    assert module._frames == 2
+
+
+def test_resume_keeps_automatic_pause_and_stale_odometry_blocks_fusion(session, mocker):
+    clock = mocker.patch.object(persistent.time, "monotonic", return_value=0.0)
+    module = session(create_new=True, auto_pause_fusion=True)
+    module._on_lidar(cloud([[0, 0, 0]]))
+    assert module._frames == 0
+    for i in range(21):
+        clock.return_value = i * 0.125
+        module._on_odom(PoseStamped(frame_id="world"))
+        module._on_lidar(cloud([[0, 0, 0]]))
+    module.pause_fusion()
+    module.resume_fusion()
+    assert module.fusion_status()["fusion_enabled"] is False
+    assert module.fusion_status()["manual_paused"] is False
+    clock.return_value = 5.0
+    module._on_lidar(cloud([[100, 0, 0]]))
+    assert module.fusion_status()["motion_state"] == "unknown"
+    assert "stale" in module.fusion_status()["reason"]
+    assert len(module._current_map()) == 1
+
+
+def test_paused_pgo_still_corrects_live_cloud_without_inserting_frame(session, mocker):
+    pgo = mocker.patch.object(persistent, "PGOMap").return_value
+    module = session(create_new=True, pgo_enabled=True)
+    module._pgo_graph = fixed_graph()
+    module.pause_fusion()
+    module._on_lidar(cloud([[2, 0, 0]]))
+    pgo.add.assert_not_called()
+    assert module._frames == 0
+    np.testing.assert_allclose(
+        module.pgo_raw_lidar.publish.call_args.args[0].as_numpy()[0], [[2, 0, 0]]
+    )
+    np.testing.assert_allclose(module.lidar.publish.call_args.args[0].as_numpy()[0], [[2.5, 0, 0]])
+
+
+def test_restore_startup_capture_ignores_fusion_gate_then_obeys_manual_pause(
+    session, tmp_path, mocker
+):
+    save_premap(tmp_path / "office.pc2.lcm")
+    module = session(auto_pause_fusion=True, manual_capture=True)
+    scans = mocker.patch.object(module._scans, "on_next")
+    module.pause_fusion()
+    module._on_lidar(cloud([[0, 0, 0], [1, 0, 0]]))
+    assert module._capture_frames == 1
+    module.finish_startup_capture()
+    assert len(scans.call_args.args[0]) == 2
+    module._candidate = Transform(frame_id="world", child_frame_id="world")
+    module.confirm_alignment()
+    module._on_lidar(cloud([[100, 0, 0]]))
+    assert module._frames == 0
+    assert len(module._current_map()) == 3
+    assert module.fusion_status()["manual_paused"] is True
+    assert module.navigation_ready() is True
+
+
 def save_premap(path):
     prior = cloud([[0, 0, 0], [4, 2, 0], [4, 2, 1]])
     path.write_bytes(prior.lcm_encode())
@@ -398,6 +502,63 @@ def visual_planner(pgo_planner, mocker):
     planner._handle_odom(PoseStamped(position=[2, 4, 0], frame_id="world"))
     yield planner, matcher
     planner.cancel_goal()
+
+
+@pytest.fixture
+def speed_planner(mocker):
+    planner = PersistentGo2Planner(navigation_speed_limit=0.55)
+    mocker.patch.object(planner.nav_cmd_vel, "publish")
+    yield planner
+    planner.dispose()
+
+
+def test_live_speed_caps_next_command_without_replacing_active_goal(speed_planner):
+    planner = speed_planner
+    goal = PoseStamped(position=[3, 0, 0])
+    planner._active_goal = goal
+    planner._goal_revision = 7
+    command = Twist(linear=Vector3(0.55, 0, 0), angular=Vector3(0, 0, 0.3))
+    planner._publish_navigation_velocity(command)
+    assert planner.nav_cmd_vel.publish.call_args.args[0] is command
+    assert planner.set_navigation_speed(0.1) == {"enabled": True, "speed_mps": 0.1}
+    planner._publish_navigation_velocity(command)
+    output = planner.nav_cmd_vel.publish.call_args.args[0]
+    assert output.linear.x == pytest.approx(0.1)
+    assert output.angular.z == 0.3
+    assert command.linear.x == 0.55
+    assert planner._active_goal is goal
+    assert planner._goal_revision == 7
+    planner.set_navigation_speed(0.55)
+    planner._publish_navigation_velocity(command)
+    assert planner.nav_cmd_vel.publish.call_args.args[0] is command
+
+
+def test_speed_limit_preserves_direction_slow_commands_and_stop(speed_planner):
+    planner = speed_planner
+    planner.set_navigation_speed(0.25)
+    planner._publish_navigation_velocity(Twist(linear=Vector3(-0.3, 0.4, 0)))
+    output = planner.nav_cmd_vel.publish.call_args.args[0]
+    assert output.linear.x == pytest.approx(-0.15)
+    assert output.linear.y == pytest.approx(0.2)
+    for command in (Twist(), Twist(linear=Vector3(0.15, 0, 0)), Twist(angular=Vector3(0, 0, 0.15))):
+        planner._publish_navigation_velocity(command)
+        assert planner.nav_cmd_vel.publish.call_args.args[0] is command
+
+
+@pytest.mark.parametrize("speed", [True, "0.2", 0.09, 0.56, float("nan"), float("inf")])
+def test_invalid_live_speed_retains_previous_limit(speed_planner, speed):
+    with pytest.raises(ValueError, match="between"):
+        speed_planner.set_navigation_speed(speed)
+    assert speed_planner.navigation_speed_status()["speed_mps"] == 0.55
+
+
+def test_original_persistent_planner_speed_is_unchanged_and_not_live_adjustable(pgo_planner):
+    command = Twist(linear=Vector3(0.6, 0, 0))
+    pgo_planner._publish_navigation_velocity(command)
+    assert pgo_planner.nav_cmd_vel.publish.call_args.args[0] is command
+    assert pgo_planner.navigation_speed_status() == {"enabled": False, "speed_mps": None}
+    with pytest.raises(ValueError, match="not enabled"):
+        pgo_planner.set_navigation_speed(0.25)
 
 
 def test_visual_arrival_waits_for_selected_tag_image_before_announcing(visual_planner):

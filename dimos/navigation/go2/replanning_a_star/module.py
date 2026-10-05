@@ -104,7 +104,7 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
 
         self.register_disposable(self._planner.path.subscribe(self.path.publish))
 
-        self.register_disposable(self._planner.cmd_vel.subscribe(self.nav_cmd_vel.publish))
+        self.register_disposable(self._planner.cmd_vel.subscribe(self._publish_navigation_velocity))
 
         self.register_disposable(self._planner.goal_reached.subscribe(self._publish_goal_result))
 
@@ -128,6 +128,9 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
 
     def _handle_global_costmap(self, grid: OccupancyGrid) -> None:
         self._planner.handle_global_costmap(grid)
+
+    def _publish_navigation_velocity(self, velocity: Twist) -> None:
+        self.nav_cmd_vel.publish(velocity)
 
     def _handle_odom(self, pose: PoseStamped) -> None:
         self._planner.handle_odom(pose)

@@ -42,6 +42,7 @@ import requests
 from dimos.constants import CONFIG_DIR
 from dimos.core.global_config import global_config
 from dimos.core.run_registry import REGISTRY_DIR, RunEntry, is_pid_alive
+from dimos.mapping.relocalization.go2.fusion_gate import FusionGateConfig
 from dimos.utils.logging_config import setup_logger
 from dimos.visualization.rerun.constants import RERUN_GRPC_PORT, RERUN_WEB_VIEWER_PORT
 from dimos.web.console.prompts import CONSOLE_AGENT_PROMPT
@@ -49,9 +50,10 @@ from dimos.web.console.prompts import CONSOLE_AGENT_PROMPT
 logger = setup_logger()
 
 
-class ConsoleSettings(BaseModel):
+class ConsoleSettings(FusionGateConfig):
     model_config = ConfigDict(extra="forbid")
 
+    auto_pause_fusion: bool = True
     robot_ip: str = "192.168.123.161"
     replay: bool = False
     replay_db: str = "go2_short"
@@ -71,6 +73,8 @@ class ConsoleSettings(BaseModel):
     object_segmenter: Literal["auto", "yolo", "vlm"] = "yolo"
     pgo_enabled: bool = False
     nearby_arrival_distance: float = Field(default=1, ge=0.3, le=3, allow_inf_nan=False)
+    planner_robot_width: float = Field(default=0.3, ge=0.3, le=1.0, allow_inf_nan=False)
+    navigation_speed_limit: float = Field(default=0.55, ge=0.1, le=0.55, allow_inf_nan=False)
     mcp_port: int = Field(default=global_config.mcp_port, ge=1024, le=65535)
     rerun_web_port: int = Field(default=RERUN_WEB_VIEWER_PORT, ge=1024, le=65535)
     rerun_grpc_port: int = Field(default=RERUN_GRPC_PORT, ge=1024, le=65535)
@@ -117,7 +121,7 @@ class ConsoleSettings(BaseModel):
             "-m",
             "dimos.cli.dimos",
             "run",
-            "unitree-go2-agentic-persistent",
+            "unitree-go2-agentic-persistent-demo",
             f"--robot-ip={self.robot_ip}",
             f"--replay={'true' if self.replay else 'false'}",
             f"--replay-db={self.replay_db}",
@@ -128,6 +132,8 @@ class ConsoleSettings(BaseModel):
             f"--mcpclient.system-prompt={CONSOLE_AGENT_PROMPT}",
             "--go2connection.puppy-enabled=true",
             f"--persistentgo2planner.nearby-arrival-distance={self.nearby_arrival_distance}",
+            f"--persistentgo2planner.robot-width={self.planner_robot_width}",
+            f"--persistentgo2planner.navigation-speed-limit={self.navigation_speed_limit}",
             "--rerunbridgemodule.rerun-web=true",
             f"--rerunbridgemodule.web-port={self.rerun_web_port}",
             f"--rerunbridgemodule.connect-url=rerun+http://127.0.0.1:{self.rerun_grpc_port}/proxy",
@@ -149,6 +155,10 @@ class ConsoleSettings(BaseModel):
             f"--spatialmemory.object-segmenter={self.object_segmenter}",
             f"--persistentgo2map.pgo-enabled={'true' if self.pgo_enabled else 'false'}",
         ]
+        for field in FusionGateConfig.model_fields:
+            value = getattr(self, field)
+            encoded = str(value).lower() if isinstance(value, bool) else str(value)
+            args.append(f"--persistentgo2map.{field.replace('_', '-')}={encoded}")
         return args
 
 
@@ -314,9 +324,12 @@ class ConsoleRuntime:
                 "overwrite_required": overwrite,
                 "scene_directory": str(scene),
                 "overwrite_token": self._overwrite_token,
+                "restore_available": (scene / "map.pc2.lcm").is_file(),
             }
 
-    def start(self, overwrite_token: str | None = None) -> dict[str, Any]:
+    def start(
+        self, overwrite_token: str | None = None, *, use_existing_map: bool = False
+    ) -> dict[str, Any]:
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 raise ValueError("This console already owns a running stack")
@@ -325,7 +338,14 @@ class ConsoleRuntime:
                 raise ValueError("Project directory does not exist")
             scene = self._scene_path()
             map_path = scene / "map.pc2.lcm"
-            overwrite = self.settings.map_mode == "new" and scene.exists() and any(scene.iterdir())
+            launch_settings = (
+                self.settings.model_copy(update={"map_mode": "restore"})
+                if use_existing_map
+                else self.settings
+            )
+            overwrite = (
+                launch_settings.map_mode == "new" and scene.exists() and any(scene.iterdir())
+            )
             if overwrite and (
                 not overwrite_token
                 or overwrite_token != self._overwrite_token
@@ -334,7 +354,7 @@ class ConsoleRuntime:
                 raise ValueError(
                     "Existing scene requires overwrite confirmation. Click Start again."
                 )
-            if self.settings.map_mode == "restore" and not map_path.is_file():
+            if launch_settings.map_mode == "restore" and not map_path.is_file():
                 raise ValueError("Saved map does not exist; select New map for the first run")
             env = os.environ.copy()
             self._secrets = self._read_env_keys()
@@ -355,7 +375,7 @@ class ConsoleRuntime:
                 self._overwrite_settings = None
             try:
                 self._process = subprocess.Popen(
-                    self.settings.argv(),
+                    launch_settings.argv(),
                     cwd=self.project_dir,
                     env=env,
                     stdout=subprocess.PIPE,
@@ -369,6 +389,12 @@ class ConsoleRuntime:
                 raise
             if backup is not None:
                 message = f"Previous scene backed up to {backup}; creating a new map at {scene}"
+                self._lines.append(message)
+                self.on_event({"type": "stack_log", "text": message})
+            if use_existing_map:
+                self._overwrite_token = None
+                self._overwrite_settings = None
+                message = f"Using existing map at {map_path}; Restore alignment is required."
                 self._lines.append(message)
                 self.on_event({"type": "stack_log", "text": message})
             self._state, self._error = "starting", None
@@ -555,8 +581,13 @@ def register_runtime_routes(app: FastAPI, runtime: ConsoleRuntime) -> None:
             token = payload.get("overwrite_token")
             if token is not None and not isinstance(token, str):
                 return {"ok": False, "error": "Invalid overwrite confirmation"}
+            use_existing_map = payload.get("use_existing_map", False)
+            if type(use_existing_map) is not bool:
+                return {"ok": False, "error": "use_existing_map must be a boolean"}
             result = (
-                await asyncio.to_thread(runtime.start, token)
+                await asyncio.to_thread(runtime.start, token, use_existing_map=True)
+                if action == "start" and use_existing_map
+                else await asyncio.to_thread(runtime.start, token)
                 if action == "start"
                 else await asyncio.to_thread(runtime.stop)
             )

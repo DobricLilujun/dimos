@@ -34,6 +34,7 @@ from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.mapping.costmapper import CostMapper
+from dimos.mapping.relocalization.go2.fusion_gate import FusionGateConfig, FusionMotionGate
 from dimos.mapping.relocalization.lidar.module import window
 from dimos.mapping.relocalization.lidar.relocalize import MID360, LidarRelocalizer, RelocalizeConfig
 from dimos.mapping.voxels.grid import VoxelGrid
@@ -65,7 +66,7 @@ from dimos.utils.reactive import backpressure
 logger = setup_logger()
 
 
-class PersistentGo2MapConfig(ModuleConfig):
+class PersistentGo2MapConfig(ModuleConfig, FusionGateConfig):
     map_file: str | None = None
     create_new: bool = False
     voxel_size: float = 0.05
@@ -131,6 +132,10 @@ class PersistentGo2Map(Module):
         self._pgo_error: str | None = None
         self._pgo_paused = False
         self._pgo_session = f"{time.time_ns()}"
+        self._fusion_gate = FusionMotionGate(self.config)
+        self._fusion_manual_paused = False
+        self._fusion_skipped = 0
+        self._fusion_last_reason: str | None = None
 
     @rpc
     def start(self) -> None:
@@ -235,6 +240,8 @@ class PersistentGo2Map(Module):
         with self._lock:
             if self._stopping:
                 return
+            if self.config.auto_pause_fusion:
+                self._fusion_gate.on_command(command, time.monotonic())
             if self._pgo_error is not None or self._pgo_paused:
                 self.cmd_vel.publish(Twist())
                 return
@@ -430,6 +437,18 @@ class PersistentGo2Map(Module):
                 return
             assert self._grid is not None
             aligned = cloud.transform(self._placement)
+            fusion = self.fusion_status()
+            if fusion["reason"] != self._fusion_last_reason:
+                self._fusion_last_reason = fusion["reason"]
+                logger.info("Map fusion state changed", **fusion)
+            if not fusion["fusion_enabled"]:
+                self._fusion_skipped += 1
+                if self._pgo is not None:
+                    self.pgo_raw_lidar.publish(aligned)
+                    if self._pgo_graph is not None:
+                        aligned = aligned.transform(self._pgo_graph.world_correction(cloud.ts))
+                self.lidar.publish(aligned)
+                return
             if self._pgo is not None:
                 self.pgo_raw_lidar.publish(aligned)
             if self._pgo is None:
@@ -520,6 +539,11 @@ class PersistentGo2Map(Module):
         with self._lock:
             if self._stopping:
                 return
+            if self.config.auto_pause_fusion and not self._fusion_gate.on_pose(
+                pose, time.monotonic()
+            ):
+                logger.error("Invalid odometry; permanent map fusion paused")
+                return
             self._latest_odom = pose
             self._last_odom_rx = time.monotonic()
             if self._placement is not None:
@@ -553,6 +577,59 @@ class PersistentGo2Map(Module):
             if self._pgo is not None:
                 self.pgo_raw_tf.publish(TFMessage(*raw_transforms))
             self.tf.publish(TFMessage(*transforms))
+
+    @rpc
+    def pause_fusion(self) -> str:
+        """Pause permanent map updates, not sensors or robot motion."""
+        with self._lock:
+            if self._stopping:
+                raise RuntimeError("Map module is stopping")
+            self._fusion_manual_paused = True
+        logger.info("Human paused permanent map fusion")
+        return "Map fusion paused. Live sensors continue; this does not stop the robot or save."
+
+    @rpc
+    def resume_fusion(self) -> str:
+        """Release the manual pause; automatic stationary gating still applies."""
+        with self._lock:
+            if self._stopping:
+                raise RuntimeError("Map module is stopping")
+            self._fusion_manual_paused = False
+            status = self.fusion_status()
+        logger.info("Human released permanent map fusion pause", **status)
+        return (
+            f"Manual pause released. {status['reason']}. Automatic gating still applies if enabled."
+        )
+
+    @rpc
+    def fusion_status(self) -> dict[str, Any]:
+        """Report permanent map fusion independently of sensor forwarding and navigation."""
+        with self._lock:
+            now = time.monotonic()
+            enabled = True
+            reason = "Automatic gate disabled"
+            if self.config.auto_pause_fusion:
+                enabled = self._fusion_gate.permits_fusion(now)
+                reason = self._fusion_gate.reason
+                if self._frames == 0 and self._fusion_gate.fresh_pose(now):
+                    enabled, reason = True, "Accepting initial aligned map seed"
+            if self._fusion_manual_paused:
+                enabled, reason = False, "Manual pause"
+            if self._placement is None:
+                enabled, reason = False, "Waiting for alignment; startup capture is unaffected"
+            if self._stopping or self._pgo_error is not None or self._pgo_paused:
+                enabled, reason = False, "Map stopping or PGO blocked"
+            return {
+                "auto_enabled": self.config.auto_pause_fusion,
+                "manual_paused": self._fusion_manual_paused,
+                "motion_state": self._fusion_gate.state,
+                "fusion_enabled": enabled,
+                "reason": reason,
+                "accepted_frames": self._frames,
+                "skipped_frames": self._fusion_skipped,
+                "speed_m_s": self._fusion_gate.speed,
+                "rotation_deg_s": self._fusion_gate.rotation_deg,
+            }
 
     @rpc
     def navigation_ready(self) -> bool:
@@ -698,6 +775,7 @@ class PersistentGo2Map(Module):
 
 
 class PersistentGo2PlannerConfig(ReplanningAStarPlannerConfig):
+    navigation_speed_limit: float | None = Field(default=None, ge=0.1, le=0.55, allow_inf_nan=False)
     nearby_arrival_distance: float = Field(default=1.0, ge=0.3, le=3.0, allow_inf_nan=False)
     visual_arrival_enabled: bool = False
 
@@ -714,6 +792,8 @@ class PersistentGo2Planner(ReplanningAStarPlanner):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._goal_lock = RLock()
+        self._speed_lock = RLock()
+        self._navigation_speed_limit = self.config.navigation_speed_limit
         self._goal_revision = 0
         self._active_goal: PoseStamped | None = None
         self._active_tag: str | None = None
@@ -725,6 +805,47 @@ class PersistentGo2Planner(ReplanningAStarPlanner):
         self._searching = False
         self._search_stop = Event()
         self._search_thread: Thread | None = None
+
+    @rpc
+    def navigation_speed_status(self) -> dict[str, Any]:
+        with self._speed_lock:
+            return {
+                "enabled": self._navigation_speed_limit is not None,
+                "speed_mps": self._navigation_speed_limit,
+            }
+
+    @rpc
+    def set_navigation_speed(self, speed_mps: float) -> dict[str, Any]:
+        if (
+            isinstance(speed_mps, bool)
+            or not isinstance(speed_mps, (int, float))
+            or not math.isfinite(speed_mps)
+            or not 0.1 <= speed_mps <= 0.55
+        ):
+            raise ValueError("Navigation speed must be between 0.10 and 0.55 m/s")
+        with self._speed_lock:
+            if self._navigation_speed_limit is None:
+                raise ValueError("Live navigation speed is not enabled in this blueprint")
+            self._navigation_speed_limit = float(speed_mps)
+        logger.info("Updated live navigation speed limit", speed_mps=speed_mps)
+        return self.navigation_speed_status()
+
+    def _publish_navigation_velocity(self, velocity: Twist) -> None:
+        with self._speed_lock:
+            limit = self._navigation_speed_limit
+            magnitude = math.sqrt(
+                velocity.linear.x**2 + velocity.linear.y**2 + velocity.linear.z**2
+            )
+            if limit is not None and magnitude > limit:
+                velocity = Twist(
+                    linear=Vector3(
+                        velocity.linear.x * limit / magnitude,
+                        velocity.linear.y * limit / magnitude,
+                        velocity.linear.z * limit / magnitude,
+                    ),
+                    angular=velocity.angular,
+                )
+            super()._publish_navigation_velocity(velocity)
 
     @rpc
     def start(self) -> None:

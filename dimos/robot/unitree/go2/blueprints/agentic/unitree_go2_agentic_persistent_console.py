@@ -36,6 +36,11 @@ from dataclasses import replace
 
 from dimos.agents.mcp.mcp_client import McpClient
 from dimos.core.coordination.blueprints import autoconnect
+from dimos.mapping.relocalization.go2.persistent import PersistentGo2Planner
+from dimos.navigation.experimental.frontier_exploration.demo_explorer import DemoExplorer
+from dimos.navigation.experimental.frontier_exploration.wavefront_frontier_goal_selector import (
+    WavefrontFrontierExplorer,
+)
 from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent import (
     unitree_go2_agentic_persistent,
 )
@@ -44,9 +49,19 @@ from dimos.visualization.rerun.bridge import RerunBridgeModule
 from dimos.web.console.module import RobotConsoleModule
 from dimos.web.console.prompts import CONSOLE_AGENT_PROMPT
 
+unitree_go2_agentic_persistent_demo = (
+    autoconnect(
+        unitree_go2_agentic_persistent,
+        DemoExplorer.blueprint(),
+        PersistentGo2Planner.blueprint(navigation_speed_limit=0.55),
+    )
+    .disabled_modules(WavefrontFrontierExplorer)
+    .global_config(n_workers=8)
+)
+
 unitree_go2_agentic_persistent_console = autoconnect(
     replace(
-        unitree_go2_agentic_persistent,
+        unitree_go2_agentic_persistent_demo,
         blueprints=tuple(
             replace(atom, kwargs={**atom.kwargs, "rerun_web": True})
             if atom.module is RerunBridgeModule
@@ -61,7 +76,7 @@ unitree_go2_agentic_persistent_console = autoconnect(
             else replace(atom, kwargs={**atom.kwargs, "puppy_enabled": True})
             if atom.module is GO2Connection
             else atom
-            for atom in unitree_go2_agentic_persistent.blueprints
+            for atom in unitree_go2_agentic_persistent_demo.blueprints
         ),
     ),
     RobotConsoleModule.blueprint(),

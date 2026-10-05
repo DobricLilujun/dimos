@@ -26,11 +26,17 @@ import pytest
 
 from dimos.agents.mcp.mcp_client import McpClient
 from dimos.core.coordination.blueprint_config.parser import BlueprintConfigParser
+from dimos.mapping.relocalization.go2.persistent import PersistentGo2Planner
+from dimos.navigation.experimental.frontier_exploration.demo_explorer import DemoExplorer
+from dimos.navigation.experimental.frontier_exploration.wavefront_frontier_goal_selector import (
+    WavefrontFrontierExplorer,
+)
 from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent import (
     unitree_go2_agentic_persistent,
 )
 from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent_console import (
     unitree_go2_agentic_persistent_console,
+    unitree_go2_agentic_persistent_demo,
 )
 from dimos.robot.unitree.go2.connection import ConnectionConfig, GO2Connection
 from dimos.visualization.rerun.bridge import RerunBridgeModule
@@ -121,6 +127,9 @@ def test_settings_command_parses_against_real_blueprint(mode, capture):
     assert config["manual_capture"] is (mode == "restore" and capture == "manual")
     assert config["startup_rotation"] is (mode == "restore" and capture == "rotation")
     assert config["pgo_enabled"] is True
+    assert config["auto_pause_fusion"] is True
+    assert config["fusion_resume_speed"] == 0.04
+    assert config["fusion_stationary_duration"] == 1.0
     assert parsed.module_kwargs("spatialmemory")["object_segmenter"] == "yolo"
     assert parsed.module_kwargs("rerunbridgemodule")["rerun_web"] is True
     assert (
@@ -130,9 +139,99 @@ def test_settings_command_parses_against_real_blueprint(mode, capture):
     assert parsed.module_kwargs("mcpclient")["model"] == "openai:local-vllm"
     assert parsed.module_kwargs("mcpclient")["system_prompt"] == CONSOLE_AGENT_PROMPT
     assert parsed.module_kwargs("go2connection")["puppy_enabled"] is True
+    assert parsed.module_kwargs("persistentgo2planner")["navigation_speed_limit"] == 0.55
+    baseline = BlueprintConfigParser(unitree_go2_agentic_persistent).parse([], environ={})
+    assert baseline.module_kwargs("persistentgo2planner").get("navigation_speed_limit") is None
     assert parsed.module_kwargs("persistentgo2planner")["nearby_arrival_distance"] == 1.0
     assert parsed.module_kwargs("navigationskillcontainer")["vlm_url"] == settings.vlm_url
     assert parsed.module_kwargs("navigationskillcontainer")["vlm_model"] == settings.vlm_model
+
+
+def test_legacy_console_settings_enable_gate_but_original_blueprint_is_unchanged(runtime):
+    runtime.settings_path.write_text('{"robot_ip": "192.168.63.218"}')
+    restored = ConsoleRuntime(runtime.project_dir, runtime.settings_path)
+    assert restored.settings.auto_pause_fusion is True
+    config = BlueprintConfigParser(unitree_go2_agentic_persistent).parse([], environ={})
+    assert config.module_kwargs("persistentgo2map").get("auto_pause_fusion", False) is False
+
+
+def test_demo_uses_new_explorer_but_original_blueprint_keeps_legacy():
+    original = {atom.module for atom in unitree_go2_agentic_persistent.active_blueprints}
+    demo = {atom.module for atom in unitree_go2_agentic_persistent_demo.active_blueprints}
+    embedded = {atom.module for atom in unitree_go2_agentic_persistent_console.active_blueprints}
+    assert WavefrontFrontierExplorer in original
+    assert DemoExplorer not in original
+    assert DemoExplorer in demo and WavefrontFrontierExplorer not in demo
+    assert DemoExplorer in embedded and WavefrontFrontierExplorer not in embedded
+    settings = ConsoleSettings()
+    assert settings.argv()[4] == "unitree-go2-agentic-persistent-demo"
+    parsed = BlueprintConfigParser(unitree_go2_agentic_persistent_demo).parse(
+        settings.argv()[5:], environ={}
+    )
+    assert parsed.module_kwargs("go2connection")["puppy_enabled"] is True
+
+
+@pytest.mark.parametrize("width", [0.29, 1.01, float("nan"), float("inf")])
+def test_demo_planner_width_rejects_invalid_values(width):
+    with pytest.raises(ValidationError):
+        ConsoleSettings(planner_robot_width=width)
+
+
+def test_demo_planner_width_persists_and_overrides_only_planner(runtime):
+    runtime.save(SettingsUpdate(settings=ConsoleSettings(planner_robot_width=0.4)))
+    restored = ConsoleRuntime(runtime.project_dir, runtime.settings_path)
+    parsed = BlueprintConfigParser(unitree_go2_agentic_persistent_demo).parse(
+        restored.settings.argv()[5:], environ={}
+    )
+    assert parsed.module_kwargs("persistentgo2planner")["robot_width"] == 0.4
+    original = BlueprintConfigParser(unitree_go2_agentic_persistent).parse([], environ={})
+    assert original.module_kwargs("persistentgo2planner").get("robot_width") is None
+    module = PersistentGo2Planner(robot_width=0.4)
+    try:
+        assert module._planner._navigation_map._global_config.robot_width == 0.4
+        assert module._planner._local_planner._global_config.robot_width == 0.4
+        assert module.config.g.robot_width == 0.3
+        assert module._planner._global_config.robot_rotation_diameter == 0.6
+    finally:
+        module._close_module()
+
+
+@pytest.mark.parametrize("speed", [0.09, 0.56, float("nan"), float("inf")])
+def test_demo_speed_default_rejects_invalid_limits(speed):
+    with pytest.raises(ValidationError):
+        ConsoleSettings(navigation_speed_limit=speed)
+
+
+def test_saved_speed_default_reaches_demo_planner_after_restart(runtime):
+    runtime.save(SettingsUpdate(settings=ConsoleSettings(navigation_speed_limit=0.25)))
+    restored = ConsoleRuntime(runtime.project_dir, runtime.settings_path)
+    parsed = BlueprintConfigParser(unitree_go2_agentic_persistent_demo).parse(
+        restored.settings.argv()[5:], environ={}
+    )
+    assert parsed.module_kwargs("persistentgo2planner")["navigation_speed_limit"] == 0.25
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"fusion_resume_speed": 0.01},
+        {"fusion_stop_rotation_deg": 3},
+        {"fusion_stationary_duration": float("nan")},
+        {"fusion_sensor_timeout": 0.1},
+    ],
+)
+def test_console_rejects_invalid_fusion_parameters(values):
+    with pytest.raises(ValidationError):
+        ConsoleSettings.model_validate(values)
+
+
+def test_console_can_disable_auto_gate_and_pass_custom_thresholds():
+    settings = ConsoleSettings(auto_pause_fusion=False, fusion_resume_speed=0.05)
+    parsed = BlueprintConfigParser(unitree_go2_agentic_persistent).parse(
+        settings.argv()[5:], environ={}
+    )
+    assert parsed.module_kwargs("persistentgo2map")["auto_pause_fusion"] is False
+    assert parsed.module_kwargs("persistentgo2map")["fusion_resume_speed"] == 0.05
 
 
 def test_embedded_console_preserves_rerun_blueprint_and_enables_web():
@@ -264,6 +363,43 @@ def test_changed_settings_invalidate_overwrite_confirmation(runtime, process):
 def test_restore_requires_saved_map(runtime, process):
     with pytest.raises(ValueError, match="Saved map does not exist"):
         runtime.start()
+
+
+@pytest.mark.parametrize("capture", ["manual", "rotation"])
+def test_declining_overwrite_preserves_scene_and_starts_restore_alignment(
+    runtime, process, capture
+):
+    runtime.settings = ConsoleSettings(
+        map_mode="new", scene_map_dir="old_scene", capture_mode=capture
+    )
+    scene = runtime.project_dir / "old_scene"
+    scene.mkdir()
+    (scene / "map.pc2.lcm").write_bytes(b"saved map")
+    (scene / "tags.json").write_text("old tags")
+    assert runtime.prepare_start()["restore_available"] is True
+    assert runtime.start(use_existing_map=True)["state"] == "starting"
+    argv = subprocess.Popen.call_args.args[0]
+    parsed = BlueprintConfigParser(unitree_go2_agentic_persistent).parse(argv[5:], environ={})
+    config = parsed.module_kwargs("persistentgo2map")
+    assert config["create_new"] is False
+    assert config["manual_capture"] is (capture == "manual")
+    assert config["startup_rotation"] is (capture == "rotation")
+    assert (scene / "map.pc2.lcm").read_bytes() == b"saved map"
+    assert (scene / "tags.json").read_text() == "old tags"
+    assert list(runtime.project_dir.glob("old_scene.backup-*")) == []
+    assert runtime.settings.map_mode == "new"
+
+
+def test_declining_overwrite_without_saved_map_refuses_launch(runtime, process):
+    runtime.settings = ConsoleSettings(map_mode="new", scene_map_dir="old_scene")
+    scene = runtime.project_dir / "old_scene"
+    scene.mkdir()
+    (scene / "tags.json").write_text("old tags")
+    assert runtime.prepare_start()["restore_available"] is False
+    with pytest.raises(ValueError, match="Saved map does not exist"):
+        runtime.start(use_existing_map=True)
+    subprocess.Popen.assert_not_called()
+    assert (scene / "tags.json").read_text() == "old tags"
 
 
 def test_stop_only_signals_owned_child_and_waits_for_graceful_exit(runtime, process):

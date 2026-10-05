@@ -291,9 +291,12 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
       <div id="lifecycle" class="group" hidden>
         <h2>Robot stack</h2>
         <span class="badge" id="b-stack">stopped</span>
+        <label class="field" for="stack-map-mode"><span>Map mode</span>
+          <select id="stack-map-mode"><option value="restore">Restore saved map</option><option value="new">New map</option></select>
+        </label>
         <button class="btn primary" id="stack-start">Start robot stack</button>
         <button class="btn human" id="stack-stop">Save and stop</button>
-        <p class="note">Choose New map for the first run and Restore when reconnecting. Supervise manual capture on site and stop the robot before finishing capture. Canceling navigation is not a hardware emergency stop.</p>
+        <p class="note">Choose New map for the first run and Restore when reconnecting. Restore starts without a map-choice dialog; rotation capture may rotate the robot automatically. Automatic tagging may call your configured model service. Supervise capture on site and keep the area clear. Canceling navigation is not a hardware emergency stop.</p>
       </div>
       <h2>Control deck</h2>
       <div id="deck-groups"></div>
@@ -365,6 +368,12 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
         <span class="badge" id="b-thinking" style="display:none"><span class="dot"></span>thinking</span>
       </div>
       <div class="msgs" id="msgs" role="log" aria-label="Conversation"></div>
+      <label class="hint" for="navigation-speed">Live navigation speed limit:
+        <output id="navigation-speed-value">0.55 m/s</output>
+        <input id="navigation-speed" type="range" min="0.1" max="0.55" step="0.05" value="0.55"
+          aria-label="Live navigation speed limit" style="width:100%" disabled>
+        <span>Applies immediately to active navigation, including exploration. Actual speed may be lower; teleop and rotation are unchanged.</span>
+      </label>
       <label class="hint" for="navigation-distance">Nearby stop distance:
         <output id="navigation-distance-value">1.0 m</output>
         <input id="navigation-distance" type="range" min="0.3" max="3" step="0.1" value="1"
@@ -398,7 +407,7 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
     <p id="operation-description"></p>
     <div class="form-grid" id="operation-fields"></div>
     <p class="note" id="operation-warning"></p>
-    <div class="actions"><button class="btn" type="button" id="operation-cancel">Cancel</button><button class="btn primary" type="submit">Confirm</button></div>
+    <div class="actions"><button class="btn" type="button" id="operation-cancel">Cancel</button><button class="btn" type="button" id="operation-restore" hidden>No — use existing map</button><button class="btn primary" type="submit">Confirm</button></div>
   </form>
 </dialog>
 <dialog id="settings-dialog">
@@ -479,7 +488,7 @@ function buildDeck() {
   for (const op of CONFIG.operations) {
     (byGroup[op.group] = byGroup[op.group] || []).push(op);
   }
-  const order = ["Alignment", "Map", "Tagging", "Memory", "Navigation"];
+  const order = ["Alignment", "Map", "Tagging", "Memory", "Navigation", "Exploration"];
   for (const group of order) {
     const ops = byGroup[group]; if (!ops) continue;
     const g = el("div", "group");
@@ -499,6 +508,14 @@ function buildDeck() {
       toggle.id="tagging-toggle";toggle.textContent="Automatic tagging: Check status";
       toggle.onclick=toggleTagging;g.appendChild(toggle);
     }
+    if(group==="Map") {
+      const detail=el("p","note");detail.id="fusion-detail";
+      detail.textContent="Map fusion status unavailable";g.appendChild(detail);
+    }
+    if(group==="Exploration") {
+      const detail=el("p","note");detail.id="exploration-detail";
+      detail.textContent="Exploration not started";g.appendChild(detail);
+    }
     wrap.appendChild(g);
   }
 }
@@ -516,18 +533,24 @@ function requestOperation(op, preset = {}) {
     const form = $("#operation-form");
     $("#operation-title").textContent = op.label;
     $("#operation-description").textContent = op.description || "";
+    const restore=$("#operation-restore");restore.hidden=!op.offer_restore;
+    $("#operation-form button[type=submit]").textContent=op.confirm_label || (op.offer_restore?"Yes — overwrite":"Confirm");
     $("#operation-warning").textContent = op.human_only ? "Human approval required. Inspect Rerun before alignment approval; stop the robot before finishing capture. Navigation can move the robot." : "";
     const wrap = $("#operation-fields"); wrap.replaceChildren();
     for (const [name, spec] of Object.entries((op.schema || {}).properties || {})) {
       const label = el("label","field"); label.appendChild(el("span", "", esc(name)));
-      const input = el("input"); input.name = name; input.value = preset[name] || spec.default || "";
+      const input = el(spec.enum?"select":"input"); input.name = name;
+      if(spec.enum)for(const value of spec.enum){const option=el("option");option.value=value;option.textContent=value;input.appendChild(option);}
+      if(["number","integer"].includes(spec.type)){input.type="number";input.step=spec.type==="integer"?"1":"any";if(spec.minimum!==undefined)input.min=spec.minimum;if(spec.maximum!==undefined)input.max=spec.maximum;}
+      input.value = preset[name] ?? spec.default ?? "";
       input.required = ((op.schema || {}).required || []).includes(name);
       label.appendChild(input); const help = el("small"); help.textContent = spec.description || ""; label.appendChild(help); wrap.appendChild(label);
     }
-    const finish = result => { dialog.close(); form.onsubmit = null; dialog.oncancel = null; resolve(result); };
+    const finish = result => { dialog.close(); form.onsubmit = null; dialog.oncancel = null; restore.onclick=null;restore.hidden=true;resolve(result); };
+    restore.onclick=()=>finish({use_existing_map:true});
     $("#operation-cancel").onclick = () => finish(null);
     dialog.oncancel = e => { e.preventDefault(); finish(null); };
-    form.onsubmit = e => { e.preventDefault(); const args = {}; for (const input of wrap.querySelectorAll("input")) {args[input.name] = input.value.trim(); if(input.required && !args[input.name]) {input.setCustomValidity("Please enter a name / ID"); input.reportValidity(); input.setCustomValidity("");return;}} finish(args); };
+    form.onsubmit = e => { e.preventDefault(); const args = {}; for (const input of wrap.querySelectorAll("input,select")) {const value=input.value.trim();if(input.required && !value) {input.setCustomValidity("Please enter a value");input.reportValidity();input.setCustomValidity("");return;}args[input.name]=input.type==="number"?Number(value):value;} finish(args); };
     dialog.showModal();
   });
 }
@@ -667,6 +690,7 @@ function setThinking(on) {
 
 // ---------- status ----------
 function applyStatus(s) {
+  if($("#exploration-detail"))$("#exploration-detail").textContent=s.exploration_status || "Exploration not started";
   if (s.agent_idle != null) setThinking(!s.agent_idle);
   else {$("#b-thinking").style.display="none";setBadge("b-agent","","agent unknown");}
   state.nav = s.navigation_ready === true;
@@ -680,6 +704,12 @@ function applyStatus(s) {
     setBadge("b-align", aligned ? "ok" : "warn", aligned ? "aligned" : "aligning");
     $("#alignment-detail").textContent=st;
   } else {setBadge("b-align","","alignment unknown");$("#alignment-detail").textContent="";setBadge("b-nav","","nav unknown");}
+  const fusion=s.fusion_status;
+  if($("#fusion-detail")) {
+    $("#fusion-detail").textContent=fusion && typeof fusion==="object"
+      ? `${fusion.fusion_enabled ? "Fusion active" : "Fusion paused"}: ${fusion.reason}. Accepted ${fusion.accepted_frames}, skipped ${fusion.skipped_frames}. Live pose is not frozen.`
+      : `Map fusion status unavailable${typeof fusion==="string" ? ": "+fusion : ""}`;
+  }
   if(s.stack) applyStack(s.stack);
   updateControls();
 }
@@ -694,6 +724,7 @@ function applyStack(s) {
   if(previous !== "running" && s.state==="running") setupRerun(CONFIG.rerun_url);
   updateControls();
   if(s.state!=="running") {
+    if($("#fusion-detail"))$("#fusion-detail").textContent="Robot stack is not running.";
     disableKeyboard();
     speakerEnabled=false;$("#speaker-toggle").textContent="Go2 speaker: Off";
     taggingEnabled=null;
@@ -703,13 +734,18 @@ function applyStack(s) {
   }
 }
 function updateControls() {
+  const stackBusy=state.lifecycleBusy || ["starting","running","stopping"].includes(state.stack);
+  $("#stack-start").disabled=stackBusy;
+  $("#stack-map-mode").disabled=stackBusy;
+  if(state.lifecycleBusy)$("#stack-stop").disabled=true;
   const ready = !CONFIG.standalone || state.stack==="running";
   for (const btn of document.querySelectorAll("[data-operation]")) {
-    btn.disabled=!ready || (["tag_object","tag_location","navigate_near_memory_tag","navigate_to_memory_tag","return_to_starting_location"].includes(btn.dataset.operation) && !state.nav);
+    btn.disabled=!ready || (["tag_object","tag_location","navigate_near_memory_tag","navigate_to_memory_tag","return_to_starting_location","begin_demo_exploration"].includes(btn.dataset.operation) && !state.nav);
   }
   if($("#tagging-toggle"))$("#tagging-toggle").disabled=!ready;
   $("#speaker-toggle").disabled=!ready || !CONFIG.standalone;
   $("#navigation-distance").disabled=!ready;
+  $("#navigation-speed").disabled=!ready || !state.speedEnabled || $("#navigation-speed").dataset.saving==="true";
   $("#visual-arrival-toggle").disabled=!ready;
   if(!ready){$("#murmur-toggle").disabled=true;$("#puppy-status").textContent="Robot stack is not running.";}
   for(const btn of document.querySelectorAll("[data-navigation]")) btn.disabled=!ready || !state.nav;
@@ -761,7 +797,10 @@ async function boot() {
     $("#settings-open").hidden=!CONFIG.standalone;
     $("#lifecycle").hidden=!CONFIG.standalone;
     $("#keyboard-bar").hidden=!CONFIG.standalone;
-    if(CONFIG.standalone) {const logs=await api("/api/stack/logs");for(const line of logs.lines)appendStackLog(line);}
+    if(CONFIG.standalone) {
+      $("#stack-map-mode").value=(await api("/api/settings")).settings.map_mode;
+      const logs=await api("/api/stack/logs");for(const line of logs.lines)appendStackLog(line);
+    }
   } catch (e) {
     log("err", "config", String(e));
     addSystem("Could not reach the console API: " + e);
@@ -804,6 +843,21 @@ async function boot() {
   };
   $("#navigation-distance").oninput = () => {
     $("#navigation-distance-value").textContent=Number($("#navigation-distance").value).toFixed(1)+" m";
+  };
+  $("#navigation-speed").oninput = () => {
+    $("#navigation-speed-value").textContent=Number($("#navigation-speed").value).toFixed(2)+" m/s";
+  };
+  $("#navigation-speed").onchange = async () => {
+    const slider=$("#navigation-speed");slider.disabled=true;slider.dataset.saving="true";
+    try {
+      const result=(await api("/api/navigation-speed",{speed_mps:Number(slider.value)})).result;
+      slider.dataset.confirmed=result.speed_mps;slider.value=result.speed_mps;
+      $("#navigation-speed-value").textContent=Number(result.speed_mps).toFixed(2)+" m/s";
+      log("ok","navigation","Live speed limit: "+result.speed_mps+" m/s");
+    }catch(e){
+      addSystem(e.message);slider.value=slider.dataset.confirmed || "0.55";
+      $("#navigation-speed-value").textContent=Number(slider.value).toFixed(2)+" m/s";
+    }finally{delete slider.dataset.saving;updateControls();}
   };
   $("#navigation-distance").onchange = async () => {
     const slider=$("#navigation-distance");slider.disabled=true;slider.dataset.saving="true";
@@ -863,6 +917,14 @@ async function refreshStatus() {
       $("#navigation-distance-value").textContent=Number(result.distance_m).toFixed(1)+" m";
     }
     if(!CONFIG.standalone || state.stack==="running") {
+      const speed=(await api("/api/navigation-speed")).result;
+      state.speedEnabled=speed && speed.enabled===true && Number.isFinite(speed.speed_mps);
+      const speedSlider=$("#navigation-speed");
+      if(state.speedEnabled && document.activeElement!==speedSlider && !speedSlider.dataset.saving){
+        speedSlider.value=speed.speed_mps;speedSlider.dataset.confirmed=speed.speed_mps;
+        $("#navigation-speed-value").textContent=Number(speed.speed_mps).toFixed(2)+" m/s";
+      }
+      updateControls();
       const visual=(await api("/api/visual-arrival")).result;
       $("#visual-arrival-toggle").textContent="Visual arrival: "+(visual.enabled?"On":"Off")+(visual.searching?" (searching)":"");
       if(CONFIG.standalone)applyPuppyStatus((await api("/api/murmur")).result);
@@ -882,10 +944,19 @@ const settingFields = [
     ["vlm_url","Vision API base URL","url"], ["vlm_model","Vision model","text"]
   ]],
   ["Mapping & tagging", [
+    ["auto_pause_fusion","Auto-pause permanent map on low-speed odometry (restart; does not fix pose drift)","checkbox"],
+    ["fusion_window","Motion window (s)","number"],
+    ["fusion_stationary_duration","Stationary dwell (s)","number"],
+    ["fusion_sensor_timeout","Odometry timeout (s; >= window)","number"],
+    ["fusion_stop_speed","Stationary speed threshold (m/s)","number"],
+    ["fusion_resume_speed","Resume speed threshold (m/s; > stationary)","number"],
+    ["fusion_stop_rotation_deg","Stationary rotation threshold (deg/s)","number"],
+    ["fusion_resume_rotation_deg","Resume rotation threshold (deg/s; > stationary)","number"],
     ["pgo_enabled","PGO loop correction (fixed world; applies on restart)","checkbox"],
     ["nearby_arrival_distance","Nearby stop distance (m; 0.3-3.0; restart default)","number"],
+    ["planner_robot_width","Demo planner width (m; 0.30-1.00; restart; never below actual footprint; does not increase speed)","number"],
+    ["navigation_speed_limit","Navigation speed limit (m/s; 0.10-0.55; restart default; live slider is session-only)","number"],
     ["scene_map_dir","Scene directory (maps and tags)","text"],
-    ["map_mode","Map mode","select",["restore","new"]],
     ["capture_mode","Restore capture mode","select",["manual","rotation"]],
     ["rotation_speed","Rotation speed (rad/s; max 0.3)","number"],
     ["rotation_duration","Rotation duration (s; max 60)","number"],
@@ -914,6 +985,8 @@ async function openSettings() {
         if(type==="password"){input.readOnly=true;input.value=data.secrets[key.toUpperCase()]?"********":"";input.placeholder=data.secrets[key.toUpperCase()]?"Configured in .env":"Not configured in .env";input.required=false;}
         else if(type!=="checkbox")input.required=true;
         if(type==="number")input.step=key.endsWith("port")?"1":"any";
+        if(key==="planner_robot_width"){input.min="0.30";input.max="1.00";input.step="0.01";}
+        if(key==="navigation_speed_limit"){input.min="0.10";input.max="0.55";input.step="0.05";}
         label.appendChild(input);wrap.appendChild(label);
       }
     }
@@ -925,6 +998,7 @@ async function openSettings() {
 async function saveSettings(e) {
   e.preventDefault();
   const payload={settings:{}};
+  payload.settings.map_mode=$("#stack-map-mode").value;
   for(const input of $("#settings-fields").querySelectorAll("input,select")) {
     if(input.type==="password") continue;
     payload.settings[input.name]=input.type==="checkbox"?input.checked:input.type==="number"?Number(input.value):input.value;
@@ -939,23 +1013,31 @@ async function saveSettings(e) {
   finally{$("#settings-save").disabled=false;}
 }
 async function lifecycle(action) {
+  if(state.lifecycleBusy)return;
+  state.lifecycleBusy=true;updateControls();
   let overwriteToken;
+  let useExistingMap=false;
+  try {
   if(action==="start") {
-    try {
+      const mode=$("#stack-map-mode").value;
+      const current=await api("/api/settings");
+      if(current.settings.map_mode!==mode)
+        await api("/api/settings",{settings:{...current.settings,map_mode:mode}});
       const plan=await api("/api/stack/prepare",{});
-      if(plan.overwrite_required) {
-        const overwrite=await requestOperation({label:"Overwrite existing scene?",human_only:true,description:`Existing maps and tags at ${plan.scene_directory} will be replaced by a new scene. The previous directory will be moved to a sibling backup. Cancel to keep the current scene unchanged.`});
+      if(mode==="new") {
+        const overwrite=await requestOperation({label:plan.overwrite_required?"Overwrite existing scene?":"Create new map?",human_only:true,offer_restore:plan.restore_available,confirm_label:plan.overwrite_required?"Yes — overwrite":"Yes — create new map",description:`${plan.overwrite_required?"Yes: replace maps and tags, keeping a sibling backup.":"Yes: create a new map."} Scene: ${plan.scene_directory}. ${plan.restore_available?"No — use existing map: preserve the scene and start Restore for alignment.":"No saved map is available to restore; use Cancel to abort."} Rotation capture may rotate the robot when restoring. Automatic tagging may call your configured model service. Keep the area clear. Cancel: do not start.`});
         if(overwrite===null)return;
-        overwriteToken=plan.overwrite_token;
+        useExistingMap=overwrite.use_existing_map===true;
+        if(!useExistingMap)overwriteToken=plan.overwrite_token;
       }
-    }catch(e){addSystem(e.message);return;}
+  } else {
+    const approved=await requestOperation({label:"Stop robot stack",human_only:true,description:"Stops only the stack launched by this console. Graceful shutdown saves the map when permitted."});
+    if(approved===null)return;
   }
-  const approved=await requestOperation({label:action==="start"?"Start robot stack":"Stop robot stack",human_only:true,description:action==="start"?"Check Settings, map mode and robot surroundings. Restore with rotation may rotate the robot automatically. Automatic tagging may call your configured model service.":"Stops only the stack launched by this console. Graceful shutdown saves the map when permitted."});
-  if(approved===null)return;
-  const btn=$("#stack-"+action);btn.disabled=true;
-  try {const result=await api("/api/stack/"+action,{confirmed:true,overwrite_token:overwriteToken});applyStack(result);await refreshStatus();}
+  const result=await api("/api/stack/"+action,{confirmed:true,overwrite_token:overwriteToken,...(useExistingMap?{use_existing_map:true}:{})});applyStack(result);await refreshStatus();
+  }
   catch(e){addSystem(e.message);}
-  finally{await refreshStatus();}
+  finally{state.lifecycleBusy=false;await refreshStatus();updateControls();}
 }
 function appendStackLog(text) {
   const box=$("#stack-log");

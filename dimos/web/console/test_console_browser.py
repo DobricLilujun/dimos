@@ -25,6 +25,7 @@ import pytest
 import uvicorn
 
 from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.std_msgs.String import String
 from dimos.web.console.module import RobotConsoleModule
 from dimos.web.console.settings import ConsoleRuntime
 
@@ -46,8 +47,15 @@ def console_server(tmp_path, mocker):
     calls = []
     child = mocker.Mock(pid=123456)
     child.poll.return_value = None
+    live_speed = {"enabled": True, "speed_mps": 0.55}
 
     async def rpc(op, args):
+        if op.key == "navigation_speed_status":
+            return {"ok": True, "result": dict(live_speed)}
+        if op.key == "set_navigation_speed":
+            calls.append((op.key, args))
+            live_speed.update(args)
+            return {"ok": True, "result": dict(live_speed)}
         if op.key == "nearby_navigation_status":
             return {"ok": True, "result": {"distance_m": 1.0}}
         if op.key == "visual_arrival_status":
@@ -78,7 +86,7 @@ def console_server(tmp_path, mocker):
         }
         return {"ok": True, "result": result if op.key == "query_memory_tags" else "done"}
 
-    def start(overwrite_token=None):
+    def start(overwrite_token=None, *, use_existing_map=False):
         child.poll.return_value = None
         runtime._process = child
         runtime._state = "running"
@@ -163,7 +171,6 @@ def page(console_server):
 
 def start_stack(page):
     page.locator("#stack-start").click()
-    page.locator("#operation-form button[type=submit]").click()
     page.locator("#b-stack").get_by_text("running", exact=True).wait_for()
 
 
@@ -173,6 +180,7 @@ def test_settings_save_all_workflow_parameters_without_exposing_keys(page, conso
         f"OPENAI_API_KEY=test-only-key\nUNITREE_AES_128_KEY={'0' * 32}\n"
     )
     page.locator("#settings-open").click()
+    assert page.locator("#setting-map_mode").count() == 0
     page.locator("#setting-robot_ip").fill("192.168.63.218")
     for key in ("openai_api_key", "unitree_aes_128_key"):
         assert page.locator(f"#setting-{key}").get_attribute("readonly") is not None
@@ -181,11 +189,15 @@ def test_settings_save_all_workflow_parameters_without_exposing_keys(page, conso
     page.locator("#setting-agent_model").fill("openai:local-model")
     page.locator("#setting-vlm_url").fill("http://127.0.0.1:8000")
     page.locator("#setting-vlm_model").fill("local-vision")
-    page.locator("#setting-map_mode").select_option("new")
     page.locator("#setting-scene_map_dir").fill("assets/scene_maps/browser_test")
     page.locator("#setting-replay").check()
     page.locator("#setting-place_tagging").uncheck()
     page.locator("#setting-pgo_enabled").check()
+    assert page.locator("#setting-auto_pause_fusion").is_checked()
+    page.locator("#setting-fusion_resume_speed").fill("0.05")
+    assert page.locator("#setting-planner_robot_width").input_value() == "0.3"
+    page.locator("#setting-planner_robot_width").fill("0.4")
+    page.locator("#setting-navigation_speed_limit").fill("0.35")
     page.locator("#setting-vlm_distance_m").fill("2.5")
     page.locator("#setting-rerun_grpc_port").fill("9887")
     page.locator("#settings-save").click()
@@ -196,6 +208,10 @@ def test_settings_save_all_workflow_parameters_without_exposing_keys(page, conso
     assert runtime.settings.vlm_distance_m == 2.5
     assert runtime.settings.place_tagging is False
     assert runtime.settings.pgo_enabled is True
+    assert runtime.settings.auto_pause_fusion is True
+    assert runtime.settings.fusion_resume_speed == 0.05
+    assert runtime.settings.planner_robot_width == 0.4
+    assert runtime.settings.navigation_speed_limit == 0.35
     assert runtime.settings.replay is True
     assert runtime.settings.rerun_grpc_port == 9887
     assert page.locator("#rr").get_attribute("src") == (
@@ -212,11 +228,7 @@ def test_settings_save_all_workflow_parameters_without_exposing_keys(page, conso
     )
 
 
-def test_start_and_alignment_require_explicit_confirmation(page, console_server):
-    runtime = console_server[2]
-    page.locator("#stack-start").click()
-    page.locator("#operation-cancel").click()
-    assert runtime.start.call_count == 0
+def test_alignment_still_requires_explicit_confirmation(page, console_server):
     start_stack(page)
     button = page.locator('[data-operation="confirm_alignment"]')
     button.click()
@@ -227,6 +239,30 @@ def test_start_and_alignment_require_explicit_confirmation(page, console_server)
         page.locator("#operation-form button[type=submit]").click()
     assert response.value.json()["ok"] is True
     assert console_server[3] == [("confirm_alignment", {})]
+
+
+def test_fusion_controls_require_confirmation_and_show_pause_reason(page, console_server):
+    module = console_server[1]
+    module._status["fusion_status"] = {
+        "fusion_enabled": False,
+        "reason": "Manual pause",
+        "accepted_frames": 12,
+        "skipped_frames": 8,
+    }
+    start_stack(page)
+    page.get_by_text(
+        "Fusion paused: Manual pause. Accepted 12, skipped 8. Live pose is not frozen.",
+        exact=True,
+    ).wait_for()
+    for key in ("pause_fusion", "resume_fusion"):
+        page.locator(f'[data-operation="{key}"]').click()
+        page.locator("#operation-cancel").click()
+        assert console_server[3] == ([] if key == "pause_fusion" else [("pause_fusion", {})])
+        page.locator(f'[data-operation="{key}"]').click()
+        with page.expect_response("**/api/action") as response:
+            page.locator("#operation-form button[type=submit]").click()
+        assert response.value.json()["ok"] is True
+    assert console_server[3] == [("pause_fusion", {}), ("resume_fusion", {})]
 
 
 @pytest.mark.parametrize(
@@ -253,6 +289,72 @@ def test_parameter_forms_submit_actual_skill_arguments(page, console_server, key
             page.locator('#operation-fields input[name="location_id"]').input_value()
             == "loc_office"
         )
+
+
+def test_demo_exploration_form_submits_typed_options_and_shows_stop_reason(page, console_server):
+    start_stack(page)
+    page.locator('[data-operation="begin_demo_exploration"]').click()
+    assert page.locator('#operation-fields input[name="min_goals"]').input_value() == "10"
+    assert page.locator('#operation-fields input[name="gain_percent"]').input_value() == "1"
+    assert page.locator('#operation-fields input[name="check_interval"]').input_value() == "3"
+    page.locator('#operation-fields select[name="strategy"]').select_option("efficient")
+    page.locator('#operation-fields input[name="min_goals"]').fill("12")
+    page.locator('#operation-fields input[name="gain_percent"]').fill("0.5")
+    page.locator('#operation-fields input[name="check_interval"]').fill("2")
+    with page.expect_response("**/api/action") as response:
+        page.locator("#operation-form button[type=submit]").click()
+    assert response.value.json()["ok"] is True
+    assert console_server[3] == [
+        (
+            "begin_demo_exploration",
+            {
+                "strategy": "efficient",
+                "min_goals": 12,
+                "gain_percent": 0.5,
+                "no_gain_attempts": 2,
+                "check_interval": 2,
+            },
+        )
+    ]
+    console_server[1]._on_exploration_state(String("completed: Low map gain"))
+    page.locator("#exploration-detail").get_by_text(
+        "completed: Low map gain", exact=True
+    ).wait_for()
+    with page.expect_response("**/api/action"):
+        page.locator('[data-operation="end_demo_exploration"]').click()
+    assert console_server[3][-1] == ("end_demo_exploration", {})
+
+
+def test_live_speed_slider_updates_running_navigation_and_reverts_failed_update(
+    page, console_server, mocker
+):
+    assert page.locator("#navigation-speed").is_disabled()
+    start_stack(page)
+    page.wait_for_function("!document.querySelector('#navigation-speed').disabled")
+    with page.expect_response(
+        lambda response: response.url.endswith("/api/navigation-speed")
+        and response.request.method == "POST"
+    ) as response:
+        page.locator("#navigation-speed").fill("0.25")
+    assert response.value.json()["result"]["speed_mps"] == 0.25
+    assert page.locator("#navigation-speed-value").inner_text() == "0.25 m/s"
+    assert ("set_navigation_speed", {"speed_mps": 0.25}) in console_server[3]
+    assert console_server[2].settings.navigation_speed_limit == 0.55
+    previous = console_server[1]._call_rpc
+
+    async def fail_update(op, args):
+        if op.key == "set_navigation_speed":
+            return {"ok": False, "error": "Speed update unavailable"}
+        return await previous(op, args)
+
+    mocker.patch.object(console_server[1], "_call_rpc", side_effect=fail_update)
+    with page.expect_response(
+        lambda response: response.url.endswith("/api/navigation-speed")
+        and response.request.method == "POST"
+    ):
+        page.locator("#navigation-speed").fill("0.4")
+    page.get_by_text("Speed update unavailable", exact=True).wait_for()
+    assert page.locator("#navigation-speed").input_value() == "0.25"
 
 
 def test_chat_pairs_tool_io_without_duplicate_user_and_idle_is_not_thinking(page):
@@ -507,6 +609,7 @@ def test_existing_scene_requires_overwrite_confirmation_before_start(page, conso
     scene = runtime.project_dir / "old_scene"
     scene.mkdir()
     (scene / "tags.json").write_text("old tags")
+    page.locator("#stack-map-mode").select_option("new")
     page.locator("#stack-start").click()
     page.get_by_role("heading", name="Overwrite existing scene?").wait_for()
     page.locator("#operation-cancel").click()
@@ -516,10 +619,68 @@ def test_existing_scene_requires_overwrite_confirmation_before_start(page, conso
     page.locator("#stack-start").click()
     page.get_by_role("heading", name="Overwrite existing scene?").wait_for()
     page.locator("#operation-form button[type=submit]").click()
-    page.get_by_role("heading", name="Start robot stack", exact=True).wait_for()
-    page.locator("#operation-form button[type=submit]").click()
     page.locator("#b-stack").get_by_text("running", exact=True).wait_for()
     runtime.start.assert_called_once_with(runtime._overwrite_token)
+
+
+def test_first_run_new_map_requires_confirmation_without_restore_option(page, console_server):
+    runtime = console_server[2]
+    page.locator("#stack-map-mode").select_option("new")
+    page.locator("#stack-start").click()
+    page.get_by_role("heading", name="Create new map?", exact=True).wait_for()
+    assert page.locator("#operation-restore").is_hidden()
+    page.locator("#operation-cancel").click()
+    runtime.start.assert_not_called()
+    page.locator("#stack-start").click()
+    page.get_by_role("button", name="Yes — create new map", exact=True).click()
+    page.locator("#b-stack").get_by_text("running", exact=True).wait_for()
+    runtime.start.assert_called_once_with(None)
+    assert runtime.settings.map_mode == "new"
+    assert page.locator("#stack-map-mode").is_disabled()
+
+
+def test_restore_starts_without_dialog_and_persists_main_selection(page, console_server):
+    runtime = console_server[2]
+    runtime.settings = runtime.settings.model_copy(update={"map_mode": "new"})
+    page.locator("#stack-map-mode").select_option("restore")
+    start_stack(page)
+    assert page.locator("#operation-dialog").is_hidden()
+    assert runtime.settings.map_mode == "restore"
+    runtime.start.assert_called_once_with(None)
+
+
+def test_missing_restore_map_reports_error_without_choice_dialog(page, console_server):
+    runtime = console_server[2]
+    runtime.start.side_effect = ValueError(
+        "Saved map does not exist; select New map for the first run"
+    )
+    page.locator("#stack-map-mode").select_option("restore")
+    page.locator("#stack-start").click()
+    page.get_by_text(
+        "Saved map does not exist; select New map for the first run", exact=True
+    ).wait_for()
+    assert page.locator("#operation-dialog").is_hidden()
+    assert page.locator("#stack-map-mode").is_enabled()
+
+
+def test_overwrite_no_uses_existing_map_for_alignment(page, console_server):
+    runtime = console_server[2]
+    runtime.settings = runtime.settings.model_copy(
+        update={"map_mode": "new", "scene_map_dir": "old_scene"}
+    )
+    scene = runtime.project_dir / "old_scene"
+    scene.mkdir()
+    (scene / "map.pc2.lcm").write_bytes(b"saved map")
+    (scene / "tags.json").write_text("old tags")
+    page.locator("#stack-map-mode").select_option("new")
+    page.locator("#stack-start").click()
+    page.get_by_role("heading", name="Overwrite existing scene?", exact=True).wait_for()
+    with page.expect_response("**/api/stack/start") as response:
+        page.get_by_role("button", name="No — use existing map", exact=True).click()
+    assert response.value.json()["ok"] is True
+    runtime.start.assert_called_once_with(None, use_existing_map=True)
+    assert (scene / "map.pc2.lcm").read_bytes() == b"saved map"
+    assert (scene / "tags.json").read_text() == "old tags"
 
 
 def test_stop_keeps_console_open_and_disables_robot_controls(page, console_server):
