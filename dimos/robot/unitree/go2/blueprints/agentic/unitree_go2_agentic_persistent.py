@@ -38,6 +38,7 @@ _persistent = (
             (GO2Connection, "tf", "session_tf"),
             (MovementManager, "cmd_vel", "session_cmd_vel"),
             (PersonFollowSkillContainer, "cmd_vel", "session_cmd_vel"),
+            (PersistentGo2Map, "pgo_stop", "stop_movement"),
         ]
     )
 )
@@ -46,7 +47,7 @@ _persistent = (
 def _aligned_viewer(blueprint: Blueprint) -> Blueprint:
     # Rerun consumes every TFMessage, regardless of topic. Keep raw session TF
     # out of its subscription so it cannot overwrite the aligned robot pose.
-    raw_topics = {"session_lidar", "session_odom", "session_tf"}
+    raw_topics = {"session_lidar", "session_odom", "session_tf", "pgo_raw_tf", "pgo_raw_lidar"}
     topics = sorted(
         {
             name

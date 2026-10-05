@@ -70,11 +70,17 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 /* ---- layout ---- */
-.app { display: grid; grid-template-rows: 56px 1fr 30px; height: 100vh; }
-main { display: grid; grid-template-columns: 300px 1fr 400px; min-height: 0; }
+.app { display: grid; grid-template-rows: 56px minmax(0,1fr) 30px; height: 100dvh; overflow:hidden; }
+main { display: grid; grid-template-columns: 300px minmax(0,1fr) 400px; min-height: 0; overflow:hidden; }
 aside.deck { border-right: 1px solid var(--line); background: var(--panel); overflow: auto; }
-center.viz { position: relative; background: #05090f; min-width: 0; }
-aside.chat { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-width: 0; }
+center.viz { display:flex; flex-direction:column; background: #05090f; min-width:0; min-height:0; text-align:left; }
+.viewer { position:relative; flex:1; min-height:0; }
+.backend-console { height:220px; flex:none; display:flex; flex-direction:column; border-top:1px solid var(--line-2); background:#08101a; }
+.console-heading { display:flex; align-items:center; gap:12px; padding:10px 12px; border-bottom:1px solid var(--line); }
+.console-heading h2 { margin:0; font-size:12px; color:var(--accent); }
+.console-heading small { flex:1; color:var(--muted); font-size:10px; }
+.console-heading button { color:var(--muted); background:var(--panel-2); border:1px solid var(--line); border-radius:6px; padding:4px 8px; cursor:pointer; }
+aside.chat { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-width:0; min-height:0; overflow:hidden; }
 
 /* ---- header ---- */
 header {
@@ -161,7 +167,18 @@ header {
   background: linear-gradient(135deg, var(--accent-3), var(--accent-2)); color:#fff; font-weight:800; font-size:12px; }
 .chat .head .who { font-weight: 700; }
 .chat .head .who small { display:block; color: var(--muted); font-weight: 500; font-size: 10.5px; }
-.chat .msgs { flex: 1; overflow: auto; padding: 14px 14px 6px; display: flex; flex-direction: column; gap: 12px; }
+.chat .msgs { flex: 1; min-height:0; overflow:auto; overflow-wrap:anywhere; padding: 14px 14px 6px; display: flex; flex-direction: column; gap: 12px; }
+.chat .msgs > * { flex-shrink:0; }
+.chat .head, .chat .in { flex-shrink:0; }
+.stream-view { position:absolute; inset:0; background:#05090f; }
+.stream-view img { width:100%; height:100%; object-fit:contain; }
+.stream-view.pip { inset:54px 14px auto auto; width:30%; height:30%; min-width:120px; z-index:4; border:1px solid var(--accent); border-radius:10px; overflow:hidden; box-shadow:var(--shadow); }
+.stream-label { position:absolute; bottom:6px; left:6px; background:rgba(0,0,0,.8); padding:4px 8px; border-radius:5px; color:var(--text); z-index:2; font-size:11px; }
+.stream-switch { position:absolute; inset:0; width:100%; border:0; background:transparent; cursor:pointer; z-index:3; }
+.stream-view:not(.pip) .stream-switch { display:none; }
+.camera-note { position:absolute; inset:0; display:grid; place-items:center; color:var(--muted); pointer-events:none; }
+.keyboard-bar { display:flex; align-items:center; gap:8px; padding:6px 12px; flex-wrap:wrap; font-size:11px; color:var(--muted); border-top:1px solid var(--line); flex:none; }
+.keyboard-bar .btn { width:auto; padding:5px 10px; margin:0; font-size:11px; }
 .msg { display: flex; gap: 10px; max-width: 100%; }
 .msg .av { width: 28px; height: 28px; border-radius: 8px; flex: none; display:grid; place-items:center; font-size:11px; font-weight:800; }
 .msg.user .av { background: #14324a; color: var(--accent-2); }
@@ -217,6 +234,31 @@ header {
 footer { display:flex; align-items:center; gap: 16px; padding: 0 16px; border-top: 1px solid var(--line); background: #08101a; color: var(--dim); font-size: 11px; }
 footer .sep { color: var(--line-2); }
 footer b { color: var(--muted); font-weight: 600; }
+button:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+[hidden] { display:none !important; }
+.header-btn { width:auto; margin:0; padding:6px 12px; }
+dialog { color:var(--text); background:var(--panel); border:1px solid var(--line-2); border-radius:16px; padding:24px; width:min(760px,94vw); max-height:88vh; overflow:auto; box-shadow:var(--shadow); }
+dialog::backdrop { background:rgba(0,0,0,.7); backdrop-filter:blur(4px); }
+dialog h2 { margin:0 0 12px; }
+dialog p, .note { color:var(--muted); line-height:1.5; }
+.form-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+.field { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.field input, .field select { width:100%; color:var(--text); background:var(--bg-2); border:1px solid var(--line-2); padding:10px; border-radius:8px; font:inherit; }
+.field input[type=checkbox] { width:auto; align-self:flex-start; }
+.field small { color:var(--muted); }
+.actions { display:flex; justify-content:flex-end; gap:12px; margin-top:20px; }
+.actions .btn { width:auto; }
+.error { color:var(--bad); white-space:pre-wrap; }
+.section-title { grid-column:1/-1; font-size:12px; letter-spacing:.08em; color:var(--accent); border-top:1px solid var(--line); padding-top:12px; margin-top:8px; }
+#alignment-detail { white-space:pre-wrap; padding:12px; font-size:12px; color:var(--muted); }
+#stack-log, #diagnostic-output { white-space:pre-wrap; overflow-wrap:anywhere; max-height:220px; overflow:auto; padding:12px; font:11px var(--mono); }
+#stack-log { flex:1; min-height:0; max-height:none; margin:0; text-align:left; color:var(--muted); }
+.inventory { margin:12px; overflow:auto; font-size:11px; }
+.inventory table { width:100%; border-collapse:collapse; }
+.inventory td, .inventory th { padding:7px 4px; border-bottom:1px solid var(--line); text-align:left; overflow-wrap:anywhere; }
+.inventory .btn { padding:5px; font-size:11px; }
+@media(max-width:1100px) { main { grid-template-columns:260px minmax(0,1fr) 320px; } .title { display:none; } }
+@media(max-width:800px) { .app { height:auto; min-height:100vh; grid-template-rows:auto 1fr auto; } header { flex-wrap:wrap; padding:10px; gap:8px; } main { grid-template-columns:1fr; } aside.deck { max-height:45vh; } center.viz { height:50vh; } aside.chat { height:65vh; } footer { flex-wrap:wrap; padding:10px; gap:8px; } .form-grid { grid-template-columns:1fr; } }
 
 /* scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -233,6 +275,8 @@ footer b { color: var(--muted); font-weight: 600; }
     </div>
     <div class="title">Go2 Persistent Workflow <span class="sub">/ control deck</span></div>
     <div class="spacer"></div>
+    <button class="btn header-btn" id="settings-open">Settings</button>
+    <button class="btn header-btn" id="fullscreen-toggle">Full screen</button>
     <div class="status-row" id="status">
       <span class="badge" id="b-conn"><span class="dot"></span>connecting</span>
       <span class="badge" id="b-agent"><span class="dot"></span>agent idle</span>
@@ -244,25 +288,71 @@ footer b { color: var(--muted); font-weight: 600; }
   <main>
     <!-- CONTROL DECK -->
     <aside class="deck" id="deck">
+      <div id="lifecycle" class="group" hidden>
+        <h2>Robot stack</h2>
+        <span class="badge" id="b-stack">stopped</span>
+        <button class="btn primary" id="stack-start">Start robot stack</button>
+        <button class="btn human" id="stack-stop">Save and stop</button>
+        <p class="note">Choose New map for the first run and Restore when reconnecting. Supervise manual capture on site and stop the robot before finishing capture. Canceling navigation is not a hardware emergency stop.</p>
+      </div>
       <h2>Control deck</h2>
       <div id="deck-groups"></div>
+      <div id="alignment-detail" role="status"></div>
+      <div class="inventory" id="inventory"></div>
+      <div class="group">
+        <button class="btn" id="diagnostics">MCP tools and modules</button>
+        <pre id="diagnostic-output"></pre>
+      </div>
       <h2>Operation log</h2>
       <div class="log" id="log"><div class="row"><span class="t">--:--:--</span>ready</div></div>
     </aside>
 
     <!-- RERUN (preserved) -->
     <center class="viz" id="viz">
+      <div class="viewer">
       <div class="vbar">
         <span class="chip">Rerun · <b id="viz-host">live 3D</b></span>
         <span class="chip link" id="viz-open">open in new tab</span>
+        <button class="chip link" id="viz-refresh">Refresh viewer</button>
       </div>
-      <iframe id="rr" title="Rerun" style="display:none"></iframe>
+      <div class="stream-view" id="world-view">
+        <iframe id="rr" title="Rerun 3D" style="display:none"></iframe>
+        <span class="stream-label">3D</span>
+        <button class="stream-switch" id="world-switch" aria-label="Make 3D the main view"></button>
+      </div>
+      <div class="stream-view pip" id="camera-view">
+        <img id="camera-image" alt="Robot camera" hidden>
+        <span class="camera-note" id="camera-note">Camera not ready</span>
+        <span class="stream-label">Camera</span>
+        <button class="stream-switch" id="camera-switch" aria-label="Make Camera the main view"></button>
+      </div>
       <div class="frame-fallback" id="rr-fallback">
         <div>
           <p style="color:var(--text);font-weight:600;margin:0 0 8px">Rerun viewer</p>
           <p>The live Rerun viewer is served by the stack. <a id="rr-link" href="#">Open it in a new tab</a> to view the 3D map and camera feed.</p>
         </div>
       </div>
+      </div>
+      <div class="keyboard-bar" id="keyboard-bar" hidden>
+        <button class="btn human" id="keyboard-enable">Enable keyboard</button>
+        <div id="manual-pad" hidden>
+          <button class="btn" data-drive="w" aria-label="Hold to move forward">Forward</button>
+          <button class="btn" data-drive="s" aria-label="Hold to move backward">Back</button>
+          <button class="btn" data-drive="a" aria-label="Hold to strafe left">Strafe left</button>
+          <button class="btn" data-drive="d" aria-label="Hold to strafe right">Strafe right</button>
+          <button class="btn" data-drive="q" aria-label="Hold to turn left">Turn left</button>
+          <button class="btn" data-drive="e" aria-label="Hold to turn right">Turn right</button>
+        </div>
+        <span id="keyboard-status">Hold Space + W/S forward/back, A/D strafe, Q/E turn. Esc stops.</span>
+      </div>
+      <section class="backend-console" id="stack-logs" aria-label="Backend console">
+        <div class="console-heading">
+          <h2>Backend console</h2>
+          <small>Stack output, operations and tool progress</small>
+          <button type="button" id="console-clear">Clear</button>
+        </div>
+        <pre id="stack-log" role="log" aria-label="Backend execution output"></pre>
+      </section>
     </center>
 
     <!-- CHAT -->
@@ -271,9 +361,19 @@ footer b { color: var(--muted); font-weight: 600; }
         <div class="ai">✦</div>
         <div class="who">Agent chat<small>talk to the robot · see tool I/O</small></div>
         <div class="spacer" style="flex:1"></div>
+        <button class="chip link" id="speaker-toggle">Go2 speaker: Off</button>
         <span class="badge" id="b-thinking" style="display:none"><span class="dot"></span>thinking</span>
       </div>
-      <div class="msgs" id="msgs"></div>
+      <div class="msgs" id="msgs" role="log" aria-label="Conversation"></div>
+      <label class="hint" for="navigation-distance">Nearby stop distance:
+        <output id="navigation-distance-value">1.0 m</output>
+        <input id="navigation-distance" type="range" min="0.3" max="3" step="0.1" value="1"
+          aria-label="Nearby stop distance" style="width:100%">
+        <span>Applies to the next trip; precise navigation is unchanged.</span>
+        <button type="button" class="chip link" id="visual-arrival-toggle">Visual arrival: Off</button>
+        <button type="button" class="chip link" id="murmur-toggle" disabled>Murmur: Off</button>
+        <span id="puppy-status" role="status">Enable Go2 speaker to start Puppy.</span>
+      </label>
       <div class="in">
         <div class="row">
           <textarea id="input" placeholder="Message the agent…  (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
@@ -292,6 +392,24 @@ footer b { color: var(--muted); font-weight: 600; }
     <span id="f-note"></span>
   </footer>
 </div>
+<dialog id="operation-dialog">
+  <form id="operation-form">
+    <h2 id="operation-title"></h2>
+    <p id="operation-description"></p>
+    <div class="form-grid" id="operation-fields"></div>
+    <p class="note" id="operation-warning"></p>
+    <div class="actions"><button class="btn" type="button" id="operation-cancel">Cancel</button><button class="btn primary" type="submit">Confirm</button></div>
+  </form>
+</dialog>
+<dialog id="settings-dialog">
+  <form id="settings-form" autocomplete="off">
+    <h2>Settings</h2>
+    <p>Changes apply on the next startup. Stop the robot stack before editing settings. Ordinary settings are saved locally. Keys are loaded from the project's .env file and are read-only here. Edit .env to change keys, then restart the robot stack. Local vLLM agent model: openai:your-model-name.</p>
+    <div class="form-grid" id="settings-fields"></div>
+    <p id="settings-error" class="error" role="alert"></p>
+    <div class="actions"><button class="btn" type="button" id="settings-cancel">Cancel</button><button class="btn primary" id="settings-save" type="submit">Save settings</button></div>
+  </form>
+</dialog>
 
 <script>
 "use strict";
@@ -300,9 +418,18 @@ const el = (t, cls, html) => { const n = document.createElement(t); if (cls) n.c
 const now = () => { const d = new Date(); return d.toTimeString().slice(0,8); };
 
 let CONFIG = {};
-const state = { agentIdle: false, align: null, nav: null };
-let openToolCards = {};   // tool_call_id -> { inputEl }  (to pair agent tool_call -> tool result)
-let lastToolOut = {};     // name -> last output (for cards without matching id)
+const state = { nav: false, stack: null };
+const openToolCards = new Map();
+const pendingEchoes = new Map();
+let refreshing = false;
+let sending = false;
+let keyboardSocket = null;
+let keyboardReady = false;
+let driveHeld = false;
+let taggingEnabled = null;
+let speakerEnabled = false;
+const pressedKeys = new Set();
+let cameraBusy = false;
 
 // ---------- helpers ----------
 function log(kind, key, detail) {
@@ -311,44 +438,37 @@ function log(kind, key, detail) {
   const box = $("#log");
   box.insertBefore(row, box.firstChild);
   while (box.children.length > 60) box.removeChild(box.lastChild);
+  appendStackLog(`[${now()}] [${kind || "info"}] ${key}${detail ? ": " + detail : ""}`);
 }
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
-function setBadge(id, cls, label) { const b = $(id); if (!b) return; b.className = "badge " + cls; b.innerHTML = `<span class="dot"></span>${esc(label)}`; }
+function setBadge(id, cls, label) { const b = $("#" + id); if (!b) return; b.className = "badge " + cls; b.innerHTML = `<span class="dot"></span>${esc(label)}`; }
 function fmtTime() { return now(); }
+async function api(url, data) {
+  const options = data === undefined ? {} : {method:"POST",headers:{"Content-Type":"application/json","X-Console-Token":CONFIG.csrf_token || ""},body:JSON.stringify(data)};
+  const response = await fetch(url, options);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const result = await response.json();
+  if (result.ok === false) throw new Error(result.error || "Operation failed");
+  return result;
+}
 
 // ---------- Rerun embed ----------
 function setupRerun(url) {
-  const host = url.replace(/^http:\/\//, "").replace(/\/$/, "");
+  const host = new URL(url).host;
   $("#viz-host").textContent = host;
   $("#f-rr").textContent = host;
   const iframe = $("#rr");
-  let failed = false;
-  iframe.onload = () => { try { const d = iframe.contentDocument; } catch (e) {} };
-  iframe.onerror = () => { showFallback(); };
-  // some viewers refuse framing; surface a manual-open fallback after a short delay
-  const t = setTimeout(() => {
-    // If the iframe is still blank / blocked, show the fallback link.
-    try {
-      iframe.contentWindow.location.href; // throws if cross-origin blocked
-    } catch (e) { /* cross-origin: likely fine, keep iframe */ }
-  }, 3500);
-  function showFallback() {
-    failed = true;
+  iframe.onerror = () => {
     iframe.style.display = "none";
     const fb = $("#rr-fallback"); fb.style.display = "grid";
-  }
+  };
   // Use the iframe by default; if the browser blocks it the fallback link remains.
   iframe.src = url;
   iframe.style.display = "block";
   $("#rr-fallback").style.display = "none";
   $("#viz-open").onclick = () => window.open(url, "_blank");
   const link = $("#rr-link"); if (link) link.href = url;
-  // Detect a blocked frame (0x0 or not rendering) and fall back to a link.
-  setTimeout(() => {
-    if (!iframe.complete && iframe.getAttribute("src") === url) {
-      // leave the iframe; browsers will show it if framing is allowed
-    }
-  }, 3500);
+  $("#viz-refresh").onclick = () => setupRerun(url);
 }
 
 // ---------- operations / control deck ----------
@@ -371,7 +491,13 @@ function buildDeck() {
         <span class="lbl">${esc(op.label)}<small>${esc(op.description || "")}</small></span>
         <span class="kind">${op.kind === "rpc" ? "rpc" : "skill"}</span>`;
       btn.onclick = () => runOp(op, btn);
+      btn.dataset.operation = op.key;
       g.appendChild(btn);
+    }
+    if(group==="Tagging") {
+      const toggle=el("button","btn");
+      toggle.id="tagging-toggle";toggle.textContent="Automatic tagging: Check status";
+      toggle.onclick=toggleTagging;g.appendChild(toggle);
     }
     wrap.appendChild(g);
   }
@@ -381,40 +507,68 @@ function opIcon(op) {
     finish_startup_capture: "⚑", cancel_startup_rotation: "↺",
     alignment_status: "◷", navigation_ready: "⦿",
     tag_object: "◈", tag_location: "⌖", query_memory_tags: "⌕",
-    navigate_to_memory_tag: "⤖", stop_navigation: "⏹" };
+    navigate_near_memory_tag: "⤖", navigate_to_memory_tag: "⤖", stop_navigation: "⏹" };
   return map[op.key] || "•";
 }
-async function runOp(op, btn) {
-  let args = {};
-  const fields = (op.schema && op.schema.properties) || {};
-  const required = (op.schema && op.schema.required) || [];
-  if (required.length || Object.keys(fields).length) {
-    for (const [name, spec] of Object.entries(fields)) {
-      const def = spec.default != null ? spec.default : (spec.type === "boolean" ? false : "");
-      const v = prompt(`${op.label} — ${esc(name)}` + (spec.description ? ` (${esc(spec.description)})` : "") + ":", def);
-      if (v === null) { log("", op.key, "cancelled"); return; }
-      args[name] = spec.type === "string" ? v.trim() : v;
+function requestOperation(op, preset = {}) {
+  return new Promise(resolve => {
+    const dialog = $("#operation-dialog");
+    const form = $("#operation-form");
+    $("#operation-title").textContent = op.label;
+    $("#operation-description").textContent = op.description || "";
+    $("#operation-warning").textContent = op.human_only ? "Human approval required. Inspect Rerun before alignment approval; stop the robot before finishing capture. Navigation can move the robot." : "";
+    const wrap = $("#operation-fields"); wrap.replaceChildren();
+    for (const [name, spec] of Object.entries((op.schema || {}).properties || {})) {
+      const label = el("label","field"); label.appendChild(el("span", "", esc(name)));
+      const input = el("input"); input.name = name; input.value = preset[name] || spec.default || "";
+      input.required = ((op.schema || {}).required || []).includes(name);
+      label.appendChild(input); const help = el("small"); help.textContent = spec.description || ""; label.appendChild(help); wrap.appendChild(label);
     }
+    const finish = result => { dialog.close(); form.onsubmit = null; dialog.oncancel = null; resolve(result); };
+    $("#operation-cancel").onclick = () => finish(null);
+    dialog.oncancel = e => { e.preventDefault(); finish(null); };
+    form.onsubmit = e => { e.preventDefault(); const args = {}; for (const input of wrap.querySelectorAll("input")) {args[input.name] = input.value.trim(); if(input.required && !args[input.name]) {input.setCustomValidity("Please enter a name / ID"); input.reportValidity(); input.setCustomValidity("");return;}} finish(args); };
+    dialog.showModal();
+  });
+}
+async function runOp(op, btn, preset = {}) {
+  let args = preset;
+  const fields = (op.schema && op.schema.properties) || {};
+  if (op.human_only || Object.keys(fields).length) {
+    args = await requestOperation(op, preset);
+    if (args === null) return;
   }
-  btn.style.opacity = ".5";
+  btn.disabled = true;
   log("running", op.key, op.kind === "rpc" ? "rpc" : "skill");
   try {
-    const res = await fetch("/api/action", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: op.key, args }),
-    }).then(r => r.json());
-    if (res.ok) {
+    const card = addTool(makeToolCard(op.key, pretty(args), null, "call"));
+    try {
+      const res = await api("/api/action", {name:op.key,args,confirmed:op.human_only});
+      card.querySelector(".out pre").textContent = typeof res.result === "string" ? res.result : pretty(res.result);
+      card.querySelector(".st").textContent = "result";
       log("ok", op.key, "done");
-      addSystem(`✓ ${esc(op.label)} — ${esc(String(res.result ?? "ok"))}`);
-      if (op.key === "alignment_status" || op.key === "navigation_ready") refreshStatus();
-    } else {
-      log("err", op.key, res.error || "failed");
-      addSystem(`✗ ${esc(op.label)} — ${esc(res.error || "failed")}`);
-    }
+      if (op.key === "query_memory_tags") renderInventory(res.result);
+      await refreshStatus();
+    } catch(e) { card.querySelector(".out pre").textContent = e.message; card.querySelector(".st").textContent = "error"; throw e; }
   } catch (e) {
     log("err", op.key, String(e));
+    addSystem("✗ " + op.label + " — " + e.message);
   }
-  btn.style.opacity = "1";
+  btn.disabled = false;
+  updateControls();
+}
+
+function renderInventory(result) {
+  if (typeof result === "string") { try {result = JSON.parse(result);} catch(e) {return;} }
+  if (!result || !Array.isArray(result.tags)) return;
+  const wrap = $("#inventory"); wrap.replaceChildren();
+  const summary = el("p"); summary.textContent = `${result.matching_tag_count} matching / ${result.total_stored_tags} saved · world`; wrap.appendChild(summary);
+  const table = el("table"); const head = el("tr"); for (const title of ["Name / ID","Position","Go"]) {const th=el("th");th.textContent=title;head.appendChild(th);}table.appendChild(head);
+  for (const tag of result.tags) {
+    const tr = el("tr"); for (const value of [tag.name + "\n" + tag.id, pretty(tag.position)]) {const td=el("td");td.textContent=value;tr.appendChild(td);}
+    const td = el("td"); const btn=el("button","btn");btn.textContent="Navigate nearby";btn.dataset.navigation="true";btn.disabled=!state.nav;btn.onclick=()=>runOp(CONFIG.operations.find(op=>op.key==="navigate_near_memory_tag"),btn,{location_id:tag.id});td.appendChild(btn);tr.appendChild(td);table.appendChild(tr);
+  }
+  wrap.appendChild(table);
 }
 
 // ---------- chat ----------
@@ -463,20 +617,18 @@ function pretty(obj) {
 // render a normalized message (from /events)
 function renderMessage(m) {
   if (m.role === "user" || m.kind === "user") {
-    addBubble("user", m.content || "", "You");
+    const count = m.source ? 0 : (pendingEchoes.get(m.content) || 0);
+    if (count) { if(count===1) pendingEchoes.delete(m.content); else pendingEchoes.set(m.content,count-1); return; }
+    addBubble("user", m.content || "", m.source || "You");
     return;
   }
   if (m.kind === "tool" || m.role === "tool") {
     // match a pending tool_call by id, else open a fresh card
-    const card = makeToolCard(m.name, "…", m.content, "result");
-    addTool(card);
-    const io = card.querySelector(".out pre");
-    if (io) io.textContent = m.content || "(no output)";
-    if (m.tool_call_id && openToolCards[m.tool_call_id]) {
-      const inEl = openToolCards[m.tool_call_id];
-      if (inEl) inEl.textContent = m.input || "…";
-      delete openToolCards[m.tool_call_id];
-    }
+    let card = openToolCards.get(m.tool_call_id);
+    if (!card) card = addTool(makeToolCard(m.name, "—", null, "result"));
+    card.querySelector(".out pre").textContent = m.content || "(no output)";
+    card.querySelector(".st").textContent = "result";
+    openToolCards.delete(m.tool_call_id);
     return;
   }
   // agent message
@@ -485,11 +637,11 @@ function renderMessage(m) {
       const card = makeToolCard(tc.name, pretty(tc.args || {}), null, "call");
       addTool(card);
       const id = m.tool_call_id || (tc.id || (tc.args && tc.args._id));
-      if (id) openToolCards[id] = card.querySelector(".in pre");
+      if (id) openToolCards.set(id, card);
     }
   }
   if (m.content && m.content.trim()) {
-    addBubble("agent", m.content, "Agent");
+    addBubble("agent", m.content, m.source || "Agent");
   } else if (m.tool_calls && m.tool_calls.length) {
     addBubble("agent", "planning…", "Agent · tool call");
   }
@@ -499,6 +651,7 @@ function renderToolStream(ev) {
   const name = ev.name || "tool";
   const text = ev.text || "";
   if (!text) return;
+  appendStackLog(`[${now()}] [tool:${name}] ${text}`);
   const card = makeToolCard(name, "", text, "live");
   card.querySelector(".io").classList.add("full");
   addTool(card);
@@ -514,57 +667,101 @@ function setThinking(on) {
 
 // ---------- status ----------
 function applyStatus(s) {
-  if (s.agent_idle != null) setThinking(!!s.agent_idle);
+  if (s.agent_idle != null) setThinking(!s.agent_idle);
+  else {$("#b-thinking").style.display="none";setBadge("b-agent","","agent unknown");}
+  state.nav = s.navigation_ready === true;
   if (s.navigation_ready != null) {
-    const ready = typeof s.navigation_ready === "boolean" ? s.navigation_ready : /true/i.test(String(s.navigation_ready));
+    const ready = s.navigation_ready === true;
     setBadge("b-nav", ready ? "ok" : "warn", ready ? "nav ready" : "nav blocked");
   }
   if (s.alignment_status != null && s.alignment_status !== undefined && s.alignment_status !== "error") {
     const st = String(s.alignment_status);
-    const aligned = /confirmed|ready|aligned|true/i.test(st) && !/no alignment|not|waiting/i.test(st);
+    const aligned = st.startsWith("Ready:");
     setBadge("b-align", aligned ? "ok" : "warn", aligned ? "aligned" : "aligning");
+    $("#alignment-detail").textContent=st;
+  } else {setBadge("b-align","","alignment unknown");$("#alignment-detail").textContent="";setBadge("b-nav","","nav unknown");}
+  if(s.stack) applyStack(s.stack);
+  updateControls();
+}
+
+function applyStack(s) {
+  const previous = state.stack;
+  state.stack = s.state;
+  setBadge("b-stack",s.state==="running"?"ok":s.state==="failed"?"bad":"warn",s.state);
+  $("#stack-start").disabled=["starting","running","stopping"].includes(s.state);
+  $("#stack-stop").disabled=!s.pid;
+  if(previous !== s.state && s.error) addSystem(s.error);
+  if(previous !== "running" && s.state==="running") setupRerun(CONFIG.rerun_url);
+  updateControls();
+  if(s.state!=="running") {
+    disableKeyboard();
+    speakerEnabled=false;$("#speaker-toggle").textContent="Go2 speaker: Off";
+    taggingEnabled=null;
+    if($("#tagging-toggle"))$("#tagging-toggle").textContent="Automatic tagging: Check status";
+    $("#camera-image").hidden=true;
+    $("#camera-note").textContent="Camera not ready";$("#camera-note").style.display="grid";
   }
+}
+function updateControls() {
+  const ready = !CONFIG.standalone || state.stack==="running";
+  for (const btn of document.querySelectorAll("[data-operation]")) {
+    btn.disabled=!ready || (["tag_object","tag_location","navigate_near_memory_tag","navigate_to_memory_tag","return_to_starting_location"].includes(btn.dataset.operation) && !state.nav);
+  }
+  if($("#tagging-toggle"))$("#tagging-toggle").disabled=!ready;
+  $("#speaker-toggle").disabled=!ready || !CONFIG.standalone;
+  $("#navigation-distance").disabled=!ready;
+  $("#visual-arrival-toggle").disabled=!ready;
+  if(!ready){$("#murmur-toggle").disabled=true;$("#puppy-status").textContent="Robot stack is not running.";}
+  for(const btn of document.querySelectorAll("[data-navigation]")) btn.disabled=!ready || !state.nav;
+  $("#send").disabled=!ready || sending;
+  $("#input").disabled=!ready;
 }
 
 // ---------- events (SSE) ----------
 function connect() {
   const es = new EventSource("/events");
   es.addEventListener("status", e => {
-    try { applyStatus(JSON.parse(e.data)); } catch (_) {}
+    try { applyStatus(JSON.parse(e.data)); } catch (err) {log("err","status event",err.message);}
   });
   es.addEventListener("message", e => {
-    try { renderMessage(JSON.parse(e.data)); } catch (_) {}
+    try { renderMessage(JSON.parse(e.data)); } catch (err) {log("err","message event",err.message);}
   });
   es.addEventListener("tool", e => {
-    try { renderToolStream(JSON.parse(e.data)); } catch (_) {}
+    try { renderToolStream(JSON.parse(e.data)); } catch (err) {log("err","tool event",err.message);}
   });
+  es.addEventListener("stack",e=>{try{applyStack(JSON.parse(e.data));}catch(err){log("err","stack event",err.message);}});
+  es.addEventListener("stack_log",e=>{try{appendStackLog(JSON.parse(e.data).text);}catch(err){log("err","stack log",err.message);}});
   es.addEventListener("open", () => { setBadge("b-conn", "ok", "connected"); $("#f-events").textContent = "live"; });
-  es.addEventListener("error", () => { setBadge("b-conn", "bad", "disconnected"); });
+  es.addEventListener("error", () => { setBadge("b-conn", "bad", "disconnected"); $("#f-events").textContent="reconnecting"; });
 }
 
 // ---------- chat send ----------
 async function send() {
   const ta = $("#input"); const text = ta.value.trim();
-  if (!text) return;
+  if (!text || sending) return;
+  sending=true;updateControls();
   ta.value = "";
   addBubble("user", text, "You");
+  pendingEchoes.set(text,(pendingEchoes.get(text)||0)+1);
+  setThinking(true);
   log("chat", "→ agent", text.length > 40 ? text.slice(0, 40) + "…" : text);
   try {
-    const res = await fetch("/api/chat", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text }),
-    }).then(r => r.json());
-    if (!res.ok) addSystem("send failed: " + (res.error || "unknown"));
-  } catch (e) { addSystem("send failed: " + e); }
+    await api("/api/chat",{message:text});
+  } catch (e) { pendingEchoes.delete(text);ta.value=text;addSystem("send failed: " + e.message);await refreshStatus(); }
+  finally {sending=false;updateControls();ta.focus();}
 }
 
 // ---------- boot ----------
 async function boot() {
   try {
-    CONFIG = await fetch("/api/config").then(r => r.json());
+    CONFIG = await api("/api/config");
     $("#f-mcp").textContent = (CONFIG.mcp_url || "").replace(/^http:\/\//, "");
     buildDeck();
     setupRerun(CONFIG.rerun_url);
+    $("#settings-open").hidden=!CONFIG.standalone;
+    $("#lifecycle").hidden=!CONFIG.standalone;
+    $("#keyboard-bar").hidden=!CONFIG.standalone;
+    if(CONFIG.standalone) {const logs=await api("/api/stack/logs");for(const line of logs.lines)appendStackLog(line);}
   } catch (e) {
     log("err", "config", String(e));
     addSystem("Could not reach the console API: " + e);
@@ -573,17 +770,300 @@ async function boot() {
   refreshStatus();
   setInterval(refreshStatus, 5000);
   $("#send").onclick = send;
+  $("#settings-open").onclick = openSettings;
+  $("#fullscreen-toggle").onclick = async () => {
+    try {
+      if(document.fullscreenElement)await document.exitFullscreen();
+      else await document.documentElement.requestFullscreen();
+    }catch(e){addSystem("Full screen unavailable: "+e.message);}
+  };
+  document.addEventListener("fullscreenchange",()=>{$("#fullscreen-toggle").textContent=document.fullscreenElement?"Exit full screen":"Full screen";});
+  $("#console-clear").onclick = () => {$("#stack-log").textContent="";};
+  $("#camera-switch").onclick = () => swapViews(true);
+  $("#world-switch").onclick = () => swapViews(false);
+  $("#keyboard-enable").onclick = enableKeyboard;
+  $("#speaker-toggle").onclick = toggleSpeaker;
+  $("#visual-arrival-toggle").onclick = async () => {
+    const button=$("#visual-arrival-toggle");button.disabled=true;
+    try {
+      const current=(await api("/api/visual-arrival")).result;
+      const enabled=!current.enabled;
+      if(enabled && await requestOperation({label:"Enable visual arrival search",human_only:true,description:"After reaching the nearby threshold, stop forward movement and turn slowly in place (0.15 rad/s, up to 20 seconds) to match the selected tag's saved image. Local visual matching; no cloud upload. Keep the area clear. Missing images, stale camera, failed match or timeout stop without claiming arrival. Applies to the next trip."})===null)return;
+      const result=(await api("/api/visual-arrival",{enabled,confirmed:true})).result;
+      button.textContent="Visual arrival: "+(result.enabled?"On":"Off");
+    }catch(e){addSystem(e.message);}finally{updateControls();}
+  };
+  $("#murmur-toggle").onclick = async () => {
+    const button=$("#murmur-toggle");button.disabled=true;
+    try {
+      const status=(await api("/api/murmur")).result;
+      if(!status.puppy)throw new Error("Puppy is not running. Restart the stack and enable Go2 speaker.");
+      const result=(await api("/api/murmur",{enabled:!status.puppy.murmur})).result;
+      applyPuppyStatus(result);
+    }catch(e){addSystem(e.message);}finally{await refreshStatus();}
+  };
+  $("#navigation-distance").oninput = () => {
+    $("#navigation-distance-value").textContent=Number($("#navigation-distance").value).toFixed(1)+" m";
+  };
+  $("#navigation-distance").onchange = async () => {
+    const slider=$("#navigation-distance");slider.disabled=true;slider.dataset.saving="true";
+    try {
+      const result=(await api("/api/navigation-distance",{distance_m:Number(slider.value)})).result;
+      slider.dataset.confirmed=result.distance_m;slider.value=result.distance_m;
+      $("#navigation-distance-value").textContent=Number(result.distance_m).toFixed(1)+" m";
+      log("ok","navigation","Next nearby trip stops within "+result.distance_m+" m");
+    }catch(e){
+      addSystem(e.message);slider.value=slider.dataset.confirmed || "1";
+      $("#navigation-distance-value").textContent=Number(slider.value).toFixed(1)+" m";
+    }finally{delete slider.dataset.saving;updateControls();}
+  };
+  for(const button of document.querySelectorAll("[data-drive]")) {
+    button.style.touchAction="none";
+    button.onpointerdown=e=>{
+      if(!keyboardReady)return;
+      e.preventDefault();button.setPointerCapture(e.pointerId);
+      driveHeld=true;pressedKeys.clear();pressedKeys.add(" ");pressedKeys.add(button.dataset.drive);
+      sendKeyboard();
+    };
+    const release=()=>{driveHeld=false;pressedKeys.clear();sendKeyboard();};
+    button.onpointerup=release;button.onpointercancel=release;button.onlostpointercapture=release;
+  }
+  setInterval(refreshCamera, 150);
+  setInterval(sendKeyboard, 100);
+  window.addEventListener("keydown", keyboardDown);
+  window.addEventListener("keyup", keyboardUp);
+  window.addEventListener("blur", disableKeyboard);
+  document.addEventListener("visibilitychange",()=>{if(document.hidden)disableKeyboard();});
+  $("#operation-dialog").addEventListener("close",()=>pressedKeys.clear());
+  window.addEventListener("beforeunload", disableKeyboard);
+  $("#settings-cancel").onclick = () => {$("#settings-form").reset();$("#settings-dialog").close();};
+  $("#settings-dialog").addEventListener("close",()=>$("#settings-form").reset());
+  $("#settings-form").onsubmit = saveSettings;
+  $("#stack-start").onclick = () => lifecycle("start");
+  $("#stack-stop").onclick = () => lifecycle("stop");
+  $("#diagnostics").onclick = async () => {try{$("#diagnostic-output").textContent=pretty(await api("/api/diagnostics"));}catch(e){addSystem(e.message);}};
   $("#input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   });
   // periodic refresh keeps the Rerun viewer fresh
   window.addEventListener("beforeunload", () => {});
 }
 async function refreshStatus() {
+  if(refreshing) return;
+  refreshing=true;
   try {
-    const s = await fetch("/api/refresh-status").then(r => r.json());
+    const s = await api("/api/refresh-status");
     applyStatus(s);
-  } catch (_) {}
+    const slider=$("#navigation-distance");
+    if((!CONFIG.standalone || state.stack==="running") &&
+       document.activeElement!==slider && !slider.dataset.saving) {
+      const result=(await api("/api/navigation-distance")).result;
+      if(!result || !Number.isFinite(result.distance_m))throw new Error("Invalid nearby distance status");
+      slider.value=result.distance_m;slider.dataset.confirmed=result.distance_m;
+      $("#navigation-distance-value").textContent=Number(result.distance_m).toFixed(1)+" m";
+    }
+    if(!CONFIG.standalone || state.stack==="running") {
+      const visual=(await api("/api/visual-arrival")).result;
+      $("#visual-arrival-toggle").textContent="Visual arrival: "+(visual.enabled?"On":"Off")+(visual.searching?" (searching)":"");
+      if(CONFIG.standalone)applyPuppyStatus((await api("/api/murmur")).result);
+    }
+  } catch (e) {setBadge("b-nav","bad","status unavailable");log("err","status",e.message);}
+  finally {refreshing=false;}
+}
+
+const settingFields = [
+  ["Robot connection", [
+    ["robot_ip","Robot IP","text"], ["replay","Replay (no real robot)","checkbox"],
+    ["replay_db","Replay dataset","text"], ["obstacle_avoidance","Onboard obstacle avoidance","checkbox"],
+    ["openai_api_key","OPENAI_API_KEY (from .env, read-only)","password"], ["unitree_aes_128_key","UNITREE_AES_128_KEY (from .env, read-only)","password"]
+  ]],
+  ["Agent & vision", [
+    ["agent_url","Agent API base URL (including /v1)","url"], ["agent_model","Agent model","text"],
+    ["vlm_url","Vision API base URL","url"], ["vlm_model","Vision model","text"]
+  ]],
+  ["Mapping & tagging", [
+    ["pgo_enabled","PGO loop correction (fixed world; applies on restart)","checkbox"],
+    ["nearby_arrival_distance","Nearby stop distance (m; 0.3-3.0; restart default)","number"],
+    ["scene_map_dir","Scene directory (maps and tags)","text"],
+    ["map_mode","Map mode","select",["restore","new"]],
+    ["capture_mode","Restore capture mode","select",["manual","rotation"]],
+    ["rotation_speed","Rotation speed (rad/s; max 0.3)","number"],
+    ["rotation_duration","Rotation duration (s; max 60)","number"],
+    ["place_tagging","Automatic room tagging","checkbox"],
+    ["object_tagging","Automatic object tagging","checkbox"],
+    ["vlm_distance_m","Tagging distance threshold (m)","number"],
+    ["object_segmenter","Object segmenter","select",["yolo","auto","vlm"]]
+  ]],
+  ["Local services", [
+    ["mcp_port","MCP port","number"], ["rerun_web_port","Rerun viewer port","number"],
+    ["rerun_grpc_port","Rerun data port (gRPC; change if 9877 is occupied)","number"]
+  ]]
+];
+async function openSettings() {
+  try {
+    const data=await api("/api/settings");
+    const wrap=$("#settings-fields");wrap.replaceChildren();
+    for(const [group,fields] of settingFields) {
+      const heading=el("div","section-title");heading.textContent=group;wrap.appendChild(heading);
+      for(const [key,title,type,choices] of fields) {
+        const label=el("label","field");const caption=el("span");caption.textContent=title;label.appendChild(caption);
+        const input=el(type==="select"?"select":"input");input.name=key;input.id="setting-"+key;
+        if(type==="select") for(const value of choices){const opt=el("option");opt.value=value;opt.textContent=value;input.appendChild(opt);}
+        else input.type=type;
+        if(type==="checkbox")input.checked=data.settings[key];else input.value=type==="password"?"":data.settings[key];
+        if(type==="password"){input.readOnly=true;input.value=data.secrets[key.toUpperCase()]?"********":"";input.placeholder=data.secrets[key.toUpperCase()]?"Configured in .env":"Not configured in .env";input.required=false;}
+        else if(type!=="checkbox")input.required=true;
+        if(type==="number")input.step=key.endsWith("port")?"1":"any";
+        label.appendChild(input);wrap.appendChild(label);
+      }
+    }
+    $("#settings-error").textContent="";
+    $("#settings-save").disabled=["starting","running","stopping"].includes(state.stack);
+    $("#settings-dialog").showModal();
+  }catch(e){addSystem("Settings: "+e.message);}
+}
+async function saveSettings(e) {
+  e.preventDefault();
+  const payload={settings:{}};
+  for(const input of $("#settings-fields").querySelectorAll("input,select")) {
+    if(input.type==="password") continue;
+    payload.settings[input.name]=input.type==="checkbox"?input.checked:input.type==="number"?Number(input.value):input.value;
+  }
+  $("#settings-save").disabled=true;
+  try {
+    await api("/api/settings",payload);
+    $("#settings-form").reset();$("#settings-dialog").close();
+    CONFIG=await api("/api/config");buildDeck();setupRerun(CONFIG.rerun_url);updateControls();
+    addSystem("Settings saved. Restart the robot stack to apply. Keys are loaded from .env.");
+  }catch(err){$("#settings-error").textContent=err.message;}
+  finally{$("#settings-save").disabled=false;}
+}
+async function lifecycle(action) {
+  let overwriteToken;
+  if(action==="start") {
+    try {
+      const plan=await api("/api/stack/prepare",{});
+      if(plan.overwrite_required) {
+        const overwrite=await requestOperation({label:"Overwrite existing scene?",human_only:true,description:`Existing maps and tags at ${plan.scene_directory} will be replaced by a new scene. The previous directory will be moved to a sibling backup. Cancel to keep the current scene unchanged.`});
+        if(overwrite===null)return;
+        overwriteToken=plan.overwrite_token;
+      }
+    }catch(e){addSystem(e.message);return;}
+  }
+  const approved=await requestOperation({label:action==="start"?"Start robot stack":"Stop robot stack",human_only:true,description:action==="start"?"Check Settings, map mode and robot surroundings. Restore with rotation may rotate the robot automatically. Automatic tagging may call your configured model service.":"Stops only the stack launched by this console. Graceful shutdown saves the map when permitted."});
+  if(approved===null)return;
+  const btn=$("#stack-"+action);btn.disabled=true;
+  try {const result=await api("/api/stack/"+action,{confirmed:true,overwrite_token:overwriteToken});applyStack(result);await refreshStatus();}
+  catch(e){addSystem(e.message);}
+  finally{await refreshStatus();}
+}
+function appendStackLog(text) {
+  const box=$("#stack-log");
+  const follow=box.scrollHeight-box.scrollTop-box.clientHeight<32;
+  const lines=box.textContent ? box.textContent.split("\n") : [];
+  lines.push(...String(text).split("\n"));box.textContent=lines.slice(-200).join("\n");
+  if(follow)box.scrollTop=box.scrollHeight;
+}
+function swapViews(cameraMain) {
+  $("#camera-view").classList.toggle("pip",!cameraMain);
+  $("#world-view").classList.toggle("pip",cameraMain);
+}
+async function refreshCamera() {
+  if(cameraBusy || (CONFIG.standalone && state.stack!=="running")) return;
+  cameraBusy=true;
+  try {
+    const response=await fetch("/api/camera.jpg");
+    if(!response.ok)throw new Error(await response.text());
+    const image=$("#camera-image");
+    const previous=image.dataset.blob;
+    const blob=URL.createObjectURL(await response.blob());
+    image.src=blob;image.dataset.blob=blob;image.hidden=false;
+    if(previous)URL.revokeObjectURL(previous);
+    $("#camera-note").style.display="none";
+  }catch(e){$("#camera-image").hidden=true;$("#camera-note").textContent=e.message;$("#camera-note").style.display="grid";}
+  finally{cameraBusy=false;}
+}
+function disableKeyboard() {
+  keyboardReady=false;driveHeld=false;$("#manual-pad").hidden=true;
+  pressedKeys.clear();
+  if(keyboardSocket) {
+    if(keyboardSocket.readyState===WebSocket.OPEN) keyboardSocket.send(JSON.stringify({keys:[]}));
+    keyboardSocket.close();keyboardSocket=null;
+  }
+  $("#keyboard-enable").textContent="Enable keyboard";
+  $("#keyboard-status").textContent="Disabled. Click Enable keyboard, then hold Space + movement keys on this page (not inside Rerun).";
+}
+async function enableKeyboard() {
+  if(keyboardSocket){disableKeyboard();return;}
+  if(state.stack!=="running"){addSystem("Start the robot stack before enabling keyboard control.");return;}
+  const approved=await requestOperation({label:"Enable keyboard control",human_only:true,description:"Supervise the robot and clear its surroundings. Manual control cancels navigation and is available during alignment capture. Hold Space while pressing movement keys. This is not a hardware emergency stop."});
+  if(approved===null)return;
+  const socket=new WebSocket(`${location.protocol==="https:"?"wss":"ws"}://${location.host}/api/teleop?token=${encodeURIComponent(CONFIG.csrf_token)}`);
+  keyboardSocket=socket;
+  socket.onopen=()=>{$("#keyboard-enable").textContent="Preparing controls...";document.activeElement.blur();};
+  socket.onmessage=e=>{
+    const result=JSON.parse(e.data);
+    if(result.error){addSystem(result.error);disableKeyboard();return;}
+    if(result.ready){keyboardReady=true;$("#manual-pad").hidden=false;$("#keyboard-enable").textContent="Disable keyboard";$("#keyboard-status").textContent="Enabled: hold Space + W/S/A/D/Q/E, or hold a direction button. Clicking Rerun disables controls for safety.";log("ok","keyboard","Go2 joystick enabled; control channel ready");}
+  };
+  socket.onerror=()=>{addSystem("Keyboard connection failed");};
+  socket.onclose=()=>{if(keyboardSocket===socket){disableKeyboard();log("info","keyboard","disconnected; stop sent");}};
+}
+function keyboardDown(e) {
+  if(!keyboardReady || !keyboardSocket || keyboardSocket.readyState!==WebSocket.OPEN)return;
+  if(e.key==="Escape"){e.preventDefault();disableKeyboard();return;}
+  if(e.target.closest("input,textarea,select,button") || document.querySelector("dialog[open]")) {pressedKeys.clear();return;}
+  const key=e.key.toLowerCase();
+  if(["w","a","s","d","q","e"," "].includes(key)){e.preventDefault();pressedKeys.add(key);}
+}
+function keyboardUp(e) {
+  pressedKeys.delete(e.key.toLowerCase());
+  if(keyboardSocket && ["w","a","s","d","q","e"," "].includes(e.key.toLowerCase())) {e.preventDefault();sendKeyboard();}
+}
+function sendKeyboard() {
+  if(keyboardSocket && keyboardSocket.readyState===WebSocket.OPEN) {
+    if(!keyboardReady || document.querySelector("dialog[open]") || (!driveHeld && document.activeElement.matches("input,textarea,select,button")))pressedKeys.clear();
+    keyboardSocket.send(JSON.stringify({keys:[...pressedKeys]}));
+  }
+}
+async function toggleTagging() {
+  const button=$("#tagging-toggle");button.disabled=true;
+  try {
+    const current=(await api("/api/tagging")).result;
+    if(taggingEnabled===null){taggingEnabled=current.enabled;button.textContent=`Automatic tagging: ${current.enabled?"On":"Off"} (click to toggle)`;return;}
+    const enabled=!current.enabled;
+    if(enabled && await requestOperation({label:"Resume automatic tagging",description:"Resumes the place/object modes selected in Settings and may call your model service."})===null)return;
+    const result=(await api("/api/tagging",{enabled})).result;
+    taggingEnabled=result.enabled;button.textContent=`Automatic tagging: ${result.enabled?"On":"Off"} (click to toggle)`;
+    log("ok","tagging",result.enabled?"automatic tagging resumed":"automatic tagging paused; manual tagging remains available");
+  }catch(e){addSystem(e.message);}
+  finally{button.disabled=false;}
+}
+async function toggleSpeaker() {
+  const button=$("#speaker-toggle");button.disabled=true;
+  try {
+    const enabled=!(await api("/api/speaker")).result.enabled;
+    if(enabled && await requestOperation({label:"Enable Go2 speaker + Puppy murmur",human_only:true,description:"MAXIMUM volume (10/10). Warn nearby people. Enables Go2 microphone with LOCAL Whisper recognition and cute camera comments approximately every 10 seconds. Camera frames and recognized text use the configured OpenAI-compatible service (gpt-4o-mini); raw microphone audio stays local. Do not enable around private conversations or sensitive camera content. First use may download the local Whisper base model. Speech playback pauses listening; voice chat cannot move the robot. Playback unavailable in replay/simulation."})===null)return;
+    const result=(await api("/api/speaker",{enabled,confirmed:true})).result;
+    speakerEnabled=result.enabled;button.textContent=`Go2 speaker: ${result.enabled?"On (max) · Puppy mic ON":"Off"}`;
+    await refreshStatus();
+    log("ok","Go2 speaker",result.enabled?"enabled at maximum volume":"disabled; queued replies cancelled");
+  }catch(e){addSystem(e.message);}
+  finally{button.disabled=false;}
+}
+function applyPuppyStatus(status) {
+  const puppy=status.puppy;
+  $("#murmur-toggle").disabled=!status.enabled || !puppy || !puppy.running;
+  $("#murmur-toggle").textContent="Murmur: "+(puppy && puppy.murmur?"On":"Off");
+  $("#speaker-toggle").textContent="Go2 speaker: "+(status.enabled?"On (max)"+(status.microphone?" · Puppy mic ON":""):"Off");
+  $("#puppy-status").textContent=!status.puppy_configured ?
+    "Old/non-Puppy stack. Restart console and robot stack to enable murmur." :
+    !puppy ? "Enable Go2 speaker to start Puppy (first Whisper load may take time)." :
+    puppy.last_error ? "Puppy error: "+puppy.last_error :
+    status.camera_age_s===null || status.camera_age_s>3 ? "Murmur waiting: no fresh Go2 camera frame." :
+    puppy.busy ? "Puppy speaker busy; commentary waits." :
+    puppy.murmur ? "Murmur active · "+puppy.model+" · "+(puppy.stage || "approximately every 10 s while idle") :
+    "Murmur paused; microphone conversation remains enabled.";
 }
 boot();
 </script>

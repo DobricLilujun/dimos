@@ -77,16 +77,14 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
     def start(self) -> None:
         super().start()
 
-        self.register_disposable(Disposable(self.odom.subscribe(self._planner.handle_odom)))
+        self.register_disposable(Disposable(self.odom.subscribe(self._handle_odom)))
         self.register_disposable(
             Disposable(
-                self.odometry.subscribe(
-                    lambda msg: self._planner.handle_odom(msg.to_pose_stamped())
-                )
+                self.odometry.subscribe(lambda msg: self._handle_odom(msg.to_pose_stamped()))
             )
         )
         self.register_disposable(
-            Disposable(self.global_costmap.subscribe(self._planner.handle_global_costmap))
+            Disposable(self.global_costmap.subscribe(self._handle_global_costmap))
         )
         self.register_disposable(Disposable(self.goal_request.subscribe(self._handle_goal_request)))
         self.register_disposable(Disposable(self.target.subscribe(self._handle_goal_request)))
@@ -108,7 +106,7 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
 
         self.register_disposable(self._planner.cmd_vel.subscribe(self.nav_cmd_vel.publish))
 
-        self.register_disposable(self._planner.goal_reached.subscribe(self.goal_reached.publish))
+        self.register_disposable(self._planner.goal_reached.subscribe(self._publish_goal_result))
 
         if "DEBUG_NAVIGATION" in os.environ:
             self.register_disposable(
@@ -127,6 +125,15 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
     def _on_stop_movement(self, msg: Bool) -> None:
         if msg.data:
             self.cancel_goal()
+
+    def _handle_global_costmap(self, grid: OccupancyGrid) -> None:
+        self._planner.handle_global_costmap(grid)
+
+    def _handle_odom(self, pose: PoseStamped) -> None:
+        self._planner.handle_odom(pose)
+
+    def _publish_goal_result(self, result: Bool) -> None:
+        self.goal_reached.publish(result)
 
     @rpc
     def set_goal(self, goal: PoseStamped) -> bool:

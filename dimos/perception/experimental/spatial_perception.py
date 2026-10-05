@@ -16,6 +16,7 @@
 Spatial Memory module for creating a semantic map of the environment.
 """
 
+from collections.abc import Mapping
 from datetime import datetime
 import json
 import os
@@ -30,17 +31,21 @@ import numpy as np
 from pydantic import AliasChoices, Field
 from reactivex import Observable, interval, operators as ops
 from reactivex.disposable import Disposable
+from scipy.spatial import ConvexHull, QhullError
 
 from dimos.constants import DIMOS_PROJECT_ROOT
 from dimos.core.core import rpc
 from dimos.core.global_config import global_config
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
+from dimos.navigation.go2.loop_closure.pgo import PoseGraph
 from dimos.perception.experimental.image_embedding import ImageEmbeddingProvider
 from dimos.perception.experimental.object_segmentation import (
     ObjectSegmentationProvider,
@@ -49,11 +54,13 @@ from dimos.perception.experimental.object_segmentation import (
     mask_centroid,
 )
 from dimos.perception.experimental.spatial_vector_db import SpatialVectorDB
+from dimos.perception.experimental.tag_view import match_tag_view
 from dimos.perception.experimental.visual_memory import VisualMemory
 from dimos.perception.experimental.vlm_caption_provider import (
     DEFAULT_VLM_PROMPT,
     VlmCaptionProvider,
 )
+from dimos.protocol.tf.tf import MultiTBuffer
 from dimos.types.robot_location import RobotLocation
 from dimos.utils.logging_config import setup_logger
 
@@ -148,17 +155,30 @@ def _vlm_worker(
         try:
             frame = cv2.imdecode(task["frame_array"], cv2.IMREAD_COLOR)
             if frame is None:
-                result_queue.put({"frame_id": task["frame_id"], "error": "decode_failed"})
+                result_queue.put(
+                    {
+                        "frame_id": task["frame_id"],
+                        "generation": task.get("generation", 0),
+                        "error": "decode_failed",
+                    }
+                )
                 continue
 
             result = provider.analyze(frame)
             if result is None:
-                result_queue.put({"frame_id": task["frame_id"], "error": "vlm_failed"})
+                result_queue.put(
+                    {
+                        "frame_id": task["frame_id"],
+                        "generation": task.get("generation", 0),
+                        "error": "vlm_failed",
+                    }
+                )
                 continue
 
             result_queue.put(
                 {
                     "frame_id": task["frame_id"],
+                    "generation": task.get("generation", 0),
                     "caption": result.get("caption"),
                     "place": result.get("place"),
                     "items": result.get("items", []),
@@ -171,7 +191,13 @@ def _vlm_worker(
                 }
             )
         except Exception as e:
-            result_queue.put({"frame_id": task["frame_id"], "error": str(e)})
+            result_queue.put(
+                {
+                    "frame_id": task["frame_id"],
+                    "generation": task.get("generation", 0),
+                    "error": str(e),
+                }
+            )
 
 
 class SpatialMemory(Module):
@@ -190,7 +216,10 @@ class SpatialMemory(Module):
     # LCM inputs
     color_image: In[Image]
     tf: In[TFMessage]
+    pgo_raw_tf: In[TFMessage]
+    pgo_raw_lidar: In[PointCloud2]
     lidar: In[PointCloud2]
+    global_map: In[PointCloud2]
     camera_info: In[CameraInfo]
 
     def __init__(self, **kwargs: Any) -> None:
@@ -295,6 +324,9 @@ class SpatialMemory(Module):
         self._vlm_task_queue: queue.Queue[dict[str, Any] | None] | None = None
         self._vlm_result_queue: queue.Queue[dict[str, Any]] | None = None
         self._vlm_report: list[dict[str, Any]] = []
+        self._auto_tagging_enabled = True
+        self._tagging_generation = 0
+        self._tagging_lock = threading.RLock()
         self._vlm_report_path: Path | None = None
         # Track robot position at which the last VLM task was enqueued so we
         # can throttle VLM calls by travelled distance (e.g. every 1m).
@@ -341,6 +373,12 @@ class SpatialMemory(Module):
 
         # Latest sensor data for object-level 3D projection
         self._latest_pointcloud: PointCloud2 | None = None
+        self._map_points: np.ndarray | None = None
+        self._pgo_graph: PoseGraph | None = None
+        self._pgo_session: str | None = None
+        self._pgo_sync_error: str | None = None
+        self._pgo_raw_buffer = MultiTBuffer()
+        self._pgo_raw_cloud: PointCloud2 | None = None
         self._latest_camera_info: CameraInfo | None = None
         self._latest_video_frame_bgr: np.ndarray | None = None
         self._latest_observation: tuple[np.ndarray, dict[str, Any] | None, float] | None = None
@@ -374,7 +412,156 @@ class SpatialMemory(Module):
                 break
             self._handle_vlm_result(result)
 
+    @rpc
+    def automatic_tagging_status(self) -> dict[str, Any]:
+        with self._tagging_lock:
+            configured = self._vlm is not None and (
+                self.config.vlm_enable_place_tagging or self.config.vlm_enable_object_tagging
+            )
+            return {
+                "configured": configured,
+                "enabled": configured and self._auto_tagging_enabled,
+                "place_tagging": self.config.vlm_enable_place_tagging,
+                "object_tagging": self.config.vlm_enable_object_tagging,
+            }
+
+    @rpc
+    def update_pgo_graph(
+        self, graph: PoseGraph, session_id: str, map_cloud: PointCloud2 | None = None
+    ) -> None:
+        """Synchronously persist this run's coordinates in the fixed saved-map world."""
+        with self._tagging_lock:
+            self._ensure_pgo_ready()
+            if self._pgo_session is not None and self._pgo_session != session_id:
+                raise RuntimeError("SpatialMemory cannot mix two live PGO sessions")
+            self._pgo_session = session_id
+            try:
+                self._rewrite_pgo_records(graph, session_id)
+            except Exception as error:
+                self._pgo_sync_error = str(error)
+                self.set_automatic_tagging(False)
+                logger.exception("PGO memory synchronization failed; queries and tagging blocked")
+                raise
+            self._pgo_graph = graph
+            if map_cloud is not None:
+                self._map_points = map_cloud.points_f32().copy()
+
+    def _ensure_pgo_ready(self) -> None:
+        if self._pgo_sync_error is not None:
+            raise RuntimeError(
+                f"PGO synchronization failed; restart required: {self._pgo_sync_error}"
+            )
+
+    def _rewrite_pgo_records(self, graph: PoseGraph, session_id: str) -> None:
+        for collection in (self.vector_db.location_collection, self.vector_db.image_collection):
+            records = collection.get(where={"pgo_session": session_id}, include=["metadatas"])
+            ids, metadatas = records["ids"], records["metadatas"]
+            updated: list[Mapping[str, Any]] = []
+            for metadata in metadatas:
+                raw = Transform.from_matrix(
+                    np.asarray(json.loads(metadata["pgo_raw_pose"])),
+                    frame_id="world",
+                    child_frame_id="base_link",
+                )
+                pose = (
+                    graph.world_correction(metadata["pgo_timestamp"]) + raw
+                    if graph.keyframes
+                    else raw
+                )
+                angles = pose.rotation.to_euler()
+                updated.append(
+                    {
+                        **metadata,
+                        "pos_x": float(pose.translation.x),
+                        "pos_y": float(pose.translation.y),
+                        "pos_z": float(pose.translation.z),
+                        "rot_x": float(angles.x),
+                        "rot_y": float(angles.y),
+                        "rot_z": float(angles.z),
+                    }
+                )
+            if ids:
+                collection.update(ids=ids, metadatas=updated)
+
+    def _pgo_metadata(
+        self, metadata: dict[str, Any], timestamp: float, graph: PoseGraph | None
+    ) -> dict[str, Any]:
+        self._ensure_pgo_ready()
+        if self._pgo_session is None:
+            return metadata
+        pose = Transform(
+            translation=Vector3([metadata[f"pos_{axis}"] for axis in "xyz"]),
+            rotation=Quaternion.from_euler(Vector3([metadata[f"rot_{axis}"] for axis in "xyz"])),
+            frame_id="world",
+            child_frame_id="base_link",
+        )
+        raw = (
+            graph.world_correction(timestamp).inverse() + pose
+            if graph and graph.keyframes
+            else pose
+        )
+        corrected = (
+            self._pgo_graph.world_correction(timestamp) + raw
+            if self._pgo_graph and self._pgo_graph.keyframes
+            else raw
+        )
+        angles = corrected.rotation.to_euler()
+        return {
+            **metadata,
+            "pgo_session": self._pgo_session,
+            "pgo_timestamp": timestamp,
+            "pgo_raw_pose": json.dumps(raw.to_matrix().tolist()),
+            "pos_x": float(corrected.translation.x),
+            "pos_y": float(corrected.translation.y),
+            "pos_z": float(corrected.translation.z),
+            "rot_x": float(angles.x),
+            "rot_y": float(angles.y),
+            "rot_z": float(angles.z),
+        }
+
+    @rpc
+    def set_automatic_tagging(self, enabled: bool) -> dict[str, Any]:
+        """Pause/resume configured automatic tags, leaving manual tagging available."""
+        with self._tagging_lock:
+            if enabled:
+                self._ensure_pgo_ready()
+            if enabled and not self.automatic_tagging_status()["configured"]:
+                raise RuntimeError(
+                    "Configure a VLM and automatic tagging in Settings, then restart."
+                )
+            if enabled != self._auto_tagging_enabled:
+                self._auto_tagging_enabled = enabled
+                self._tagging_generation += 1
+                self._vlm_last_position = None
+                if self._vlm_task_queue is not None:
+                    while True:
+                        try:
+                            task = self._vlm_task_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if task is None:
+                            self._vlm_task_queue.put(None)
+                            break
+            logger.info("Automatic tagging changed", enabled=enabled)
+            return self.automatic_tagging_status()
+
+    def _enqueue_vlm_task(self, task: dict[str, Any], position: Vector3) -> None:
+        with self._tagging_lock:
+            if self._auto_tagging_enabled and self._vlm_task_queue is not None:
+                task["generation"] = self._tagging_generation
+                self._vlm_task_queue.put(task)
+                self._vlm_last_position = position
+
     def _handle_vlm_result(self, result: dict[str, Any]) -> None:
+        with self._tagging_lock:
+            if (
+                not self._auto_tagging_enabled
+                or result.get("generation", 0) != self._tagging_generation
+            ):
+                return
+            self._apply_vlm_result(result)
+
+    def _apply_vlm_result(self, result: dict[str, Any]) -> None:
         """Apply a VLM caption/place result and record it for the report."""
         frame_id = result.get("frame_id")
         error = result.get("error")
@@ -407,6 +594,8 @@ class SpatialMemory(Module):
                     position=place_position,
                     rotation=rotation,
                     description=caption,
+                    observation=context if self._pgo_session else None,
+                    reference_image=frame_bgr,
                 )
             elif caption and not place:
                 # Even if no place name was inferred, record the current
@@ -417,6 +606,8 @@ class SpatialMemory(Module):
                     position=position,
                     rotation=rotation,
                     description=caption,
+                    observation=context if self._pgo_session else None,
+                    reference_image=frame_bgr,
                 )
 
         # Add 3D object tags from VLM-detected items.
@@ -428,7 +619,7 @@ class SpatialMemory(Module):
                 bbox = item.get("bbox")
                 if not item_name or not bbox:
                     continue
-                if context is None:
+                if context is None or frame_bgr is None:
                     continue
                 estimate = self._estimate_target(
                     bbox, item_name, frame_bgr, context, require_depth=True
@@ -441,6 +632,12 @@ class SpatialMemory(Module):
                     world_pos,
                     rotation,
                     f"Object '{item_name}' seen in {place or 'scene'}: {caption}",
+                    reference_image=self._tag_crop(frame_bgr, bbox),
+                    **(
+                        {"pgo_metadata": estimate["pgo_metadata"]}
+                        if "pgo_metadata" in estimate
+                        else {}
+                    ),
                 )
                 object_positions[item_name] = world_pos
                 object_estimates[item_name] = estimate
@@ -594,12 +791,105 @@ class SpatialMemory(Module):
         estimate = self._project_bbox_position(
             bbox, context, self.config.object_max_distance_m, self.config.object_default_distance_m
         )
+        if estimate is not None:
+            estimate = self._constrain_object_to_map(estimate, context)
         if require_depth and (estimate is None or estimate["point_count"] == 0):
             logger.warning(
                 "Object tag skipped: no valid lidar points inside detected region", name=name
             )
             return None
+        if estimate is not None and self._pgo_session is not None:
+            metadata = {
+                **{
+                    f"pos_{axis}": value
+                    for axis, value in zip("xyz", estimate["position"], strict=True)
+                },
+                "rot_x": 0.0,
+                "rot_y": 0.0,
+                "rot_z": 0.0,
+            }
+            with self._tagging_lock:
+                metadata = self._pgo_metadata(
+                    metadata, context["timestamp"], context.get("pgo_graph")
+                )
+            estimate = {
+                **estimate,
+                "position": [metadata[f"pos_{axis}"] for axis in "xyz"],
+                "pgo_metadata": metadata,
+            }
         return estimate
+
+    @staticmethod
+    def _constrain_object_to_map(
+        estimate: dict[str, Any], context: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Clamp out-of-map XY estimates to a measured boundary, inset toward the robot."""
+        inset_m = 0.3
+        raw_points = context.get("map_points", context["world_points"])
+        points = np.asarray(raw_points, dtype=float).reshape(-1, 3)
+        points = points[np.isfinite(points).all(axis=1)]
+        target = np.asarray(estimate["position"], dtype=float)
+        origin = np.asarray(context.get("robot_origin", context["camera_origin"]), dtype=float)
+        if not np.isfinite(target).all() or not np.isfinite(origin).all() or len(points) < 3:
+            logger.warning("Object tag skipped: insufficient finite pointcloud/map geometry")
+            return None
+        try:
+            hull = ConvexHull(points[:, :2])
+        except QhullError:
+            logger.warning("Object tag skipped: pointcloud has no usable XY map boundary")
+            return None
+        normals, offsets = hull.equations[:, :2], hull.equations[:, 2]
+        if np.all(normals @ target[:2] + offsets <= 1e-8):
+            return estimate
+        if np.any(normals @ origin[:2] + offsets > 1e-8):
+            logger.warning("Object tag skipped: robot lies outside the pointcloud map boundary")
+            return None
+        delta = target[:2] - origin[:2]
+        distance = float(np.linalg.norm(delta))
+        if distance <= inset_m:
+            logger.warning("Object tag skipped: cannot inset map boundary by 30 cm")
+            return None
+        direction = delta / distance
+        outward = normals @ direction
+        exits = outward > 1e-10
+        exit_distance = float(
+            np.min(-(normals[exits] @ origin[:2] + offsets[exits]) / outward[exits])
+        )
+        boundary_xy = origin[:2] + direction * exit_distance
+        # Require real point support near the ray exit, not an invented hull-edge coordinate.
+        near_exit = np.linalg.norm(points[:, :2] - boundary_xy, axis=1)
+        candidates = points[near_exit <= 0.2]
+        if not len(candidates):
+            logger.warning("Object tag skipped: no measured point near the sight-line map boundary")
+            return None
+        order = np.lexsort(
+            (
+                np.abs(candidates[:, 2] - target[2]),
+                np.linalg.norm(candidates[:, :2] - boundary_xy, axis=1),
+            )
+        )
+        boundary = candidates[order[0]]
+        to_robot = origin[:2] - boundary[:2]
+        length = float(np.linalg.norm(to_robot))
+        if length <= inset_m + 1e-8:
+            logger.warning("Object tag skipped: boundary is within 30 cm of the robot")
+            return None
+        position = boundary.copy()
+        position[:2] += to_robot / length * inset_m
+        logger.info(
+            "Object estimate clamped to pointcloud boundary",
+            original=target.tolist(),
+            position=position.tolist(),
+        )
+        return {
+            **estimate,
+            "position": position.tolist(),
+            "method": "pointcloud_map_boundary_inset",
+            "point_count": len(candidates),
+            "estimated_position": target.tolist(),
+            "boundary_position": boundary.tolist(),
+            "inset_m": inset_m,
+        }
 
     @rpc
     def capture_object_observation(self) -> tuple[Image, dict[str, Any]]:
@@ -631,6 +921,8 @@ class SpatialMemory(Module):
             position,
             [0.0, 0.0, 0.0],
             f"Object '{name}': lidar-derived surface position from image at {image.ts}",
+            reference_image=self._tag_crop(image.to_opencv(), bbox),
+            **({"pgo_metadata": estimate["pgo_metadata"]} if "pgo_metadata" in estimate else {}),
         ):
             raise RuntimeError(f"Failed to save object tag '{name}'")
         return json.dumps({"name": name, "frame": "world", **estimate}, ensure_ascii=False)
@@ -639,11 +931,19 @@ class SpatialMemory(Module):
         self, frame: np.ndarray, timestamp: float
     ) -> dict[str, Any] | None:
         """Capture timestamp-aligned geometry before asynchronous VLM processing."""
+        with self._tagging_lock:
+            return self._capture_projection_context_locked(frame, timestamp)
+
+    def _capture_projection_context_locked(
+        self, frame: np.ndarray, timestamp: float
+    ) -> dict[str, Any] | None:
         info = self._latest_camera_info
         if info is None:
             return None
         tolerance = self.config.object_sensor_time_tolerance_s
-        camera_tf = self.tfbuffer.get(
+        buffer = self._pgo_raw_buffer if self._pgo_session is not None else self.tfbuffer
+        graph = self._pgo_graph
+        camera_tf = buffer.get(
             "world",
             info.frame_id or "camera_optical",
             time_point=timestamp,
@@ -652,17 +952,19 @@ class SpatialMemory(Module):
         )
         if camera_tf is None:
             return None
+        if graph is not None and graph.keyframes:
+            camera_tf = graph.world_correction(timestamp) + camera_tf
         height, width = frame.shape[:2]
         if (width, height) != (info.width, info.height):
             return None
         world_points = np.empty((0, 3))
-        cloud = self._latest_pointcloud
+        cloud = self._pgo_raw_cloud if self._pgo_session is not None else self._latest_pointcloud
         if cloud is not None and abs(cloud.ts - timestamp) <= tolerance:
             points = np.asarray(cloud.pointcloud.points).copy()
             if cloud.frame_id == "world":
                 world_points = points
             elif cloud.frame_id:
-                cloud_tf = self.tfbuffer.get(
+                cloud_tf = buffer.get(
                     "world",
                     cloud.frame_id,
                     time_point=cloud.ts,
@@ -673,6 +975,17 @@ class SpatialMemory(Module):
                     world_points = points @ cloud_tf.rotation.to_rotation_matrix().T + np.array(
                         [cloud_tf.translation.x, cloud_tf.translation.y, cloud_tf.translation.z]
                     )
+            if graph is not None and graph.keyframes:
+                correction = graph.world_correction(cloud.ts)
+                world_points = (
+                    world_points @ correction.rotation.to_rotation_matrix().T
+                    + correction.translation.to_numpy()
+                )
+        robot_tf = buffer.get(
+            "world", "base_link", time_point=timestamp, time_tolerance=tolerance, warn=False
+        )
+        if robot_tf is not None and graph is not None and graph.keyframes:
+            robot_tf = graph.world_correction(timestamp) + robot_tf
         return {
             "image_size": (width, height),
             "intrinsics": np.asarray(info.K).reshape(3, 3).copy(),
@@ -681,6 +994,15 @@ class SpatialMemory(Module):
             ),
             "camera_rotation": camera_tf.rotation.to_rotation_matrix().copy(),
             "world_points": world_points,
+            "pgo_graph": graph,
+            "robot_tf": robot_tf,
+            "timestamp": timestamp,
+            "map_points": self._map_points if self._map_points is not None else world_points,
+            "robot_origin": np.array(
+                [robot_tf.translation.x, robot_tf.translation.y, robot_tf.translation.z]
+                if robot_tf is not None
+                else [camera_tf.translation.x, camera_tf.translation.y, camera_tf.translation.z]
+            ),
         }
 
     def _object_pixel_center(
@@ -791,6 +1113,24 @@ class SpatialMemory(Module):
             self._latest_pointcloud = pc
 
         self.register_disposable(Disposable(self.lidar.subscribe(set_lidar)))
+        self.register_disposable(
+            Disposable(self.pgo_raw_tf.subscribe(self._pgo_raw_buffer.receive_tfmessage))
+        )
+
+        def set_raw_lidar(pc: PointCloud2) -> None:
+            self._pgo_raw_cloud = pc
+
+        self.register_disposable(Disposable(self.pgo_raw_lidar.subscribe(set_raw_lidar)))
+
+        def set_map(pc: PointCloud2) -> None:
+            if self._pgo_session is not None:
+                return
+            if pc.frame_id != "world":
+                logger.warning("Ignoring object-tag map outside world frame", frame_id=pc.frame_id)
+                return
+            self._map_points = np.asarray(pc.pointcloud.points).copy()
+
+        self.register_disposable(Disposable(self.global_map.subscribe(set_map)))
 
         def set_camera_info(info: CameraInfo) -> None:
             self._latest_camera_info = info
@@ -805,7 +1145,7 @@ class SpatialMemory(Module):
     @rpc
     def stop(self) -> None:
         # Drain any remaining VLM results before shutdown.
-        if self._vlm is not None:
+        if self._vlm is not None or self._pgo_session is not None:
             self._drain_vlm_results()
             self._shutdown_vlm_worker()
             self._write_vlm_report()
@@ -826,13 +1166,16 @@ class SpatialMemory(Module):
             if observation is None:
                 return
             frame, projection_context, image_timestamp = observation
-            tf = self.tfbuffer.get(
-                "world",
-                "base_link",
-                time_point=image_timestamp,
-                time_tolerance=self.config.object_sensor_time_tolerance_s,
-                warn=False,
-            )
+            if self._pgo_session is not None:
+                tf = projection_context.get("robot_tf") if projection_context is not None else None
+            else:
+                tf = self.tfbuffer.get(
+                    "world",
+                    "base_link",
+                    time_point=image_timestamp,
+                    time_tolerance=self.config.object_sensor_time_tolerance_s,
+                    warn=False,
+                )
         else:
             if self._latest_video_frame is None:
                 return
@@ -897,7 +1240,7 @@ class SpatialMemory(Module):
             # Enqueue a new VLM task once the robot has moved at least 1m since
             # the previous VLM task (or on the very first stored frame).  The
             # queue is unbounded so slow VLM calls do not block frame storage.
-            should_vlm = self._vlm is not None
+            should_vlm = self._vlm is not None and self._auto_tagging_enabled
             if should_vlm and self._vlm_last_position is not None:
                 distance_since_last_vlm = np.linalg.norm(
                     [
@@ -915,7 +1258,7 @@ class SpatialMemory(Module):
 
                 success, encoded = cv2.imencode(".jpg", frame)
                 if success:
-                    self._vlm_task_queue.put(
+                    self._enqueue_vlm_task(
                         {
                             "frame_id": frame_id,
                             "frame_array": encoded,
@@ -931,19 +1274,25 @@ class SpatialMemory(Module):
                                 float(euler.z),
                             ],
                             "timestamp": image_timestamp,
-                        }
+                        },
+                        current_pose.position,
                     )
-                    self._vlm_last_position = current_pose.position
                 else:
                     logger.warning(f"Failed to encode frame for VLM tagging: {frame_id}")
 
             # Store in vector database
-            self.vector_db.add_image_vector(
-                vector_id=frame_id,
-                image=frame,
-                embedding=frame_embedding,
-                metadata=metadata,
-            )
+            with self._tagging_lock:
+                metadata = self._pgo_metadata(
+                    metadata,
+                    image_timestamp,
+                    projection_context.get("pgo_graph") if projection_context else self._pgo_graph,
+                )
+                self.vector_db.add_image_vector(
+                    vector_id=frame_id,
+                    image=frame,
+                    embedding=frame_embedding,
+                    metadata=metadata,
+                )
 
             # Update tracking variables
             self.last_position = current_pose.position
@@ -1105,7 +1454,9 @@ class SpatialMemory(Module):
             List of results, each containing the image, its metadata, and similarity score
         """
         logger.info(f"Querying spatial memory with text: '{text}'")
-        return self.vector_db.query_by_text(text, limit)
+        with self._tagging_lock:
+            self._ensure_pgo_ready()
+            return self.vector_db.query_by_text(text, limit)
 
     @rpc
     def add_robot_location(self, location: RobotLocation) -> bool:
@@ -1131,15 +1482,48 @@ class SpatialMemory(Module):
             return False
 
     def _tag_object_location(
-        self, name: str, position: list[float], rotation: list[float] | None, description: str
+        self,
+        name: str,
+        position: list[float],
+        rotation: list[float] | None,
+        description: str,
+        *,
+        pgo_metadata: dict[str, Any] | None = None,
+        reference_image: np.ndarray | None = None,
     ) -> bool:
         for existing in self.get_robot_locations():
             if (
                 existing.name.casefold() == name.casefold()
                 and np.linalg.norm(np.asarray(existing.position) - position) <= 1.0
             ):
+                if reference_image is not None and existing.frame_id is None:
+                    with self._tagging_lock:
+                        self._ensure_pgo_ready()
+                        self._attach_tag_image(existing, reference_image)
+                        self.vector_db.location_collection.update(
+                            ids=[existing.location_id], metadatas=[existing.to_vector_metadata()]
+                        )
                 return True
-        return self.add_named_location(name, position, rotation, description, kind="object")
+        if pgo_metadata is not None:
+            location = RobotLocation.from_vector_metadata(
+                {
+                    **pgo_metadata,
+                    "location_name": name,
+                    "description": description,
+                    "kind": "object",
+                    "timestamp": pgo_metadata["pgo_timestamp"],
+                }
+            )
+            self._attach_tag_image(location, reference_image)
+            return self.add_robot_location(location)
+        return self.add_named_location(
+            name,
+            position,
+            rotation,
+            description,
+            kind="object",
+            reference_image=reference_image,
+        )
 
     @rpc
     def add_named_location(
@@ -1149,6 +1533,8 @@ class SpatialMemory(Module):
         rotation: list[float] | None = None,
         description: str | None = None,
         kind: str = "location",
+        observation: dict[str, Any] | None = None,
+        reference_image: np.ndarray | None = None,
     ) -> bool:
         """
         Add a named robot location to spatial memory using current or specified position.
@@ -1164,10 +1550,16 @@ class SpatialMemory(Module):
             True if successfully added, False otherwise
         """
         if position is None or rotation is None:
-            tf = self.tfbuffer.get("world", "base_link")
+            buffer = self._pgo_raw_buffer if self._pgo_session is not None else self.tfbuffer
+            tf = buffer.get("world", "base_link")
             if tf is None:
                 logger.error("No position available for robot location")
                 return False
+            with self._tagging_lock:
+                if self._pgo_graph is not None and self._pgo_graph.keyframes:
+                    tf = self._pgo_graph.world_correction(tf.ts) + tf
+                if observation is None and self._pgo_session is not None:
+                    observation = {"timestamp": tf.ts, "pgo_graph": self._pgo_graph}
             if position is None:
                 position = [
                     float(tf.translation.x),
@@ -1184,7 +1576,17 @@ class SpatialMemory(Module):
             timestamp=time.time(),
             metadata={"description": description or f"Location: {name}", "kind": kind},
         )
+        if observation is not None and self._pgo_session is not None:
+            with self._tagging_lock:
+                metadata = self._pgo_metadata(
+                    location.to_vector_metadata(),
+                    observation["timestamp"],
+                    observation.get("pgo_graph"),
+                )
+                location = RobotLocation.from_vector_metadata(metadata)
 
+        if reference_image is not None:
+            self._attach_tag_image(location, reference_image)
         return self.add_robot_location(location)
 
     @rpc
@@ -1195,7 +1597,9 @@ class SpatialMemory(Module):
         Returns:
             List of RobotLocation objects
         """
-        return self.vector_db.get_robot_locations()
+        with self._tagging_lock:
+            self._ensure_pgo_ready()
+            return self.vector_db.get_robot_locations()
 
     @rpc
     def find_robot_location(self, name: str) -> RobotLocation | None:
@@ -1229,15 +1633,91 @@ class SpatialMemory(Module):
     @rpc
     def tag_location(self, robot_location: RobotLocation) -> bool:
         try:
-            self.vector_db.tag_location(robot_location)
+            with self._tagging_lock:
+                self._ensure_pgo_ready()
+                if robot_location.frame_id is None:
+                    self._attach_tag_image(robot_location, self._latest_video_frame_bgr)
+                if self._pgo_session is not None and "pgo_raw_pose" not in robot_location.metadata:
+                    metadata = self._pgo_metadata(
+                        robot_location.to_vector_metadata(),
+                        robot_location.timestamp,
+                        self._pgo_graph,
+                    )
+                    robot_location = RobotLocation.from_vector_metadata(metadata)
+                elif (
+                    self._pgo_session is not None and self._pgo_graph and self._pgo_graph.keyframes
+                ):
+                    metadata = robot_location.to_vector_metadata()
+                    raw = Transform.from_matrix(
+                        np.asarray(json.loads(metadata["pgo_raw_pose"])),
+                        frame_id="world",
+                        child_frame_id="base_link",
+                    )
+                    corrected = self._pgo_graph.world_correction(metadata["pgo_timestamp"]) + raw
+                    angles = corrected.rotation.to_euler()
+                    robot_location.position = (
+                        float(corrected.translation.x),
+                        float(corrected.translation.y),
+                        float(corrected.translation.z),
+                    )
+                    robot_location.rotation = (float(angles.x), float(angles.y), float(angles.z))
+                self.vector_db.tag_location(robot_location)
         except Exception:
             logger.exception("Failed to persist location tag", name=robot_location.name)
             return False
         return True
 
+    @staticmethod
+    def _tag_crop(frame: np.ndarray, bbox: list[int]) -> np.ndarray:
+        height, width = frame.shape[:2]
+        x1, y1, x2, y2 = (int(value) for value in bbox)
+        crop = frame[max(0, y1) : min(height, y2), max(0, x1) : min(width, x2)]
+        if crop.size == 0:
+            raise ValueError("Cannot save an empty tag image")
+        return crop.copy()
+
+    def _attach_tag_image(self, location: RobotLocation, frame: np.ndarray | None) -> None:
+        if frame is None:
+            logger.warning("Tag has no reference image", location_id=location.location_id)
+            return
+        with self._tagging_lock:
+            assert self._visual_memory is not None
+            image_id = f"tag_{location.location_id}"
+            self._visual_memory.add(image_id, frame)
+            if self._visual_memory.get(image_id) is None:
+                raise RuntimeError("Failed to store tag reference image")
+            location.frame_id = image_id
+            if self.visual_memory_path is not None:
+                self._visual_memory.save(self.visual_memory_path)
+
+    @rpc
+    def verify_tag_view(self, location_id: str) -> dict[str, Any]:
+        """Compare this tag's saved view against a fresh camera frame, locally."""
+        with self._tagging_lock:
+            self._ensure_pgo_ready()
+            location = next(
+                (item for item in self.get_robot_locations() if item.location_id == location_id),
+                None,
+            )
+            if location is None:
+                raise ValueError(f"Tag {location_id!r} no longer exists")
+            if location.frame_id is None or self._visual_memory is None:
+                raise ValueError("Tag has no reference image; re-tag it before visual search")
+            reference = self._visual_memory.get(location.frame_id)
+            if reference is None:
+                raise ValueError("Tag reference image is missing; re-tag it before visual search")
+            observation = self._latest_observation
+            if observation is None or not 0 <= time.time() - observation[2] <= 3:
+                raise RuntimeError("No fresh camera frame for visual search")
+            frame, _, timestamp = observation
+            result = match_tag_view(reference, frame.copy())
+            return {**result, "image_ts": timestamp, "location_id": location_id}
+
     @rpc
     def query_tagged_location(self, query: str) -> RobotLocation | None:
-        location, semantic_distance = self.vector_db.query_tagged_location(query)
+        with self._tagging_lock:
+            self._ensure_pgo_ready()
+            location, semantic_distance = self.vector_db.query_tagged_location(query)
         if semantic_distance < 0.3:
             return location
         return None

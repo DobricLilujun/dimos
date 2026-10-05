@@ -149,6 +149,7 @@ def test_mcp_module_handles_errors() -> None:
     assert response is not None
     assert "Error running tool" in response["result"]["content"][0]["text"]
     assert "boom" in response["result"]["content"][0]["text"]
+    assert response["result"]["isError"] is True
 
     # Unknown skill returns not found
     response = asyncio.run(
@@ -160,6 +161,7 @@ def test_mcp_module_handles_errors() -> None:
     )
     assert response is not None
     assert "not found" in response["result"]["content"][0]["text"].lower()
+    assert response["result"]["isError"] is True
 
 
 def test_mcp_module_initialize_and_unknown() -> None:

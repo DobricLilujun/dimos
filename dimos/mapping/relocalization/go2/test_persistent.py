@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from pathlib import Path
+from threading import Event
 
 from dimos_lcm.std_msgs import Bool
 import numpy as np
@@ -34,14 +35,17 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
+from dimos.navigation.go2.loop_closure.pgo import Keyframe, PoseGraph
 from dimos.navigation.go2.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic import unitree_go2_agentic
 from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent import (
     unitree_go2_agentic_persistent,
 )
 from dimos.robot.unitree.go2.connection import GO2Connection
+from dimos.types.robot_location import RobotLocation
 from dimos.visualization.rerun.bridge import RerunBridgeModule
 
 
@@ -61,6 +65,9 @@ def session(tmp_path: Path, mocker: MockerFixture):
             **config,
         )
         built.append(module)
+        if config.get("pgo_enabled"):
+            mocker.patch.object(module, "_pgo_memory", mocker.Mock())
+            mocker.patch.object(module, "_pgo_navigation", mocker.Mock())
         for port in module.inputs.values():
             mocker.patch.object(port, "subscribe", return_value=lambda: None)
         for port in module.outputs.values():
@@ -82,6 +89,118 @@ def save_premap(path):
     prior = cloud([[0, 0, 0], [4, 2, 0], [4, 2, 1]])
     path.write_bytes(prior.lcm_encode())
     return prior
+
+
+def fixed_graph():
+    return PoseGraph(
+        keyframes=(
+            Keyframe(
+                10, Transform(translation=Vector3(1, 0, 0)), Transform(translation=Vector3(1, 0, 0))
+            ),
+            Keyframe(
+                12,
+                Transform(translation=Vector3(2, 0, 0)),
+                Transform(translation=Vector3(2.5, 0, 0)),
+            ),
+        )
+    )
+
+
+def test_pgo_corrects_live_pose_cloud_tf_and_saves_without_moving_old_map(
+    session, tmp_path, mocker
+):
+    path = tmp_path / "office.pc2.lcm"
+    prior = save_premap(path)
+    pgo = mocker.patch.object(persistent, "PGOMap").return_value
+    pgo.add.return_value = True
+    pgo.graph.return_value = fixed_graph()
+    pgo.global_map.return_value = cloud([[2.5, 0, 0]])
+    module = session(pgo_enabled=True)
+    module._candidate = Transform(frame_id="world", child_frame_id="world")
+    module.confirm_alignment()
+    pose = PoseStamped(frame_id="world", position=[2, 0, 0], ts=12.0)
+    module._on_odom(pose)
+    module._on_tf(
+        TFMessage(
+            Transform(
+                translation=Vector3(2, 0, 0),
+                frame_id="world",
+                child_frame_id="base_link",
+                ts=12.0,
+            )
+        )
+    )
+
+    module._on_lidar(cloud([[2, 0, 0]]))
+
+    np.testing.assert_allclose(module.lidar.publish.call_args.args[0].points_f32(), [[2.5, 0, 0]])
+    assert module.odom.publish.call_args.args[0].position.x == pytest.approx(2.5)
+    assert module.tf.publish.call_args.args[0].transforms[0].translation.x == pytest.approx(2.5)
+    assert module.pgo_raw_tf.publish.call_args.args[0].transforms[0].translation.x == 2
+    np.testing.assert_allclose(
+        module.pgo_raw_lidar.publish.call_args.args[0].points_f32(), [[2, 0, 0]]
+    )
+    saved = PointCloud2.lcm_decode(path.read_bytes()).points_f32()
+    np.testing.assert_allclose(saved[: len(prior)], prior.points_f32())
+    np.testing.assert_allclose(saved[-1], [2.5, 0, 0])
+    module._pgo_memory.update_pgo_graph.assert_called_with(
+        pgo.graph.return_value, module._pgo_session, mocker.ANY
+    )
+    module._pgo_navigation.pause_for_pgo.assert_called_once()
+    module._pgo_navigation.resume_after_pgo.assert_called_once()
+    assert module._pgo_navigation.resume_after_pgo.call_args.args[2].position.x == pytest.approx(
+        2.5
+    )
+    module.pgo_stop.publish.assert_not_called()
+    pgo.flush.assert_called_once()
+
+
+def test_pgo_memory_sync_failure_blocks_motion_navigation_and_map_overwrite(
+    session, tmp_path, mocker
+):
+    path = tmp_path / "office.pc2.lcm"
+    save_premap(path)
+    saved = path.read_bytes()
+    pgo = mocker.patch.object(persistent, "PGOMap").return_value
+    pgo.add.return_value = True
+    pgo.graph.return_value = fixed_graph()
+    pgo.global_map.return_value = cloud([[2.5, 0, 0]])
+    module = session(pgo_enabled=True)
+    module._candidate = Transform(frame_id="world", child_frame_id="world")
+    module.confirm_alignment()
+    module._pgo_memory.update_pgo_graph.side_effect = RuntimeError("Tag database unavailable")
+
+    with pytest.raises(RuntimeError, match="Tag database"):
+        module._on_lidar(cloud([[2, 0, 0]]))
+    assert not module.navigation_ready()
+    module._on_cmd_vel(Twist(linear=Vector3(0.3, 0, 0)))
+    assert module.cmd_vel.publish.call_args.args[0].linear.x == 0
+    with pytest.raises(RuntimeError, match="PGO synchronization"):
+        module.save_map()
+    assert path.read_bytes() == saved
+
+
+def test_pgo_checkpoint_failure_blocks_navigation_and_preserves_saved_map(
+    session, tmp_path, mocker
+):
+    path = tmp_path / "office.pc2.lcm"
+    save_premap(path)
+    saved = path.read_bytes()
+    pgo = mocker.patch.object(persistent, "PGOMap").return_value
+    pgo.add.return_value = True
+    pgo.graph.return_value = fixed_graph()
+    pgo.global_map.return_value = cloud([[2.5, 0, 0]])
+    module = session(pgo_enabled=True)
+    module._candidate = Transform(frame_id="world", child_frame_id="world")
+    module.confirm_alignment()
+    mocker.patch.object(module, "save_map", side_effect=OSError("disk full"))
+
+    with pytest.raises(OSError, match="disk full"):
+        module._on_lidar(cloud([[2, 0, 0]]))
+
+    assert not module.navigation_ready()
+    assert module.cmd_vel.publish.call_args.args[0].linear.x == 0
+    assert path.read_bytes() == saved
 
 
 def test_new_map_save_restore_requires_confirmation(session, tmp_path):
@@ -245,6 +364,394 @@ def test_navigation_gate_refuses_before_confirmation_and_forwards_after(mocker):
         planner.dispose()
 
 
+@pytest.fixture
+def pgo_planner(mocker):
+    planner = PersistentGo2Planner()
+    map_session = mocker.patch.object(planner, "_map_session", create=True)
+    map_session.navigation_ready.return_value = True
+    memory = mocker.patch.object(planner, "_spatial_memory", create=True)
+    memory.get_robot_locations.return_value = [
+        RobotLocation("fire extinguisher", (3, 4, 1), (0, 0, 0.5), location_id="ext-1"),
+        RobotLocation("fire extinguisher", (99, 99, 1), (0, 0, 0), location_id="ext-2"),
+    ]
+    costmapper = mocker.patch.object(planner, "_costmapper", create=True)
+    costmapper.calculate_navigation_costmap.return_value = OccupancyGrid(
+        grid=np.zeros((20, 20), dtype=np.int8), resolution=0.5, frame_id="world", ts=12.0
+    )
+    for name in ("handle_goal_request", "cancel_goal", "handle_global_costmap", "handle_odom"):
+        mocker.patch.object(planner._planner, name)
+    for port in planner.outputs.values():
+        mocker.patch.object(port, "publish")
+    yield planner
+    planner.dispose()
+
+
+@pytest.fixture
+def visual_planner(pgo_planner, mocker):
+    planner = pgo_planner
+    mocker.patch.object(persistent, "Thread")
+    mocker.patch.object(persistent.time, "monotonic", return_value=100.0)
+    matcher = mocker.patch.object(planner, "_tag_view", create=True)
+    matcher.verify_tag_view.return_value = {"matched": True, "image_ts": 1000.0}
+    planner.configure_visual_arrival(True)
+    planner.set_nearby_tagged_goal("ext-1", PoseStamped(position=[3, 4, 0], frame_id="world"))
+    planner._handle_odom(PoseStamped(position=[2, 4, 0], frame_id="world"))
+    yield planner, matcher
+    planner.cancel_goal()
+
+
+def test_visual_arrival_waits_for_selected_tag_image_before_announcing(visual_planner):
+    planner, matcher = visual_planner
+    assert planner.visual_arrival_status() == {"enabled": True, "searching": True}
+    assert planner.navigation_state.publish.call_args.args[0].data == (
+        "Nearby threshold reached; searching for tag image"
+    )
+    assert planner.is_goal_reached() is False
+    planner._publish_goal_result(Bool(True))
+    planner.goal_reached.publish.assert_not_called()
+    planner._search_tag_view(planner._goal_revision, "ext-1", planner._search_stop)
+    matcher.verify_tag_view.assert_called_once_with("ext-1")
+    assert planner.navigation_state.publish.call_args.args[0].data == "Arrived: tag image matched"
+    assert planner.nav_cmd_vel.publish.call_args.args[0].angular.z == 0
+    assert planner.goal_reached.publish.call_args.args[0].data is True
+    assert planner.is_goal_reached() is True
+
+
+def test_visual_search_turns_without_translation_and_stops_on_match(visual_planner, mocker):
+    planner, matcher = visual_planner
+    stop = mocker.Mock(spec=Event)
+    stop.is_set.return_value = False
+    stop.wait.return_value = False
+    mocker.patch.object(planner, "_search_stop", stop)
+    matcher.verify_tag_view.side_effect = [
+        {"matched": False, "image_ts": 1000.0},
+        {"matched": True, "image_ts": 1001.0},
+    ]
+    planner._search_tag_view(planner._goal_revision, "ext-1", stop)
+    commands = [call.args[0] for call in planner.nav_cmd_vel.publish.call_args_list]
+    assert any(command.angular.z == 0.15 for command in commands)
+    assert all(
+        command.linear.x == command.linear.y == command.linear.z == 0 for command in commands
+    )
+    assert commands[-1].angular.z == 0
+    assert planner.goal_reached.publish.call_args.args[0].data is True
+
+
+@pytest.mark.parametrize("outcome", ["cancel", "pgo", "off", "replace"])
+def test_slow_visual_match_cannot_restart_motion_after_cancellation(visual_planner, outcome):
+    planner, matcher = visual_planner
+    revision = planner._goal_revision
+    stop = planner._search_stop
+
+    def interrupt(location_id):
+        if outcome == "pgo":
+            planner.pause_for_pgo()
+        elif outcome == "off":
+            planner.configure_visual_arrival(False)
+        elif outcome == "replace":
+            planner.set_goal(PoseStamped(position=[9, 9, 0], frame_id="world"))
+        else:
+            planner.cancel_goal()
+        return {"matched": True, "image_ts": 1001.0}
+
+    matcher.verify_tag_view.side_effect = interrupt
+    planner._search_tag_view(revision, "ext-1", stop)
+    assert stop.is_set()
+    assert all(call.args[0].angular.z == 0 for call in planner.nav_cmd_vel.publish.call_args_list)
+    planner.goal_reached.publish.assert_not_called()
+    assert planner.navigation_state.publish.call_args.args[0].data != "Arrived: tag image matched"
+
+
+def test_visual_timeout_and_missing_image_stop_without_claiming_arrival(visual_planner, mocker):
+    planner, matcher = visual_planner
+    clock = mocker.patch.object(persistent.time, "monotonic", side_effect=[100.0, 121.0])
+    planner._search_tag_view(planner._goal_revision, "ext-1", planner._search_stop)
+    assert (
+        planner.navigation_state.publish.call_args.args[0].data
+        == "Visual search timed out; no matching tag view"
+    )
+    assert planner.goal_reached.publish.call_args.args[0].data is False
+    assert planner.nav_cmd_vel.publish.call_args.args[0].angular.z == 0
+    clock.side_effect = None
+    clock.return_value = 100.0
+    planner.set_nearby_tagged_goal("ext-1", PoseStamped(position=[3, 4, 0], frame_id="world"))
+    planner._handle_odom(PoseStamped(position=[2, 4, 0], frame_id="world"))
+    matcher.verify_tag_view.side_effect = ValueError("Reference image missing")
+    planner._search_tag_view(planner._goal_revision, "ext-1", planner._search_stop)
+    assert (
+        planner.navigation_state.publish.call_args.args[0].data
+        == "Visual search failed: Reference image missing"
+    )
+    assert planner.goal_reached.publish.call_args.args[0].data is False
+
+
+def test_pgo_replans_same_tag_id_using_updated_coordinates_and_map(pgo_planner, mocker):
+    planner = pgo_planner
+    events = mocker.Mock()
+    for name in ("handle_global_costmap", "handle_odom", "handle_goal_request"):
+        events.attach_mock(getattr(planner._planner, name), name)
+    assert planner.set_tagged_goal("ext-1", PoseStamped(position=[1, 2, 0], frame_id="world"))
+    revision = planner.pause_for_pgo()
+    planner._on_goal_finished(Bool(False))
+    events.reset_mock()
+    aligned_odom = PoseStamped(position=[2.5, 0, 0.4], frame_id="world", ts=12.0)
+    corrected_map = cloud([[2.5, 0, 0]])
+
+    assert planner.resume_after_pgo(revision, corrected_map, aligned_odom)
+
+    assert [call[0] for call in events.mock_calls] == [
+        "handle_global_costmap",
+        "handle_odom",
+        "handle_goal_request",
+    ]
+    planner._costmapper.calculate_navigation_costmap.assert_called_once_with(corrected_map)
+    goal = planner._planner.handle_goal_request.call_args.args[0]
+    assert goal.position.to_numpy().tolist() == [3, 4, 0.4]
+    assert goal.orientation.to_euler().z == pytest.approx(0.5)
+    assert goal.frame_id == "world"
+    planner._planner.cancel_goal.assert_called_once()
+    assert planner.navigation_state.publish.call_args.args[0].data == (
+        "PGO correction: navigation replanned"
+    )
+    # Another loop refreshes from the database, not the previously corrected goal.
+    planner._spatial_memory.get_robot_locations.return_value[0].position = (5, 6, 1)
+    assert planner.resume_after_pgo(planner.pause_for_pgo(), corrected_map, aligned_odom)
+    assert planner._planner.handle_goal_request.call_args.args[0].position.x == 5
+
+
+def test_live_loop_saves_corrected_map_and_resumes_active_tag_navigation(
+    session, pgo_planner, tmp_path, mocker
+):
+    path = tmp_path / "office.pc2.lcm"
+    save_premap(path)
+    pgo = mocker.patch.object(persistent, "PGOMap").return_value
+    pgo.add.return_value = True
+    pgo.graph.return_value = fixed_graph()
+    pgo.global_map.return_value = cloud([[2.5, 0, 0]])
+    module = session(pgo_enabled=True)
+    module._candidate = Transform(frame_id="world", child_frame_id="world")
+    module.confirm_alignment()
+    module._on_odom(PoseStamped(frame_id="world", position=[2, 0, 0], ts=12.0))
+    mocker.patch.object(module, "_pgo_navigation", pgo_planner)
+    pgo_planner.set_tagged_goal("ext-1", PoseStamped(position=[1, 2, 0], frame_id="world"))
+
+    def update_tag_after_loop(_graph, _session, _cloud):
+        pgo_planner._spatial_memory.get_robot_locations.return_value[0].position = (7, 8, 1)
+
+    module._pgo_memory.update_pgo_graph.side_effect = update_tag_after_loop
+    resume = mocker.spy(pgo_planner, "resume_after_pgo")
+
+    def check_checkpoint_before_planning(_cloud):
+        saved = PointCloud2.lcm_decode(path.read_bytes())
+        np.testing.assert_allclose(saved.points_f32()[-1], [2.5, 0, 0])
+        return OccupancyGrid(grid=np.zeros((20, 20), dtype=np.int8), ts=12.0)
+
+    pgo_planner._costmapper.calculate_navigation_costmap.side_effect = (
+        check_checkpoint_before_planning
+    )
+
+    module._on_lidar(cloud([[2, 0, 0]]))
+
+    assert resume.spy_return is True
+    goal = pgo_planner._planner.handle_goal_request.call_args.args[0]
+    assert goal.position.x == 7
+    assert goal.position.y == 8
+    assert pgo_planner._planner.handle_odom.call_args.args[0].position.x == 2.5
+    assert module.navigation_ready()
+    assert not module._pgo_paused
+    module.pgo_stop.publish.assert_not_called()
+
+
+@pytest.mark.parametrize("interruption", ["cancel", "new-goal", "teleop-stop", "arrived"])
+def test_pgo_never_resurrects_cancelled_replaced_or_finished_navigation(pgo_planner, interruption):
+    planner = pgo_planner
+    planner.set_tagged_goal("ext-1", PoseStamped(position=[1, 2, 0], frame_id="world"))
+    if interruption == "arrived":
+        planner._on_goal_finished(Bool(True))
+    revision = planner.pause_for_pgo()
+    if interruption == "cancel":
+        planner.cancel_goal()
+    elif interruption == "new-goal":
+        assert not planner.set_goal(PoseStamped(position=[8, 9, 0], frame_id="world"))
+    elif interruption == "teleop-stop":
+        planner._on_stop_movement(Bool(True))
+    planner._planner.handle_goal_request.reset_mock()
+
+    assert not planner.resume_after_pgo(revision, cloud([[2, 0, 0]]), PoseStamped())
+
+    planner._planner.handle_goal_request.assert_not_called()
+    planner._costmapper.calculate_navigation_costmap.assert_not_called()
+
+
+def test_cancel_during_pgo_costmap_refresh_wins_over_automatic_resume(pgo_planner):
+    planner = pgo_planner
+    planner.set_tagged_goal("ext-1", PoseStamped(position=[1, 2, 0], frame_id="world"))
+    revision = planner.pause_for_pgo()
+    planner._planner.handle_goal_request.reset_mock()
+
+    def cancel_while_refreshing(_cloud):
+        planner.cancel_goal()
+        return OccupancyGrid()
+
+    planner._costmapper.calculate_navigation_costmap.side_effect = cancel_while_refreshing
+
+    assert not planner.resume_after_pgo(revision, cloud([[2, 0, 0]]), PoseStamped())
+
+    planner._planner.handle_goal_request.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["missing-tag", "no-odom", "database", "costmap"])
+def test_pgo_refresh_failure_stops_without_reusing_stale_goal(pgo_planner, failure):
+    planner = pgo_planner
+    planner.set_tagged_goal("ext-1", PoseStamped(position=[1, 2, 0], frame_id="world"))
+    revision = planner.pause_for_pgo()
+    planner._planner.handle_goal_request.reset_mock()
+    odom = PoseStamped()
+    if failure == "missing-tag":
+        planner._spatial_memory.get_robot_locations.return_value = []
+    elif failure == "no-odom":
+        odom = None
+    elif failure == "database":
+        planner._spatial_memory.get_robot_locations.side_effect = RuntimeError(
+            "database unavailable"
+        )
+    else:
+        planner._costmapper.calculate_navigation_costmap.side_effect = RuntimeError(
+            "costmap unavailable"
+        )
+
+    with pytest.raises(RuntimeError):
+        planner.resume_after_pgo(revision, cloud([[2, 0, 0]]), odom)
+
+    planner._planner.handle_goal_request.assert_not_called()
+    assert planner._active_goal is None
+    assert planner.navigation_state.publish.call_args.args[0].data == (
+        "PGO navigation refresh failed; stopped"
+    )
+
+
+def test_pgo_world_goal_stays_fixed_and_old_costmaps_cannot_replace_corrected_map(pgo_planner):
+    planner = pgo_planner
+    planner.set_goal(PoseStamped(position=[1, 2, 0], frame_id="world"))
+    revision = planner.pause_for_pgo()
+    old_map = OccupancyGrid(ts=11.0)
+    planner._handle_global_costmap(old_map)
+    planner._planner.handle_global_costmap.assert_not_called()
+    assert planner.resume_after_pgo(revision, cloud([[2, 0, 0]]), PoseStamped())
+    planner._spatial_memory.get_robot_locations.assert_not_called()
+    assert planner._planner.handle_goal_request.call_args.args[0].position.to_numpy().tolist() == [
+        1,
+        2,
+        0,
+    ]
+    planner._planner.handle_global_costmap.reset_mock()
+    planner._handle_global_costmap(old_map)
+    planner._planner.handle_global_costmap.assert_not_called()
+    updated_map = OccupancyGrid(ts=13.0)
+    planner._handle_global_costmap(updated_map)
+    planner._planner.handle_global_costmap.assert_called_once_with(updated_map)
+
+
+@pytest.mark.parametrize("distance,arrived", [(1.01, False), (1.0, True), (0.99, True)])
+def test_nearby_navigation_stops_at_one_meter_without_matching_height_or_yaw(
+    pgo_planner, distance, arrived
+):
+    planner = pgo_planner
+    assert planner.set_nearby_tagged_goal(
+        "ext-1", PoseStamped(position=[3, 4, 99], frame_id="world")
+    )
+    planner._handle_odom(PoseStamped(position=[3 - distance, 4, 0], frame_id="world"))
+    assert planner._planner.cancel_goal.call_count == int(arrived)
+    if arrived:
+        planner._planner.cancel_goal.assert_called_once_with(arrived=True)
+        assert planner.nav_cmd_vel.publish.call_args.args[0].linear.x == 0
+    else:
+        assert planner._active_goal is not None
+
+
+def test_nearby_already_in_radius_does_not_start_moving(pgo_planner, mocker):
+    planner = pgo_planner
+    mocker.patch.object(
+        planner._planner, "_current_odom", PoseStamped(position=[2.5, 4, 0], frame_id="world")
+    )
+    assert planner.set_nearby_tagged_goal(
+        "ext-1", PoseStamped(position=[3, 4, 0], frame_id="world")
+    )
+    planner._planner.handle_goal_request.assert_not_called()
+    planner._planner.cancel_goal.assert_called_once_with(arrived=True)
+
+
+@pytest.mark.parametrize("radius", [0.3, 1.7, 3.0])
+def test_configurable_nearby_radius_stops_at_exact_threshold(pgo_planner, radius):
+    planner = pgo_planner
+    assert planner.set_nearby_arrival_distance(radius) == {"distance_m": radius}
+    planner.set_nearby_tagged_goal("ext-1", PoseStamped(position=[3, 4, 0], frame_id="world"))
+    planner._handle_odom(PoseStamped(position=[3 - radius - 0.01, 4, 0], frame_id="world"))
+    planner._planner.cancel_goal.assert_not_called()
+    planner._handle_odom(PoseStamped(position=[3 - radius, 4, 0], frame_id="world"))
+    planner._planner.cancel_goal.assert_called_once_with(arrived=True)
+    assert (
+        planner.navigation_state.publish.call_args.args[0].data == "Arrived within nearby threshold"
+    )
+
+
+def test_slider_change_keeps_active_radius_and_pgo_preserves_it(pgo_planner):
+    planner = pgo_planner
+    planner.set_nearby_arrival_distance(0.7)
+    planner.set_nearby_tagged_goal("ext-1", PoseStamped(position=[3, 4, 0], frame_id="world"))
+    planner.set_nearby_arrival_distance(2.0)
+    revision = planner.pause_for_pgo()
+    assert planner.resume_after_pgo(
+        revision, cloud([[2, 0, 0]]), PoseStamped(position=[1, 4, 0], frame_id="world")
+    )
+    assert planner._arrival_radius == 0.7
+    planner._planner.cancel_goal.reset_mock()
+    planner._handle_odom(PoseStamped(position=[2, 4, 0], frame_id="world"))
+    planner._planner.cancel_goal.assert_not_called()
+    planner._handle_odom(PoseStamped(position=[2.3, 4, 0], frame_id="world"))
+    planner._planner.cancel_goal.assert_called_once_with(arrived=True)
+
+
+@pytest.mark.parametrize("radius", [float("nan"), float("inf"), 0.2, 3.1])
+def test_invalid_nearby_radius_is_rejected_without_changing_threshold(pgo_planner, radius):
+    with pytest.raises(ValueError, match="between"):
+        pgo_planner.set_nearby_arrival_distance(radius)
+    assert pgo_planner.nearby_navigation_status() == {"distance_m": 1.0}
+
+
+def test_core_safe_goal_completion_outside_radius_does_not_claim_arrival(pgo_planner, mocker):
+    planner = pgo_planner
+    mocker.patch.object(planner._planner, "_current_odom", PoseStamped(position=[0, 0, 0]))
+    planner.set_nearby_tagged_goal("ext-1", PoseStamped(position=[3, 4, 0], frame_id="world"))
+    planner._on_goal_finished(Bool(True))
+    assert planner.navigation_state.publish.call_args.args[0].data == (
+        "Navigation stopped outside nearby threshold; target may be unreachable"
+    )
+    assert planner._active_goal is None
+
+
+def test_precise_navigation_does_not_inherit_nearby_radius(pgo_planner):
+    planner = pgo_planner
+    planner.set_nearby_tagged_goal("ext-1", PoseStamped(position=[3, 4, 0], frame_id="world"))
+    planner.set_tagged_goal("ext-1", PoseStamped(position=[3, 4, 0], frame_id="world"))
+    planner._handle_odom(PoseStamped(position=[2.5, 4, 0], frame_id="world"))
+    planner._planner.cancel_goal.assert_not_called()
+    assert planner._arrival_radius is None
+
+
+def test_pgo_updates_nearby_tag_and_keeps_one_meter_arrival_rule(pgo_planner):
+    planner = pgo_planner
+    planner.set_nearby_tagged_goal("ext-1", PoseStamped(position=[99, 99, 0], frame_id="world"))
+    revision = planner.pause_for_pgo()
+    planner._planner.cancel_goal.reset_mock()
+    planner._planner.handle_goal_request.reset_mock()
+    assert planner.resume_after_pgo(
+        revision, cloud([[2, 0, 0]]), PoseStamped(position=[2.5, 4, 0], frame_id="world")
+    )
+    planner._planner.cancel_goal.assert_called_once_with(arrived=True)
+    planner._planner.handle_goal_request.assert_not_called()
+
+
 def test_original_planner_keeps_existing_goal_behavior(mocker):
     planner = ReplanningAStarPlanner()
     try:
@@ -306,6 +813,19 @@ def test_persistent_blueprint_routes_all_world_data_through_alignment_gate():
 
     for atom in blueprint.active_blueprints:
         for ref in atom.module_refs:
+            expected = {
+                "_pgo_navigation": "persistentgo2planner",
+                "_tagged_navigation": "persistentgo2planner",
+                "_costmapper": "costmapper",
+                "_spatial_memory": "spatialmemory",
+            }
+            if ref.name in expected:
+                assert (
+                    _resolve_single_ref(
+                        atom, ref, ref.spec, blueprint, set(blueprint.disabled_modules_tuple)
+                    )
+                    == expected[ref.name]
+                )
             if ref.name == "_map_session":
                 assert (
                     _resolve_single_ref(

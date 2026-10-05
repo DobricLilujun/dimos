@@ -41,26 +41,40 @@ the stack's stream wiring; it only observes/publishes by channel name.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import json
+import math
+from pathlib import Path
+import tempfile
 import threading
 import time
-import uuid
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlencode
+import uuid
 
-import uvicorn
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from dimos_lcm.std_msgs import String
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
+import httpx
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+import rerun.blueprint as rrb
 from starlette.responses import StreamingResponse
+import uvicorn
 
 from dimos.core.core import rpc
 from dimos.core.global_config import global_config
 from dimos.core.module import Module, ModuleConfig
+from dimos.core.transport_factory import make_transport
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.Image import Image
 from dimos.utils.logging_config import setup_logger
+from dimos.visualization.rerun.constants import RERUN_GRPC_PORT, RERUN_WEB_VIEWER_PORT
+from dimos.web.console.frontend import INDEX_HTML
+from dimos.web.console.settings import register_runtime_routes
 
 if TYPE_CHECKING:
     from dimos.core.transport import PubSubTransport
+    from dimos.web.console.settings import ConsoleRuntime
 
 logger = setup_logger()
 
@@ -126,6 +140,21 @@ class Operation:
 
 # Order matters: it is the control-deck layout.
 OPERATIONS: dict[str, Operation] = {
+    "query_starting_location": Operation(
+        "query_starting_location",
+        "Starting location",
+        "mcp",
+        "Memory",
+        description="Query the first aligned world position of this run; no movement.",
+    ),
+    "return_to_starting_location": Operation(
+        "return_to_starting_location",
+        "Return to start",
+        "mcp",
+        "Navigation",
+        human_only=True,
+        description="Navigate to this run's starting location after alignment.",
+    ),
     # ---- Alignment (reconnect state alignment) ----
     "alignment_status": Operation(
         "alignment_status",
@@ -194,11 +223,9 @@ OPERATIONS: dict[str, Operation] = {
         schema={
             "type": "object",
             "properties": {
-                "tag": {"type": "string", "description": "Short label, e.g. 'coffee table'"},
-                "object_type": {"type": "string", "description": "Category, e.g. 'furniture'"},
-                "notes": {"type": "string", "description": "Optional note"},
+                "object_name": {"type": "string", "description": "Visible object name"},
             },
-            "required": ["tag"],
+            "required": ["object_name"],
         },
     ),
     "tag_location": Operation(
@@ -210,11 +237,9 @@ OPERATIONS: dict[str, Operation] = {
         schema={
             "type": "object",
             "properties": {
-                "tag": {"type": "string", "description": "Short label, e.g. 'front door'"},
-                "location_type": {"type": "string", "description": "Category, e.g. 'entry'"},
-                "notes": {"type": "string", "description": "Optional note"},
+                "location_name": {"type": "string", "description": "Room or return-point name"},
             },
-            "required": ["tag"],
+            "required": ["location_name"],
         },
     ),
     "query_memory_tags": Operation(
@@ -227,25 +252,46 @@ OPERATIONS: dict[str, Operation] = {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Text query"},
-                "tag_type": {"type": "string", "description": "'object' | 'location' | '' (all)"},
             },
         },
     ),
     # ---- Navigation (agent skills) ----
-    "navigate_to_memory_tag": Operation(
-        "navigate_to_memory_tag",
-        "Navigate to tag",
+    "navigate_near_memory_tag": Operation(
+        "navigate_near_memory_tag",
+        "Navigate nearby",
         "mcp",
         "Navigation",
         primary=True,
+        human_only=True,
+        description="Approach a saved tag using the nearby-distance slider (default 1 m).",
+        schema={
+            "type": "object",
+            "properties": {
+                "location_id": {
+                    "type": "string",
+                    "description": "Exact saved ID from Query memory",
+                },
+            },
+            "required": ["location_id"],
+        },
+    ),
+    "navigate_to_memory_tag": Operation(
+        "navigate_to_memory_tag",
+        "Navigate precisely",
+        "mcp",
+        "Navigation",
+        primary=False,
+        human_only=True,
         description="Navigate to a saved location tag.",
         schema={
             "type": "object",
             "properties": {
-                "tag": {"type": "string", "description": "Location tag to navigate to"},
-                "notes": {"type": "string", "description": "Optional note"},
+                "location_id": {
+                    "type": "string",
+                    "description": "Exact saved ID from Query memory",
+                },
             },
-            "required": ["tag"],
+            "required": ["location_id"],
         },
     ),
     "stop_navigation": Operation(
@@ -255,6 +301,15 @@ OPERATIONS: dict[str, Operation] = {
         "Navigation",
         description="Stop the current navigation run.",
     ),
+    "navigation_state": Operation(
+        "navigation_state",
+        "Navigation state",
+        "rpc",
+        "Navigation",
+        method="get_state",
+        module="PersistentGo2Planner",
+        description="Check planner state; starting a goal is not arrival.",
+    ),
 }
 
 
@@ -263,8 +318,9 @@ OPERATIONS: dict[str, Operation] = {
 # ---------------------------------------------------------------------------
 class RobotConsoleModuleConfig(ModuleConfig):
     port: int = 8090
-    mcp_port: int = 9990
-    rerun_web_port: int = 9878
+    mcp_port: int = global_config.mcp_port
+    rerun_web_port: int = RERUN_WEB_VIEWER_PORT
+    rerun_grpc_port: int = RERUN_GRPC_PORT
     map_module: str = DEFAULT_MAP_MODULE
 
 
@@ -283,8 +339,23 @@ class RobotConsoleModule(Module):
         self._agent_transport: PubSubTransport[Any] | None = None
         self._idle_transport: PubSubTransport[Any] | None = None
         self._tool_transport: PubSubTransport[Any] | None = None
-        self._status: dict[str, Any] = {"agent_idle": False}
+        self._camera_transport: PubSubTransport[Any] | None = None
+        self._puppy_transport: PubSubTransport[Any] | None = None
+        self._navigation_transport: PubSubTransport[Any] | None = None
+        self._arrival_sequence = 0
+        self._camera_jpeg: bytes | None = None
+        self._camera_timestamp = 0.0
+        self._teleop_connected = False
+        self._status: dict[str, Any] = {"agent_idle": None}
         self._clients: set[asyncio.Queue[Any]] = set()
+        self.runtime: ConsoleRuntime | None = None
+        self._csrf_token = uuid.uuid4().hex
+        self._status_lock = asyncio.Lock()
+        self._speaker_enabled = False
+        self._speaker_generation = 0
+        self._speech_queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue(maxsize=4)
+        self._speech_task: asyncio.Task[None] | None = None
+        self._last_reply_id: str | None = None
 
     # -- lifecycle --------------------------------------------------------
     @property
@@ -293,7 +364,11 @@ class RobotConsoleModule(Module):
 
     @property
     def rerun_url(self) -> str:
-        return f"http://127.0.0.1:{self.config.rerun_web_port}"
+        source = f"rerun+http://127.0.0.1:{self.config.rerun_grpc_port}/proxy"
+        sources = [("url", source)]
+        if self.runtime is not None:
+            sources.append(("url", f"http://127.0.0.1:{self.config.port}/api/view/3d.rbl"))
+        return f"http://127.0.0.1:{self.config.rerun_web_port}/?{urlencode(sources)}"
 
     @rpc
     def start(self) -> None:
@@ -325,8 +400,6 @@ class RobotConsoleModule(Module):
     def _setup_agent_streams(self) -> None:
         """Subscribe to the agent / idle / tool-stream channels by name."""
         try:
-            from dimos.core.transport_factory import make_transport
-
             self._agent_transport = make_transport("/agent")
             self._agent_transport.start()
             self._agent_transport.subscribe(self._on_agent)
@@ -338,14 +411,31 @@ class RobotConsoleModule(Module):
             self._tool_transport = make_transport("/tool_streams")
             self._tool_transport.start()
             self._tool_transport.subscribe(self._on_tool)
+            self._camera_transport = make_transport("/color_image", Image)
+            self._camera_transport.start()
+            self._camera_transport.subscribe(self._on_camera)
+            self._puppy_transport = make_transport("/puppy_events")
+            self._puppy_transport.start()
+            self._puppy_transport.subscribe(self._on_puppy)
+            self._navigation_transport = make_transport("/navigation_state", String)
+            self._navigation_transport.start()
+            self._navigation_transport.subscribe(self._on_navigation_state)
         except Exception:
             logger.exception("console: failed to set up agent streams")
+            self._teardown_agent_streams()
+            raise
 
     def _teardown_agent_streams(self) -> None:
+        self._speaker_enabled = False
+        if self._speech_task is not None and self._console_loop is not None:
+            self._console_loop.call_soon_threadsafe(self._speech_task.cancel)
         for transport in (
             self._agent_transport,
             self._idle_transport,
             self._tool_transport,
+            self._camera_transport,
+            self._puppy_transport,
+            self._navigation_transport,
         ):
             if transport is None:
                 continue
@@ -353,6 +443,49 @@ class RobotConsoleModule(Module):
                 transport.stop()
             except Exception:
                 logger.exception("console: transport stop failed")
+
+    def _on_camera(self, image: Image) -> None:
+        now = time.monotonic()
+        if now - self._camera_timestamp < 0.1:
+            return
+        try:
+            self._camera_jpeg = image.to_jpeg_bytes()
+            self._camera_timestamp = now
+        except Exception:
+            logger.exception("console: camera encoding failed")
+
+    def _on_puppy(self, event: Any) -> None:
+        if not isinstance(event, dict):
+            return
+        if event.get("role") in ("user", "agent"):
+            self._emit(
+                {
+                    "type": "message",
+                    "role": event["role"],
+                    "content": str(event.get("content", "")),
+                    "tool_calls": [],
+                    "source": str(event.get("source", "Puppy")),
+                }
+            )
+        else:
+            self._emit({"type": "tool", "name": "Puppy", "text": str(event.get("content", ""))})
+
+    def _on_navigation_state(self, state: String) -> None:
+        self._emit({"type": "tool", "name": "Navigation", "text": state.data})
+        if state.data not in (
+            "Arrived within 1 m of target",
+            "Arrived within nearby threshold",
+            "Arrived at target",
+            "Arrived: tag image matched",
+        ):
+            return
+        text = "Woof! We've arrived!"
+        self._emit({"type": "message", "role": "agent", "content": text, "tool_calls": []})
+        if self._console_loop is not None and self._speaker_enabled:
+            self._arrival_sequence += 1
+            self._console_loop.call_soon_threadsafe(
+                self._queue_reply, text, f"navigation-arrival-{self._arrival_sequence}"
+            )
 
     def _emit(self, event: dict[str, Any]) -> None:
         """Thread-safe: fan an event out to every connected SSE client."""
@@ -368,8 +501,10 @@ class RobotConsoleModule(Module):
         for client_queue in self._clients:
             try:
                 client_queue.put_nowait(event)
-            except Exception:
-                pass
+            except asyncio.QueueFull:
+                logger.warning("console: slow SSE client; discarding oldest event")
+                client_queue.get_nowait()
+                client_queue.put_nowait(event)
 
     def _on_agent(self, message: Any) -> None:
         payload = serialize_message(message)
@@ -378,6 +513,48 @@ class RobotConsoleModule(Module):
         self._status["agent_idle"] = False
         self._emit({"type": "message", **payload})
         self._emit({"type": "status", "agent_idle": False, **self._status})
+        if payload["role"] == "user":
+            self._last_reply_id = None
+        elif payload["role"] == "agent" and not payload.get("tool_calls") and payload["content"]:
+            reply_id = str(
+                (message.get("id") if isinstance(message, dict) else getattr(message, "id", None))
+                or payload["content"]
+            )
+            if self._console_loop is not None:
+                self._console_loop.call_soon_threadsafe(
+                    self._queue_reply, payload["content"], reply_id
+                )
+
+    def _queue_reply(self, text: str, reply_id: str) -> None:
+        if not self._speaker_enabled or reply_id == self._last_reply_id:
+            return
+        if self.runtime is not None and not self.runtime.ready:
+            return
+        try:
+            self._speech_queue.put_nowait((text, self._speaker_generation))
+        except asyncio.QueueFull:
+            self._emit(
+                {
+                    "type": "tool",
+                    "name": "Go2 speaker",
+                    "text": "Speech queue full; reply not spoken.",
+                }
+            )
+            return
+        self._last_reply_id = reply_id
+
+    async def _speak_replies(self) -> None:
+        while True:
+            text, generation = await self._speech_queue.get()
+            try:
+                if self._speaker_enabled and generation == self._speaker_generation:
+                    result = await self._call_rpc(
+                        Operation("speak_agent_reply", "", "rpc", "", module="GO2Connection"),
+                        {"text": text, "generation": generation},
+                    )
+                    self._emit({"type": "tool", "name": "Go2 speaker", "text": str(result)})
+            finally:
+                self._speech_queue.task_done()
 
     def _on_idle(self, idle: Any) -> None:
         self._status["agent_idle"] = bool(idle)
@@ -444,15 +621,128 @@ class RobotConsoleModule(Module):
 
     # -- app / endpoints --------------------------------------------------
     def _build_app(self) -> FastAPI:
-        from .frontend import INDEX_HTML
-
         app = FastAPI(title="SEDAN GROUP Robot Console")
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+
+        @app.get("/api/camera.jpg")
+        def camera() -> Response:
+            if self._camera_jpeg is None or (self.runtime is not None and not self.runtime.ready):
+                return Response("Camera not ready", status_code=503)
+            if time.monotonic() - self._camera_timestamp > 3:
+                return Response("Camera stream is stale", status_code=503)
+            return Response(self._camera_jpeg, media_type="image/jpeg")
+
+        @app.get("/api/view/3d.rbl")
+        def world_blueprint() -> Response:
+            blueprint = rrb.Blueprint(
+                rrb.Spatial3DView(origin="world", name="3D", contents=["world/**"]),
+                rrb.BlueprintPanel(state="hidden"),
+                rrb.SelectionPanel(state="hidden"),
+                rrb.TimePanel(state="hidden"),
+                collapse_panels=True,
+            )
+            with tempfile.TemporaryDirectory(prefix="dimos-console-view-") as directory:
+                path = Path(directory) / "3d.rbl"
+                blueprint.save("dimos", path)
+                return Response(
+                    path.read_bytes(),
+                    media_type="application/octet-stream",
+                    headers={
+                        "Access-Control-Allow-Origin": f"http://127.0.0.1:{self.config.rerun_web_port}"
+                    },
+                )
+
+        @app.websocket("/api/teleop")
+        async def teleop(socket: WebSocket) -> None:
+            if (
+                socket.query_params.get("token") != self._csrf_token
+                or socket.headers.get("origin") != f"http://{socket.headers.get('host')}"
+                or self.runtime is None
+                or not self.runtime.ready
+                or self._teleop_connected
+            ):
+                await socket.close(code=1008)
+                return
+            transport = make_transport("/tele_cmd_vel", Twist)
+            self._teleop_connected = True
+            started = False
+            try:
+                await socket.accept()
+                prepared = await self._call_rpc(
+                    Operation("switch_joystick", "", "rpc", "", module="GO2Connection"),
+                    {"enable": True},
+                )
+                if not prepared.get("ok") or prepared.get("result") is not True:
+                    await socket.send_json(
+                        {"error": prepared.get("error", "Go2 refused joystick control.")}
+                    )
+                    await socket.close(code=1011)
+                    return
+                await asyncio.to_thread(transport.start)
+                started = True
+                await socket.send_json({"ready": True})
+                while self.runtime.ready:
+                    try:
+                        payload = await asyncio.wait_for(socket.receive_json(), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        await asyncio.to_thread(transport.publish, Twist.zero())
+                        await socket.close(code=1008, reason="Keyboard command timeout")
+                        break
+                    keys = payload.get("keys") if isinstance(payload, dict) else None
+                    if (
+                        not isinstance(keys, list)
+                        or len(keys) > 7
+                        or any(
+                            not isinstance(key, str)
+                            or key not in {"w", "a", "s", "d", "q", "e", " "}
+                            for key in keys
+                        )
+                    ):
+                        await socket.close(code=1008, reason="Invalid keyboard command")
+                        break
+                    enabled = " " in keys
+                    twist = Twist(
+                        linear=Vector3(
+                            0.3 * (("w" in keys) - ("s" in keys)) if enabled else 0,
+                            0.3 * (("a" in keys) - ("d" in keys)) if enabled else 0,
+                            0,
+                        ),
+                        angular=Vector3(
+                            0, 0, 0.4 * (("q" in keys) - ("e" in keys)) if enabled else 0
+                        ),
+                    )
+                    await asyncio.to_thread(transport.publish, twist)
+            except WebSocketDisconnect:
+                pass
+            except Exception:
+                logger.exception("console: keyboard control failed")
+                raise
+            finally:
+
+                def cleanup() -> None:
+                    try:
+                        if started:
+                            transport.publish(Twist.zero())
+                    finally:
+                        try:
+                            transport.stop()
+                        finally:
+                            self._teleop_connected = False
+
+                await asyncio.shield(asyncio.to_thread(cleanup))
+
+        @app.middleware("http")
+        async def protect_mutations(request: Request, call_next: Any) -> Response:
+            if request.method == "POST":
+                if request.headers.get("sec-fetch-site") == "cross-site":
+                    return Response("Cross-site requests are not allowed", status_code=403)
+                if (
+                    self.runtime is not None
+                    and request.headers.get("x-console-token") != self._csrf_token
+                ):
+                    return Response("Missing console token", status_code=403)
+            response = await call_next(request)
+            response.headers["Cache-Control"] = "no-store"
+            return cast("Response", response)
 
         @app.get("/")
         def index() -> Response:
@@ -465,7 +755,107 @@ class RobotConsoleModule(Module):
                 "map_module": self.config.map_module,
                 "mcp_url": self.mcp_url,
                 "operations": [OPERATIONS[k].to_dict() for k in OPERATIONS],
+                "standalone": self.runtime is not None,
+                "csrf_token": self._csrf_token,
             }
+
+        @app.api_route("/api/navigation-distance", methods=["GET", "POST"])
+        async def api_navigation_distance(request: Request) -> dict[str, Any]:
+            if self.runtime is not None and not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            args = {}
+            method = "nearby_navigation_status"
+            if request.method == "POST":
+                payload = await request.json()
+                distance = payload.get("distance_m") if isinstance(payload, dict) else None
+                if (
+                    not isinstance(distance, (int, float))
+                    or isinstance(distance, bool)
+                    or not math.isfinite(distance)
+                    or not 0.3 <= distance <= 3.0
+                ):
+                    return {"ok": False, "error": "Distance must be between 0.3 and 3.0 meters"}
+                args = {"distance_m": float(distance)}
+                method = "set_nearby_arrival_distance"
+            return await self._call_rpc(
+                Operation(method, "", "rpc", "", module="PersistentGo2Planner"), args
+            )
+
+        @app.api_route("/api/visual-arrival", methods=["GET", "POST"])
+        async def api_visual_arrival(request: Request) -> dict[str, Any]:
+            if self.runtime is not None and not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            method, args = "visual_arrival_status", {}
+            if request.method == "POST":
+                payload = await request.json()
+                if not isinstance(payload, dict) or type(payload.get("enabled")) is not bool:
+                    return {"ok": False, "error": "enabled must be a boolean"}
+                if payload["enabled"] and payload.get("confirmed") is not True:
+                    return {"ok": False, "error": "Confirm slow rotation and visual search first"}
+                method, args = "configure_visual_arrival", {"enabled": payload["enabled"]}
+            return await self._call_rpc(
+                Operation(method, "", "rpc", "", module="PersistentGo2Planner"), args
+            )
+
+        @app.api_route("/api/murmur", methods=["GET", "POST"])
+        async def api_murmur(request: Request) -> dict[str, Any]:
+            if self.runtime is None or not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            method, args = "reply_speaker_status", {}
+            if request.method == "POST":
+                payload = await request.json()
+                if not isinstance(payload, dict) or type(payload.get("enabled")) is not bool:
+                    return {"ok": False, "error": "enabled must be a boolean"}
+                method, args = "configure_puppy_murmur", {"enabled": payload["enabled"]}
+            return await self._call_rpc(
+                Operation(method, "", "rpc", "", module="GO2Connection"), args
+            )
+
+        @app.api_route("/api/tagging", methods=["GET", "POST"])
+        async def api_tagging(request: Request) -> dict[str, Any]:
+            if self.runtime is not None and not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            args = {}
+            method = "automatic_tagging_status"
+            if request.method == "POST":
+                payload = await request.json()
+                if not isinstance(payload, dict) or type(payload.get("enabled")) is not bool:
+                    return {"ok": False, "error": "enabled must be a boolean"}
+                args = {"enabled": payload["enabled"]}
+                method = "set_automatic_tagging"
+            return await self._call_rpc(
+                Operation(method, "", "rpc", "", module="SpatialMemory"), args
+            )
+
+        @app.api_route("/api/speaker", methods=["GET", "POST"])
+        async def api_speaker(request: Request) -> dict[str, Any]:
+            if self.runtime is None or not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            if request.method == "GET":
+                return await self._call_rpc(
+                    Operation("reply_speaker_status", "", "rpc", "", module="GO2Connection"), {}
+                )
+            payload = await request.json()
+            if not isinstance(payload, dict) or type(payload.get("enabled")) is not bool:
+                return {"ok": False, "error": "enabled must be a boolean"}
+            enabled = payload["enabled"]
+            if enabled and payload.get("confirmed") is not True:
+                return {"ok": False, "error": "Confirm maximum-volume Go2 speaker playback first."}
+            if not enabled:
+                self._speaker_enabled = False
+            result = await self._call_rpc(
+                Operation("configure_reply_speaker", "", "rpc", "", module="GO2Connection"),
+                {"enabled": enabled},
+            )
+            if result.get("ok") and isinstance(result.get("result"), dict):
+                self._speaker_enabled = result["result"]["enabled"]
+                self._speaker_generation = result["result"]["generation"]
+                self._last_reply_id = None
+                if self._speaker_enabled and (
+                    self._speech_task is None or self._speech_task.done()
+                ):
+                    self._speech_task = asyncio.create_task(self._speak_replies())
+            return result
 
         @app.get("/api/status")
         def api_status() -> dict[str, Any]:
@@ -479,21 +869,48 @@ class RobotConsoleModule(Module):
         async def api_action(payload: dict[str, Any]) -> dict[str, Any]:
             key = payload.get("name") or payload.get("key")
             args = payload.get("args") or {}
-            if key not in OPERATIONS:
+            if not isinstance(key, str) or key not in OPERATIONS:
                 return {"ok": False, "error": f"unknown operation: {key!r}"}
+            if self.runtime is not None and not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            if OPERATIONS[key].human_only and payload.get("confirmed") is not True:
+                return {"ok": False, "error": "Human confirmation is required"}
             return await self._dispatch(key, args)
 
         @app.post("/api/chat")
         async def api_chat(payload: dict[str, Any]) -> dict[str, Any]:
-            text = (payload.get("message") or payload.get("text") or "").strip()
+            value = payload.get("message") or payload.get("text") or ""
+            if not isinstance(value, str):
+                return {"ok": False, "error": "message must be text"}
+            text = value.strip()
             if not text:
                 return {"ok": False, "error": "empty message"}
-            self._publish_human_input(text)
+            if self.runtime is not None and not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            try:
+                await asyncio.to_thread(self._publish_human_input, text)
+            except Exception:
+                logger.exception("console: chat delivery failed")
+                return {"ok": False, "error": "Chat transport failed; message was not sent"}
             return {"ok": True, "echo": text}
 
         @app.get("/api/refresh-status")
         async def api_refresh_status() -> dict[str, Any]:
             return await self._refresh_status()
+
+        if self.runtime is not None:
+            register_runtime_routes(app, self.runtime)
+
+        @app.get("/api/diagnostics")
+        async def api_diagnostics() -> dict[str, Any]:
+            if self.runtime is not None and not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            results = await asyncio.gather(
+                self._call_mcp(Operation("server_status", "", "mcp", ""), {}),
+                self._call_mcp(Operation("list_modules", "", "mcp", ""), {}),
+                self._mcp_request("tools/list", {}),
+            )
+            return {"server": results[0], "modules": results[1], "tools": results[2]}
 
         # dispatch / transport helpers (defined after _build_app)
 
@@ -514,15 +931,23 @@ class RobotConsoleModule(Module):
                 finally:
                     self._clients.discard(client_queue)
 
-            return StreamingResponse(
-                generator(), media_type="text/event-stream"
-            )
+            return StreamingResponse(generator(), media_type="text/event-stream")
 
         return app
 
     # -- dispatch ---------------------------------------------------------
     async def _dispatch(self, key: str, args: dict[str, Any]) -> dict[str, Any]:
         op = OPERATIONS[key]
+        if not isinstance(args, dict):
+            return {"ok": False, "error": "arguments must be an object"}
+        properties = op.schema.get("properties", {})
+        if set(args) - set(properties):
+            return {"ok": False, "error": "Unknown arguments"}
+        for name in op.schema.get("required", []):
+            if not isinstance(args.get(name), str) or not args[name].strip():
+                return {"ok": False, "error": f"{name} is required"}
+        if any(not isinstance(value, str) for value in args.values()):
+            return {"ok": False, "error": "Arguments must be text"}
         if op.kind == "rpc":
             return await self._call_rpc(op, args)
         if op.kind == "mcp":
@@ -530,66 +955,87 @@ class RobotConsoleModule(Module):
         return {"ok": False, "error": f"unknown kind for {key}"}
 
     async def _call_rpc(self, op: Operation, args: dict[str, Any]) -> dict[str, Any]:
-        address = f"{self.config.map_module}/{op.method}"
+        module = self.config.map_module if op.module == DEFAULT_MAP_MODULE else op.module
+        address = f"{module}/{op.method}"
         return await self._run_blocking(_rpc_call, self.rpc, address, args)
 
     async def _call_mcp(self, op: Operation, args: dict[str, Any]) -> dict[str, Any]:
-        import httpx
+        data = await self._mcp_request(
+            "tools/call",
+            {"name": op.key, "arguments": args, "_meta": {"progressToken": uuid.uuid4().hex}},
+        )
+        if data.get("ok") is False:
+            return data
+        result = data.get("result")
+        if not isinstance(result, dict) or "content" not in result:
+            return {"ok": False, "error": "MCP response has no tool content"}
+        content = result["content"]
+        if isinstance(content, list):
+            content = "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
+        if result.get("isError") or str(content).startswith(
+            ("Error running tool", "Tool not found:", "Cannot start '")
+        ):
+            return {"ok": False, "error": str(content)}
+        return {"ok": True, "result": _coerce(content)}
 
+    async def _mcp_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         request = {
             "jsonrpc": "2.0",
             "id": str(uuid.uuid4()),
-            "method": "tools/call",
-            "params": {"name": op.key, "arguments": args},
+            "method": method,
+            "params": params,
         }
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(self.mcp_url, json=request)
+                response.raise_for_status()
                 data = response.json()
-        except Exception as exc:
-            return {"ok": False, "error": f"mcp request failed: {exc}"}
+        except (httpx.HTTPError, ValueError):
+            logger.exception("console: MCP request failed")
+            return {"ok": False, "error": "MCP request failed; check stack status"}
 
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "Invalid MCP response"}
         if "error" in data:
             return {"ok": False, "error": _format_mcp_error(data["error"])}
-        result = data.get("result", data)
-        content = ""
-        if isinstance(result, dict):
-            content = result.get("content", "")
-            if isinstance(content, list):
-                content = "".join(
-                    c.get("text", "") for c in content if isinstance(c, dict)
-                )
-        return {"ok": True, "result": _coerce(content)}
+        return data
 
     async def _run_blocking(self, func: Any, *args: Any) -> dict[str, Any]:
         """Run a blocking RPC call on a dedicated pool (keeps the loop free)."""
-        loop = asyncio.get_running_loop()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            result = await loop.run_in_executor(pool, lambda: func(*args))
-        return cast(dict[str, Any], result)
+        result = await asyncio.to_thread(func, *args)
+        return cast("dict[str, Any]", result)
 
     # -- chat / status ----------------------------------------------------
     def _publish_human_input(self, text: str) -> None:
+        transport = make_transport("/human_input")
         try:
-            from dimos.core.transport_factory import make_transport
-
-            transport = make_transport("/human_input")
             transport.start()
             transport.publish(text)
+        finally:
             transport.stop()
-        except Exception:
-            logger.exception("console: failed to publish human_input")
 
     async def _refresh_status(self) -> dict[str, Any]:
-        return await self._run_blocking(_status_probe, self.rpc, self.config.map_module, self._status)
+        async with self._status_lock:
+            if self.runtime is not None:
+                self._status.update(stack=self.runtime.status())
+                if not self.runtime.ready:
+                    self._status.update(
+                        agent_idle=None, navigation_ready=None, alignment_status=None
+                    )
+                    return dict(self._status)
+            status = await self._run_blocking(
+                _status_probe, self.rpc, self.config.map_module, self._status
+            )
+            status.pop("agent_idle", None)
+            self._status.update(status)
+            self._emit({"type": "status", **self._status})
+            return dict(self._status)
 
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-def _rpc_call(
-    rpc: Any, address: str, args: dict[str, Any]
-) -> dict[str, Any]:
+def _rpc_call(rpc: Any, address: str, args: dict[str, Any]) -> dict[str, Any]:
     try:
         result, unsub = rpc.call_sync(address, ([], args), rpc_timeout=120.0)
         try:
@@ -601,9 +1047,7 @@ def _rpc_call(
         return {"ok": False, "error": str(exc)}
 
 
-def _status_probe(
-    rpc: Any, map_module: str, base: dict[str, Any]
-) -> dict[str, Any]:
+def _status_probe(rpc: Any, map_module: str, base: dict[str, Any]) -> dict[str, Any]:
     status: dict[str, Any] = dict(base)
     status["timestamp"] = time.time()
     try:
@@ -629,16 +1073,6 @@ def serialize_message(message: Any) -> dict[str, Any] | None:
         return None
     if isinstance(message, dict):
         return _normalize_message(message)
-    try:
-        from langchain_core.messages import (
-            AIMessage,
-            HumanMessage,
-            SystemMessage,
-            ToolMessage,
-        )
-    except Exception:
-        return _normalize_message(_obj_to_dict(message))
-
     if isinstance(message, HumanMessage):
         role = "user"
     elif isinstance(message, AIMessage):
@@ -711,6 +1145,7 @@ def _normalize_message(raw: dict[str, Any]) -> dict[str, Any]:
             {
                 "name": c.get("name", "") if isinstance(c, dict) else str(c),
                 "args": _jsonable(c.get("args", {})) if isinstance(c, dict) else {},
+                "id": c.get("id") if isinstance(c, dict) else None,
             }
             for c in tool_calls
         ]

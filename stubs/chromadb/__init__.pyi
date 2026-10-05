@@ -20,6 +20,13 @@ class Collection:
         offset: int | None = ...,
         include: Iterable[str] | None = ...,
     ) -> dict[str, Any]: ...
+    def update(
+        self,
+        ids: list[str],
+        documents: list[str] | None = ...,
+        embeddings: list[list[float]] | None = ...,
+        metadatas: list[Mapping[str, Any]] | None = ...,
+    ) -> None: ...
     def query(
         self,
         query_embeddings: list[list[float]] | None = ...,

@@ -1,99 +1,65 @@
-"""
-Live smoke test for RobotConsoleModule.
+# Copyright 2026 Dimensional Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Boots the *real* module (``start()`` -> real uvicorn server) with the agent
-streams stubbed (no live agent needed in a smoke test), then drives the
-console over real HTTP + a real SSE connection to prove the UI and the
-event stream work end-to-end without the full robot stack.
-"""
+"""Real HTTP/SSE smoke test without robot, transport side effects or LLM."""
 
 import time
-import urllib.request
 
 import httpx
 import pytest
 
 from dimos.web.console.module import RobotConsoleModule
 
-PORT = 8091
-MCP_PORT = 9990
-RERUN_WEB_PORT = 9878
 
-
-def _wait_server(base: str, timeout: float = 20.0) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            urllib.request.urlopen(base + "/api/status", timeout=2.0)
-            return
-        except Exception:
-            time.sleep(0.2)
-    raise AssertionError("server did not come up")
-
-
-def _run() -> None:
-    m = RobotConsoleModule(port=PORT, mcp_port=MCP_PORT, rerun_web_port=RERUN_WEB_PORT)
-    # stub the agent/idle/tool subscriptions: no live agent in a smoke test,
-    # but keep the real HTTP server + real SSE.
-    m._setup_agent_streams = lambda: None  # type: ignore[assignment]
-    m._teardown_agent_streams = lambda: None  # type: ignore[assignment]
-
-    m.start()
+@pytest.fixture
+def live_console(mocker):
+    module = RobotConsoleModule(port=0)
+    mocker.patch.object(module, "_setup_agent_streams")
+    mocker.patch.object(module, "_teardown_agent_streams")
+    publish = mocker.patch.object(module, "_publish_human_input")
+    module.start()
     try:
-        base = f"http://127.0.0.1:{PORT}"
-        _wait_server(base)
-
-        # 1) the UI HTML is served and contains the SEDAN branding + controls.
-        html = httpx.get(base + "/", timeout=5.0).text
-        for needle in ("sedan", "chat", "rerun"):
-            assert needle in html.lower(), f"missing {needle!r} in UI"
-        assert "/events" in html, "SSE wiring missing"
-        print(f"OK: index served ({len(html)} bytes); SEDAN + chat + rerun present")
-
-        # 2) config endpoint exposes rerun url + operations.
-        cfg = httpx.get(base + "/api/config", timeout=5.0).json()
-        assert cfg["rerun_url"] == f"http://127.0.0.1:{RERUN_WEB_PORT}", cfg
-        assert cfg["mcp_url"] == f"http://127.0.0.1:{MCP_PORT}/mcp", cfg
-        assert len(cfg["operations"]) > 0
-        print(f"OK: /api/config -> {len(cfg['operations'])} operations, rerun_url ok")
-
-        # 3) tools + status are served.
-        tools = httpx.get(base + "/api/tools", timeout=5.0).json()
-        assert len(tools) == len(cfg["operations"]), "tools vs operations mismatch"
-        status = httpx.get(base + "/api/status", timeout=5.0).json()
-        assert isinstance(status, dict), status
-        print(f"OK: /api/tools ({len(tools)}); /api/status ok")
-
-        # 4) chat: empty rejected, real accepted + echoed.
-        empty = httpx.post(base + "/api/chat", json={"message": ""}, timeout=5.0).json()
-        assert empty["ok"] is False, empty
-        chat = httpx.post(base + "/api/chat", json={"message": "hello robot"}, timeout=5.0).json()
-        assert chat["ok"] is True and chat["echo"] == "hello robot", chat
-        print("OK: /api/chat empty rejected, real message accepted + echoed")
-
-        # 5) action: unknown op rejected.
-        bad = httpx.post(base + "/api/action", json={"name": "nope"}, timeout=5.0).json()
-        assert bad["ok"] is False, bad
-        print("OK: /api/action unknown-op rejected")
-
-        # 6) SSE initial status frame over a real socket.
-        with httpx.stream("GET", base + "/events", timeout=8.0) as stream:
-            chunks: list[str] = []
-            for line in stream.iter_lines():
-                chunks.append(line)
-                if any(c.startswith("data:") for c in chunks):
-                    break
-        joined = "\n".join(chunks)
-        assert "data:" in joined and "status" in joined, joined[:400]
-        print("OK: /events initial status frame over real socket")
-
-        print("ALL SMOKE CHECKS PASSED")
+        deadline = time.monotonic() + 10
+        while not module._server.started:
+            if time.monotonic() >= deadline:
+                raise AssertionError("Console server did not start")
+            module._server_thread.join(timeout=0.01)
+        port = module._server.servers[0].sockets[0].getsockname()[1]
+        yield f"http://127.0.0.1:{port}", publish
     finally:
-        try:
-            m.stop()
-        except Exception:
-            pass
+        module.stop()
 
 
-def test_console_live_smoke() -> None:
-    _run()
+def test_console_live_smoke(live_console):
+    base, publish = live_console
+    with httpx.Client(base_url=base, timeout=5) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "SEDAN GROUP" in response.text
+        assert "settings-dialog" in response.text
+        cfg = client.get("/api/config").json()
+        assert cfg["rerun_url"] == (
+            "http://127.0.0.1:9878/?url=rerun%2Bhttp%3A%2F%2F127.0.0.1%3A9877%2Fproxy"
+        )
+        assert len(client.get("/api/tools").json()) == len(cfg["operations"])
+        assert client.post("/api/chat", json={"message": ""}).json()["ok"] is False
+        assert client.post("/api/chat", json={"message": "hello robot"}).json() == {
+            "ok": True,
+            "echo": "hello robot",
+        }
+        publish.assert_called_once_with("hello robot")
+        assert client.post("/api/action", json={"name": "nope"}).json()["ok"] is False
+        with client.stream("GET", "/events") as stream:
+            first = next(line for line in stream.iter_lines() if line.startswith("data:"))
+        assert '"agent_idle": null' in first

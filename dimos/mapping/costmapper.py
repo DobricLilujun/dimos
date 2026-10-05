@@ -90,6 +90,11 @@ class CostMapper(Module):
         self._apply_initial_safe_radius(grid)
         return grid
 
+    @rpc
+    def calculate_navigation_costmap(self, cloud: PointCloud2) -> OccupancyGrid:
+        """Build a costmap synchronously for a corrected persistent navigation map."""
+        return self._calculate_costmap(cloud)
+
     def _apply_initial_safe_radius(self, grid: OccupancyGrid) -> None:
         radius_meters = self.config.initial_safe_radius_meters
         if radius_meters <= 0 or grid.grid.size == 0:

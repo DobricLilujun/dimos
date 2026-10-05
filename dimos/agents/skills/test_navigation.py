@@ -23,6 +23,7 @@ from dimos.agents.skills.navigation import NavigationSkillContainer
 from dimos.core.core import rpc
 from dimos.core.module import Module
 from dimos.core.stream import Out
+from dimos.models.vl.openai import OpenAIVlModel
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.navigation.base import NavigationState
@@ -220,6 +221,22 @@ def memory_skills(mocker):
     container.dispose()
 
 
+def test_starting_location_uses_first_aligned_world_pose(memory_skills):
+    container, _, navigator = memory_skills
+    with pytest.raises(RuntimeError, match="aligned world odometry"):
+        container.query_starting_location()
+    container._on_odom(PoseStamped(frame_id="session", position=[9, 9, 0]))
+    with pytest.raises(RuntimeError, match="aligned world odometry"):
+        container.return_to_starting_location()
+    container._on_odom(PoseStamped(frame_id="world", position=[2, 3, 0], ts=42))
+    container._on_odom(PoseStamped(frame_id="world", position=[8, 7, 0]))
+    assert json.loads(container.query_starting_location())["position"] == [2, 3, 0]
+    assert "Started navigating" in container.return_to_starting_location()
+    assert navigator.set_goal.call_args.args[0].position.x == 2
+    navigator.set_goal.return_value = False
+    assert "Navigation refused" in container.return_to_starting_location()
+
+
 def test_memory_inventory_lists_all_same_name_tags_without_movement(memory_skills):
     container, _, navigator = memory_skills
     result = json.loads(container.query_memory_tags("fire extinguisher"))
@@ -255,16 +272,53 @@ def test_memory_tag_navigation_rejects_unknown_id(memory_skills):
     navigator.set_goal.assert_not_called()
 
 
+@pytest.mark.parametrize("selection", ["id", "name"])
+def test_tag_navigation_passes_stable_id_to_persistent_planner(memory_skills, mocker, selection):
+    container, memory, navigator = memory_skills
+    tagged = mocker.patch.object(container, "_tagged_navigation")
+    tagged.set_tagged_goal.return_value = True
+    if selection == "id":
+        result = container.navigate_to_memory_tag("ext-1")
+    else:
+        memory.query_tagged_location.return_value = memory.get_robot_locations.return_value[0]
+        result = container._navigate_by_tagged_location("fire extinguisher")
+    assert "Started navigating" in result
+    assert tagged.set_tagged_goal.call_args.args[0] == "ext-1"
+    navigator.set_goal.assert_not_called()
+
+
+def test_nearby_tool_uses_new_interface_without_changing_precise_tool(memory_skills, mocker):
+    container, _, navigator = memory_skills
+    nearby = mocker.patch.object(container, "_nearby_navigation")
+    nearby.set_nearby_tagged_goal.return_value = True
+    assert "configured nearby distance" in container.navigate_near_memory_tag("ext-1")
+    assert nearby.set_nearby_tagged_goal.call_args.args[0] == "ext-1"
+    navigator.set_goal.assert_not_called()
+    container.navigate_to_memory_tag("ext-1")
+    navigator.set_goal.assert_called_once()
+
+
+def test_nearby_tool_fails_explicitly_without_persistent_planner(memory_skills):
+    container, _, navigator = memory_skills
+    with pytest.raises(RuntimeError, match="persistent Go2 planner"):
+        container.navigate_near_memory_tag("ext-1")
+    navigator.set_goal.assert_not_called()
+
+
 def test_memory_tools_are_exposed_with_typed_mcp_schemas(memory_skills):
     container, _, _ = memory_skills
     skills = {entry.func_name: entry for entry in container.get_skills()}
     query_schema = json.loads(skills["query_memory_tags"].args_schema)
     navigation_schema = json.loads(skills["navigate_to_memory_tag"].args_schema)
+    nearby_schema = json.loads(skills["navigate_near_memory_tag"].args_schema)
     assert query_schema["properties"]["query"]["type"] == "string"
     assert query_schema["properties"]["query"]["default"] == ""
     assert navigation_schema["required"] == ["location_id"]
+    assert nearby_schema["required"] == ["location_id"]
+    assert nearby_schema["properties"]["location_id"]["type"] == "string"
     assert skills["query_memory_tags"].uses == ()
     assert "movement" in skills["navigate_to_memory_tag"].uses
+    assert "movement" in skills["navigate_near_memory_tag"].uses
 
 
 def test_memory_tag_navigation_rejects_invalid_coordinates(memory_skills):
@@ -307,3 +361,21 @@ def test_object_tag_does_not_save_when_detection_fails(memory_skills, mocker):
     with pytest.raises(RuntimeError, match="No visible object"):
         container.tag_object("fire extinguisher")
     memory.tag_object_from_observation.assert_not_called()
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8000", "http://127.0.0.1:8000/v1"])
+def test_manual_tagging_uses_configured_openai_compatible_vision_service(url, mocker):
+    client = mocker.patch("dimos.models.vl.openai.OpenAI")
+    container = NavigationSkillContainer(vlm_url=url, vlm_model="local-vision")
+    try:
+        assert isinstance(container._vl_model, OpenAIVlModel)
+        assert container._vl_model.config.base_url == "http://127.0.0.1:8000/v1"
+        assert container._vl_model.config.model_name == "local-vision"
+        container._vl_model.config.api_key = "test-only-key"
+        assert container._vl_model._client is client.return_value
+        client.assert_called_once_with(
+            api_key="test-only-key",
+            base_url="http://127.0.0.1:8000/v1",
+        )
+    finally:
+        container.dispose()

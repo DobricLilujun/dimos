@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import json
 import math
 import time
@@ -23,14 +24,17 @@ from dimos.agents.annotation import skill
 from dimos.agents.capabilities import CAP_MOVEMENT
 from dimos.agents.skills.visual_servoing.query import get_object_bbox_from_image
 from dimos.core.core import rpc
-from dimos.core.module import Module
+from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In
 from dimos.models.qwen.bbox import BBox
+from dimos.models.vl.base import VlModel
+from dimos.models.vl.openai import OpenAIVlModel
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3, make_vector3
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.navigation.base import NavigationState
+from dimos.navigation.go2.loop_closure.memory_spec import NearbyNavigationSpec, TaggedNavigationSpec
 from dimos.navigation.go2.replanning_a_star.spec import NavigationInterfaceSpec
 from dimos.perception.experimental.object_tracking_spec import ObjectTrackingSpec
 from dimos.perception.experimental.spatial_memory_spec import SpatialMemorySpec
@@ -40,7 +44,14 @@ from dimos.utils.logging_config import setup_logger
 logger = setup_logger()
 
 
+class NavigationSkillContainerConfig(ModuleConfig):
+    vlm_url: str | None = None
+    vlm_model: str = "gpt-4o-mini"
+
+
 class NavigationSkillContainer(Module):
+    config: NavigationSkillContainerConfig
+    _vl_model: VlModel
     _latest_image: Image | None = None
     _latest_odom: PoseStamped | None = None
     _skill_started: bool = False
@@ -49,6 +60,8 @@ class NavigationSkillContainer(Module):
     _spatial_memory: SpatialMemorySpec
     _navigation: NavigationInterfaceSpec
     _object_tracking: ObjectTrackingSpec | None = None
+    _tagged_navigation: TaggedNavigationSpec | None = None
+    _nearby_navigation: NearbyNavigationSpec | None = None
 
     color_image: In[Image]
     odom: In[PoseStamped]
@@ -56,15 +69,25 @@ class NavigationSkillContainer(Module):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._skill_started = False
+        self._starting_pose: PoseStamped | None = None
 
-        # Here to prevent unwanted imports in the file.
-        from dimos.models.vl.qwen import QwenVlModel
+        if self.config.vlm_url:
+            url = self.config.vlm_url.rstrip("/")
+            self._vl_model = OpenAIVlModel(
+                model_name=self.config.vlm_model,
+                base_url=url if url.endswith("/v1") else f"{url}/v1",
+                api_key=self.config.g.openai_api_key,
+            )
+        else:
+            # Preserve the existing provider when no console VLM override is supplied.
+            from dimos.models.vl.qwen import QwenVlModel
 
-        self._vl_model = QwenVlModel()
+            self._vl_model = QwenVlModel()
 
     @rpc
     def start(self) -> None:
         super().start()
+        self._starting_pose = None
         self.register_disposable(Disposable(self.color_image.subscribe(self._on_color_image)))
         self.register_disposable(Disposable(self.odom.subscribe(self._on_odom)))
         self._skill_started = True
@@ -78,6 +101,46 @@ class NavigationSkillContainer(Module):
 
     def _on_odom(self, odom: PoseStamped) -> None:
         self._latest_odom = odom
+        if self._starting_pose is None and odom.frame_id == "world":
+            if all(
+                math.isfinite(value)
+                for value in (odom.position.x, odom.position.y, odom.position.z)
+            ):
+                self._starting_pose = copy.deepcopy(odom)
+
+    @skill
+    def query_starting_location(self) -> str:
+        """Query this run's starting location in world coordinates without moving.
+
+        Captured from the first valid aligned world odometry; after reconnecting
+        this is the new run's starting position, not a previous run's position.
+        When asked to return to the starting location, use
+        return_to_starting_location; do not assume the start is (0, 0).
+        """
+        if self._starting_pose is None:
+            raise RuntimeError("Starting location unavailable: await aligned world odometry.")
+        position = self._starting_pose.position
+        return json.dumps(
+            {
+                "name": "starting location",
+                "frame": "world",
+                "position": [position.x, position.y, position.z],
+                "timestamp": self._starting_pose.ts,
+            }
+        )
+
+    @skill(uses=[CAP_MOVEMENT])
+    def return_to_starting_location(self) -> str:
+        """Navigate back to this run's starting location when explicitly requested.
+
+        Requires captured aligned world odometry and the normal navigation
+        readiness checks. This starts navigation; it does not mean arrival.
+        """
+        if self._starting_pose is None:
+            raise RuntimeError("Starting location unavailable: await aligned world odometry.")
+        goal = copy.deepcopy(self._starting_pose)
+        goal.ts = time.time()
+        return self._navigate_to(goal, "Returning to the starting location")
 
     @skill
     def query_memory_tags(self, query: str = "") -> str:
@@ -118,6 +181,44 @@ class NavigationSkillContainer(Module):
         )
 
     @skill(uses=[CAP_MOVEMENT])
+    def navigate_near_memory_tag(self, location_id: str) -> str:
+        """Approach a saved tag using the configured horizontal arrival radius (default 1 m).
+
+        Prefer this for conversational requests to go near an object or place.
+        First query_memory_tags and choose a stable ID. If several match, ask
+        which one. Does not require exact position or final orientation.
+        Requires the persistent Go2 planner; old precise tools are unchanged.
+        Starts navigation, not a claim of arrival. PGO refreshes the same tag ID.
+        """
+        if not self._skill_started:
+            raise ValueError(f"{self} has not been started.")
+        if self._nearby_navigation is None:
+            raise RuntimeError("Nearby navigation requires the persistent Go2 planner")
+        location = next(
+            (
+                item
+                for item in self._spatial_memory.get_robot_locations()
+                if item.location_id == location_id
+            ),
+            None,
+        )
+        if location is None:
+            raise ValueError(f"No saved tag with ID {location_id!r}; query_memory_tags again")
+        if not all(math.isfinite(value) for value in location.position):
+            raise ValueError(f"Tag {location_id} has invalid coordinates")
+        goal = PoseStamped(
+            position=Vector3(
+                location.position[0],
+                location.position[1],
+                self._latest_odom.position.z if self._latest_odom is not None else 0.0,
+            ),
+            frame_id="world",
+        )
+        if not self._nearby_navigation.set_nearby_tagged_goal(location_id, goal):
+            return "Navigation refused. Check map alignment and PGO synchronization."
+        return f"Approaching '{location.name}'; will stop within the configured nearby distance (default 1 meter). This is not confirmation of arrival."
+
+    @skill(uses=[CAP_MOVEMENT])
     def navigate_to_memory_tag(self, location_id: str) -> str:
         """Navigate to a saved tag selected using query_memory_tags.
 
@@ -145,7 +246,7 @@ class NavigationSkillContainer(Module):
                     frame_id="world",
                 )
                 return self._navigate_to(
-                    pose, f"Selected saved tag '{location.name}' ({location_id})"
+                    pose, f"Selected saved tag '{location.name}' ({location_id})", location_id
                 )
         raise ValueError(f"No saved tag with ID {location_id!r}; query_memory_tags again")
 
@@ -257,13 +358,20 @@ class NavigationSkillContainer(Module):
             frame_id="map",
         )
 
-        return self._navigate_to(goal_pose, f"Found a tagged location called '{query}'.")
+        return self._navigate_to(
+            goal_pose, f"Found a tagged location called '{query}'.", robot_location.location_id
+        )
 
-    def _navigate_to(self, pose: PoseStamped, message: str) -> str:
+    def _navigate_to(self, pose: PoseStamped, message: str, location_id: str | None = None) -> str:
         logger.info(
             f"Navigating to pose: ({pose.position.x:.2f}, {pose.position.y:.2f}, {pose.position.z:.2f})"
         )
-        if not self._navigation.set_goal(pose):
+        accepted = (
+            self._tagged_navigation.set_tagged_goal(location_id, pose)
+            if location_id is not None and self._tagged_navigation is not None
+            else self._navigation.set_goal(pose)
+        )
+        if not accepted:
             return (
                 "Navigation refused. Check map alignment and navigation readiness before retrying."
             )

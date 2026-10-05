@@ -188,12 +188,14 @@ class PoseGraph(Transformer[Any, Any]):
             ts=float(ts),
         )
 
-    def place(self, cloud: PointCloud2) -> PointCloud2:
-        """Move each point by the correction for its capture time, anchored at the latest keyframe.
+    def place(self, cloud: PointCloud2, *, fixed_world: bool = False) -> PointCloud2:
+        """Move each point by the correction for its capture time.
 
         Capture time is the cloud's per-point ``stamps`` when present, else
         ``cloud.ts``. The latest keyframe's correction maps to identity, so
         current data stays where raw odometry puts it and older data moves.
+        ``fixed_world=True`` instead anchors the first keyframe, keeping a
+        persistent world while correcting live data as well as historical scans.
         """
         pts = cloud.points_f32()
         if not len(pts):
@@ -203,7 +205,8 @@ class PoseGraph(Transformer[Any, Any]):
             stamps = np.full(len(pts), cloud.ts)
         unique, inverse = np.unique(stamps, return_inverse=True)
         R, t = self._corrections(unique)
-        now_R, now_t = self._corrections(np.array([np.inf]))
+        anchor_ts = self.keyframes[0].ts if fixed_world else np.inf
+        now_R, now_t = self._corrections(np.array([anchor_ts]))
         anchor = now_R[0].inv()
         R, t = anchor * R, anchor.apply(t - now_t[0])
         return PointCloud2.from_numpy(
@@ -211,6 +214,15 @@ class PoseGraph(Transformer[Any, Any]):
             frame_id=cloud.frame_id,
             timestamp=cloud.ts,
         )
+
+    def world_correction(self, ts: float) -> Transform:
+        """Correction in the fixed first-keyframe world, suitable for persistent maps."""
+        correction = self.correction_at(ts)
+        anchor = self.correction_at(self.keyframes[0].ts).inverse()
+        result = anchor + correction
+        result.frame_id = result.child_frame_id = "world"
+        result.ts = float(ts)
+        return result
 
     def __call__(self, upstream: Iterator[Observation[Any]]) -> Iterator[Observation[Any]]:
         """Rewrite obs.pose via :meth:`correct`; pass through pose-less obs unchanged."""

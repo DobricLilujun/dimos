@@ -15,6 +15,7 @@
 import numpy as np
 import pytest
 
+from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -78,3 +79,58 @@ def test_rebuilds_on_loop_closure_and_respects_cooldown():
     pgo.n_loops = 2
     assert not world_map.add(_wall(1.525, 105.0), pose)
     assert world_map.add(_wall(1.525, 112.5), pose)
+
+
+@pytest.fixture
+def fixed_map(mocker):
+    world_map = PGOMap(fixed_world=True, rebuild_cooldown_s=0)
+    optimizer = mocker.patch.object(world_map, "_pgo")
+    optimizer.n_keyframes = 2
+    optimizer.n_loops = 1
+    optimizer.snapshot.return_value = _graph_with_drift_at(
+        [
+            Transform(translation=Vector3(0, 0, 0), ts=100.0),
+            Transform(translation=Vector3(0.5, 0, 0), ts=101.0),
+        ]
+    )
+    yield world_map, optimizer
+    world_map.dispose()
+
+
+def test_fixed_world_keeps_start_and_corrects_new_scans_after_loop(fixed_map):
+    world_map, optimizer = fixed_map
+    assert optimizer.snapshot.return_value.world_correction(101.0).ts == 101.0
+    world_map.add(_wall(1.025, 100.0), None)
+    world_map.add(_wall(2.025, 101.0), None)
+    assert _xs(world_map) == {20, 50}
+    # Future raw scans need the same correction even without another accepted loop.
+    world_map.add(_wall(3.025, 102.0), None)
+    assert _xs(world_map) == {20, 50, 70}
+    assert _xs(world_map) == {20, 50, 70}
+    world_map, optimizer = fixed_map
+    optimizer.n_loops = 2
+    optimizer.snapshot.return_value = _graph_with_drift_at(
+        [
+            Transform(translation=Vector3(0, 0, 0), ts=100.0),
+            Transform(translation=Vector3(0.25, 0, 0), ts=101.0),
+        ]
+    )
+    assert world_map.flush()
+    assert _xs(world_map) == {20, 45, 65}
+
+
+def test_flush_applies_pending_loop_before_save(fixed_map):
+    world_map, optimizer = fixed_map
+    optimizer.n_loops = 0
+    world_map.add(_wall(1.025, 101.0), None)
+    optimizer.n_loops = 1
+    assert world_map.flush()
+    assert not world_map.flush()
+    assert _xs(world_map) == {30}
+
+
+def test_fixed_world_accepts_valid_starting_odometry_at_zero(fixed_map):
+    world_map, optimizer = fixed_map
+    world_map.add(_wall(1.025, 100.0), Pose(position=[0, 0, 0]))
+    optimizer.process.assert_called_once()
+    np.testing.assert_array_equal(optimizer.process.call_args.args[0].translation(), [0, 0, 0])

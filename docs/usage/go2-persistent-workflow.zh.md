@@ -208,6 +208,15 @@ exit()
 - `vlm-distance-m=1.0` 是移动距离条件，不是每秒调用一次。
 - YOLO 不保证能为所有物品提供有效实例 mask；退回检测框时可能混入背景点。
 - 保存的是物品表面估计位置，不保证是几何中心。
+- 自动和手动物品标签共用地图范围限制：若估计的 x/y 超出 world 点云地图的
+  二维外包络，沿机器狗到物品的视线求边界，再选该边界交点 20 cm 内的实际点云点，
+  将其 x/y 朝机器狗方向偏移 30 cm，z 使用该点云点的高度。范围内的估计不移动。
+  优先使用 `global_map`；尚未收到地图时使用本次观测的对齐雷达点云。
+  点云不足、机器人在范围外或视线边界附近没有实测点时，不保存该标签并报告原因。
+  修正结果包含 `estimated_position`、`boundary_position`、`inset_m`，
+  方法为 `pointcloud_map_boundary_inset`，方便在工具输出中检查。
+  这是标签坐标约束，不会让狗移动，也不代表目标一定可导航；
+  点云外包络不能证明凹形房间或未扫描区域的室内可通行性。旧标签不会自动重写。
 - 房间即使有检测框，也采用观测时机器人位置，不投影到墙或门框。
 
 ## 7. 手动标记物品
@@ -386,6 +395,7 @@ dimos run unitree-go2-agentic-persistent \
   --persistentgo2map.manual-capture=true \
   --spatialmemory.scene-map-dir=assets/scene_maps/sedan_office_persistent \
   --mcpclient.model=gpt-5.6-luna
+```
 
 此时程序加载旧地图、积累手动采集点云，但导航、对齐后的传感器转发和地图更新保持阻塞。没有自动走动，低层手动控制并未全部禁用。
 
@@ -517,7 +527,7 @@ lsof -nP -iTCP:9990 -sTCP:LISTEN
 ## 16. 限制与相关文档
 
 - Go2 内置雷达的旧地图配准仍是实验功能；现有匹配预设来自 MID360。
-- 不提供持续全局重定位、回环或里程计漂移修正。
+- 默认不做持续全局重定位或里程计漂移修正；可选 PGO 回环见 17.5。
 - 三维地图与语义标签必须对应同一个世界坐标系。
 - 旧错误标签不自动修复；物品坐标只是传感器支持的估计。
 - 持久化导航门控不是全局硬件运动锁；直接低层控制仍可能移动机器人。
@@ -530,14 +540,275 @@ lsof -nP -iTCP:9990 -sTCP:LISTEN
 - [Agent 系统](../capabilities/agents/index.md)
 
 
-/goal 这是使用教程。 docs/usage/go2-persistent-workflow.zh.md                                                                                                                                               
-                                                                                                                                                                                                            
-整体包含了，连接 机器人，机器狗，通过rerun进行 UI展示以及控制， 机器狗的自动和手动 tagging 物品和房间，agent talking ， 导航以及查询等，  重新连接的alignment。                                             
-                                                                                                                                                                                                            
-现在我需要你在保留原来rerun的界面的内容基础上，重新加入对于这个使用教程里的很多操作的UI的支持，比如说可以通过按钮等。                                                                                       
-                                                                                                                                                                                                            
-此外，加入一个交互良好的类似于chatgpt的那种chatbot，可以让用户直接对话，以及看到机器人的反馈以及 内部的一些工具输入输出等。                                                                                 
-                                                                                                                                                                                                            
-你可以探索，然后根据你的理解将UI设计到最好最美观最高效，最后这个·UI要 有SEDAN GROUP的标志，整体是一个科技风格的看板和操作台。                                                                               
-                                                                                                                                                                                                            
-写完代码后自己进行测试，可以使用dimos 自己的replay进行测试。 最后我会验收，所以你要将所有的能力都测试完。 在测试期间不要使用chatgpt api，使用vllm 本地模型。     
+## 17. SEDAN GROUP Web 控制台
+
+### 17.1 启动独立控制台
+
+先停止已有的 DimOS 机器人栈。控制台只管理自己启动的子进程，不会接管或停止其他实例。
+
+```bash
+cd /Users/lujun.li/dimensional-applications/dimos
+source venv-dev/bin/activate
+python -m dimos.web.console
+```
+
+浏览器打开 `http://127.0.0.1:8090`。控制台仅监听本机，不应直接暴露到公网。
+机器人停止后页面仍可用；在控制台终端按 `Ctrl+C`、收到 `SIGTERM` 或关闭终端
+（`SIGHUP`）时，控制台会默认停止自己启动的机器人栈：先发送 `SIGTERM`，
+等待 5 秒仍未退出则升级为 `SIGKILL`，并清理该栈的子进程。退出日志会显示停止结果。
+这相当于针对当前控制台管理的栈执行 `dimos stop`，不会停止其他终端启动的实例。
+仅关闭浏览器页面不会停止机器人栈。`kill -9` 控制台或机器断电无法执行退出清理；
+异常情况下请用 `dimos status` 检查，并在需要时手动执行 `dimos stop`。
+使用 `--port 8092` 可以修改控制台端口。
+
+如果仍使用 `dimos run unitree-go2-agentic-persistent-console`，
+会保留随机器人栈启动的旧方式，包含 Web Viewer 和操作按钮，但不提供独立的 Settings/启动管理。
+**不要同时启动两种控制台。**
+
+### 17.2 Settings
+
+右上角 **Settings / 设置** 提供：
+
+| 分组 | 可配置内容 |
+| --- | --- |
+| 连接 | Robot IP、Replay、回放数据集、机载避障；只读显示 `.env` 密钥是否已配置 |
+| 模型服务 | Agent API base URL、Agent model、VLM API URL、VLM model |
+| 地图 | Scene directory、New/Restore、手动或旋转采集、旋转速度/时长、PGO loop correction |
+| 自动标签 | 房间标签开关、物品标签开关、移动距离阈值、分割器 |
+| 服务 | MCP 端口、Rerun Web Viewer 端口、Rerun data port (gRPC) |
+
+IP 可以设置为机器人实际地址，例如 `192.168.63.218`。
+Agent 使用 OpenAI 时，base URL 填 `https://api.openai.com/v1`；
+VLM URL 可以填 `https://api.openai.com`。
+两个模型名称分别设置，例如 `gpt-5.6-luna`。
+独立控制台也将这组 VLM URL/model 用于手动物品标记，避免额外依赖 Alibaba 服务；
+模型需要支持图像输入并按提示返回像素坐标。直接启动原有蓝图、未指定
+`--navigationskillcontainer.vlm-url` 时，仍保留原来的 Qwen 服务。
+
+普通配置保存至 `~/.config/dimos/robot-console.json`（具体路径遵循系统的 DimOS config 目录）。
+`OPENAI_API_KEY` 和 `UNITREE_AES_128_KEY` 从项目根目录的 `.env` 读取。
+Settings 只读显示固定掩码与是否配置，API 不返回密钥原文，也不接受页面修改密钥。
+修改密钥请直接编辑 `.env`；重新打开 Settings 会刷新配置状态，
+下一次启动机器人栈时会重新读取并通过子进程环境传递，不写入普通设置文件或命令参数。
+这两个字段不再从启动终端继承。不要提交 `.env` 或在聊天中输入密钥；
+建议将 `.env` 文件权限设为仅本人可读写。
+
+保存后点击 **Start / 启动机器人栈**，阅读提示并确认。运行中修改设置需要先正常停止再启动。
+恢复旧地图时，Settings 保持同一 Scene directory 并选择 Restore。
+创建新地图时，空目录直接使用；已有地图或标签时，Start 会额外弹出覆盖确认。
+取消不会修改旧数据或启动栈；确认后旧场景整体移至同级 `.backup-<唯一编号>` 目录，
+新栈仍使用原场景路径，不加载旧标签。备份位置显示在 Backend console 中。
+原有 CLI/demo 的建图保护保持不变。若启动进程失败，控制台恢复旧目录。
+默认保留机载避障；关闭避障或选择自动旋转前，请确认现场安全并看护机器人。
+如果提示 `Port 9877 is occupied`，在 Settings 的 Local services 中将
+**Rerun data port (gRPC)** 改为未占用的端口，例如 `9887`，保存后再启动。
+修改 Rerun viewer port 无法解决数据端口冲突，不要结束未知进程。
+
+### 17.3 页面操作对应关系
+
+| 教程操作 | UI 入口 |
+| --- | --- |
+| 启动/连接 | Settings → Start；连接失败查看 Stack logs |
+| 状态、模块和工具列表 | 顶部状态徽标、MCP tools / 工具与模块 |
+| 相机、地图和轨迹 | 中央视图区：3D 主画面、Camera 右上角悬浮；点击悬浮窗口交换大小，不重载数据源 |
+| 自动标签 | Settings 的房间/物品开关，在下一次启动时生效 |
+| 手动物品标签 | Tag object → 输入 `object_name` |
+| 手动房间/返回点 | Tag location → 输入 `location_name` |
+| 查询与坐标 | Query memory → 空查询列出全部；结果展示 ID 与坐标 |
+| 按 ID 导航 | 查询结果的 Navigate，或 Navigate to tag → `location_id`；需人工确认 |
+| 取消导航 | Stop navigation；不是硬件急停 |
+| 导航状态 | Navigation state；开始导航不代表到达 |
+| 配准采集 | Settings 选择 Restore/manual → 遥控采集 → 停稳 → Finish startup capture |
+| 配准检查 | Alignment status 与中央 Rerun 的 alignment_scan/alignment_preview |
+| 配准确认/拒绝 | Confirm alignment / Reject alignment，均需要人工确认 |
+| 取消原地旋转 | Cancel rotation |
+| 保存地图 | Save map，显示 RPC 返回值或明确错误 |
+| 正常停止 | Stop / 保存并正常停止；不强制杀进程 |
+| 聊天 | 右侧输入框，Enter 发送、Shift+Enter 换行；显示回复、配对工具输入输出和实时工具进度 |
+| 日志 | 左侧 Operation log；Rerun 下方常驻 Backend console，显示后台输出、操作和工具进度，可清空显示 |
+| 全屏 | 页头 Full screen / Exit full screen；也可用 Esc 退出 |
+| 手动键盘控制 | 中央视图区下方 Enable keyboard，人工确认后按住 Space + W/S 前后、A/D 横移、Q/E 转向；Esc 停止并禁用 |
+| 自动标注开关 | Tagging 中 Automatic tagging；首次点击读取状态，再次点击暂停/恢复 Settings 中已配置的自动物品/房间标注，手动标注不受影响 |
+| 起点查询/返回 | Memory 中 Starting location 查询本次运行首个对齐后的 world 位姿；Navigation 中 Return to start 经确认后发起导航。Agent 可调用同名查询和返回工具 |
+| Go2 回复播报 | Agent chat 顶部 Go2 speaker，默认 Off；确认后以 Go2 最大音量 10/10 播报后续最终回复，再点击可关闭并暂停播放 |
+
+未完成配准时，UI 禁用标记与导航入口；底层规划器仍保留原有对齐门控。
+聊天发送成功只代表传输提交，不代表 Agent 已完成回复或机器人动作。
+控制台通过 Viewer URL 的 `url` 参数连接 Settings 中的 Rerun 数据端口，
+不只打开 Viewer 首页。若只显示 Welcome to Rerun，检查数据服务是否运行及端口是否一致，
+再点击 Refresh viewer。此连接不替换机器人栈原有的可视化蓝图与内容。
+独立控制台为浏览器加载单独的 3D 视图文件，隐藏其他 Rerun 面板，
+Camera 通过已有图像通道显示；不修改原 demo、原生 Rerun 或机器人栈的可视化配置。
+桌面聊天区固定在视口内，长回复只在聊天内容区滚动。
+键盘控制复用 `tele_cmd_vel` 与 MovementManager，会取消导航；不要求完成配准，
+以支持启动时的手动采集。请现场看护，不能将其作为硬件急停。
+键盘只在控制台页面获得焦点、未编辑输入框且未打开弹窗时生效，
+点击 Rerun iframe 后先点击控制台标题区域重新获得焦点。
+松键、失焦、隐藏页面或关闭连接会发送零速度；服务端 0.5 秒未收到指令也会停止并断开。
+启用时先请求 Go2 开启摇杆监听；失败会显示错误，不进入可操控状态。
+启用后也可以按住方向按钮操控，松开即停止。点击 Rerun iframe 会令页面失焦并禁用控制；
+需要回到页面重新启用，不要在 iframe 内按键。标准 Rerun Web Viewer 不会发送导航点击世界坐标，
+因此本版未提供 3D 点击导航。
+
+自动标注关闭会停止提交新任务、清空待处理任务并丢弃旧结果；已经发出的模型请求无法撤回。
+恢复沿用启动时配置的标注类型，不会自动打开 Settings 中未启用的类型。
+Starting location 在每次机器人栈启动时重新记录；恢复旧地图时需先对齐，不能把它当作上次运行的起点。
+返回起点仍经过规划器的对齐/就绪检查，发起导航不等于到达。
+
+回复播报使用实际 Go2 WebRTC 音频接口，不使用电脑扬声器；回放/模拟模式会明确拒绝。
+TTS 使用 Settings 的 VLM URL（自动补 `/v1`）、`.env` 中的 OpenAI key 和 `tts-1`；
+该服务需支持音频生成，否则错误会显示在 Backend console。只播报启用之后的新最终回复，
+不播报用户输入、工具调用和工具结果。回复长度上限 4096 字符、生成音频上限 90 秒，
+超限会报告错误而不是截断。关闭会取消排队及进行中的回复；已上传的临时音频会在正常完成时清理。
+
+**Puppy 自动吐槽与麦克风对话（仅 console blueprint）：**
+
+- 默认关闭。开启 **Go2 speaker** 并确认最大音量、麦克风及模型隐私提示后，
+  同时开启 Puppy 自动吐槽和 Go2 麦克风监听；关闭该按钮会一并停止。
+- 聊天区另有 **Murmur: On/Off** 开关，只暂停/恢复环境吐槽，
+  不关闭已启用的麦克风对话及 Agent 回复播报。状态行显示模型、摄像头是否新鲜、
+  播报忙碌和最近错误。若提示 **Old/non-Puppy stack**，必须停止机器人栈、
+  重启 console 后再启动栈；单独刷新页面或只开启旧栈的扬声器不会启动 murmur。
+- Puppy 自称 **“My name is puppy, built from sedan”**。自动吐槽、语音回复及
+  console Agent 的最终回复统一使用英文；本地 Whisper 仍可识别中英文。
+- 在空闲、摄像头画面新鲜时，约每 10 秒生成一句可爱的环境评论。
+  模型请求和播放不重叠；播放结束后重新计时，因此不是严格每 10 秒发声。
+- 环境评论及对话默认使用 `gpt-4o-mini`，复用 Settings 中的 VLM URL 与 OpenAI key。
+  本地语音识别使用 `faster-whisper` 的 `base` 模型，CPU/int8；
+  首次开启可能需要下载模型，请等待。可通过启动参数
+  `--go2connection.puppy-model` 和 `--go2connection.puppy-whisper-model` 调整模型。
+- 原始麦克风音频仅在内存中进行本地识别，不上传、不保存录音；
+  识别出的文本及当前摄像头画面会发送到配置的模型服务，回复文本会发送给 TTS。
+  请勿在私人谈话或敏感场景中开启。没有唤醒词，听到的有效语音可能触发回复。
+- 采用半双工防回声：机器人讲话期间及结束后约 1 秒不监听，
+  不能打断播报。麦克风原文、Puppy 回复和错误会显示在聊天面板，不会重复播报。
+- **麦克风对话不调用运动工具**；导航指令请在网页 Agent chat 中输入。
+  无麦克风数据、模型或音频接口失败会显示提示；离线测试不代表实机扬声器/
+  麦克风已验收，固件支持情况仍需连接 Go2 验证。
+
+**Agent 的 1 米附近导航：**
+
+console Agent 默认先用 `query_memory_tags` 查询，再调用新工具
+`navigate_near_memory_tag(location_id)`。机器人与所选标记的水平距离
+不超过所配置的阈值时停止，不要求精确高度或朝向；已经在范围内不会开始移动。
+聊天面板的 **Nearby stop distance** 滑块范围为 **0.3–3.0 米**、步进 0.1 米，
+默认 **1 米**。滑动完成后实时应用到下一次附近导航；当前行程保持开始时的阈值，
+PGO 回环后仍通过同一标记 ID 刷新目标并保持该阈值。
+滑块的临时设置重启后不保留；在 Settings 的 **Nearby stop distance**
+保存后可设置重启默认值（也可用 `--persistentgo2planner.nearby-arrival-distance`）。
+原有 `navigate_to_memory_tag`、`navigate_with_text` 等精确导航工具保持兼容，
+显式要求精确导航时仍可使用。该功能不绕过地图对齐、避障和规划器就绪检查，
+工具报告“开始导航”不代表已经到达。
+
+独立启动的 `python -m dimos.web.console` 也会向机器人子进程传入 Puppy 启用配置
+和相同的英文/附近导航 Agent 提示词；网页主导航按钮及查询列表中的
+**Navigate nearby** 均使用附近导航工具，**Navigate precisely** 保留精确导航。
+启用 Go2 speaker 后，规划器确认到达时会播报 **“Woof! We've arrived!”**，
+取消、失败或 PGO 暂停不会播报到达。修改后需重启 console 和机器人栈，
+运行中的旧进程不会自动载入新配置。
+
+**可选的图像确认到达：**
+
+默认 **Visual arrival: Off**，只按距离阈值停止。
+开启聊天区 **Visual arrival** 并确认转动提示后，下一次附近导航改为两阶段：
+
+1. 到达距离阈值，停止原路径规划和前进，但暂不宣告到达。
+2. 先比较当前摄像头和所选 tag 的参考图片。不匹配时以 **0.15 rad/s**
+   短脉冲原地转动，每次转动最多 0.5 秒后停车进行匹配；最多搜索 **20 秒**。
+   图像计算期间不转动。匹配成功后停止并播报到达。
+
+匹配使用本地 OpenCV ORB 特征及 RANSAC 几何一致性，不上传图片。
+物品参考图取标注框内的裁剪图，房间参考图使用标注时的画面。
+它是保守的图像相似性确认，不保证物品身份；纯色、无纹理、重复图案、
+光照/视角大幅变化时可能无法匹配。不会为了匹配继续前进或绕物品行走。
+超时、旧 tag 无参考图、参考图缺失、相机画面超过 3 秒未更新或匹配接口失败，
+会停车并在聊天工具记录中报告原因，**不会播报到达**。
+缺少参考图片的历史 tag 可重新标注以补充图片。
+Stop navigation/键盘停止会取消搜索；关闭 Visual arrival 会立即取消正在进行的搜索。
+PGO 回环暂停会中断搜索，地图与 tag 同步完成后按同一目标重新检查距离并搜索，
+过期的匹配结果不会恢复运动。开启之前请确认机器狗周围可安全转动。
+
+消息流显示当前页面订阅后的内容；刷新页面不恢复此前的聊天历史。
+保存/配准失败不会显示为成功，按错误提示处理后重试。
+
+### 17.4 离线测试与实机验收
+
+不调用云模型的基础回归：
+
+```bash
+source venv-dev/bin/activate
+python -m pytest dimos/web/console dimos/agents/mcp/test_mcp_server.py \
+  dimos/agents/mcp/test_mcp_client_unit.py \
+  dimos/mapping/relocalization/go2/test_persistent.py \
+  dimos/perception/experimental/test_spatial_tags.py -q
+```
+
+浏览器测试需要项目已有的 `browser-tests` 依赖组与 Chromium：
+
+```bash
+python -m playwright install chromium
+python -m pytest -m web_browser dimos/web/console/test_console_browser.py -q
+```
+
+这些测试的机器人、LLM 和生命周期边界均被隔离，不启动真实机器人或调用 OpenAI API。
+它们验证 UI/HTTP/SSE、参数、保存与密钥处理，不能证明实机导航或视觉识别效果。
+
+使用本地 vLLM 做实际回放测试时，在 Settings 中：
+
+- 勾选 Replay，先选择 New map 和一个新的空测试目录；
+- Agent URL 指向本地 OpenAI-compatible `/v1`，例如 `http://127.0.0.1:8000/v1`；
+- Agent model 填 `openai:<vLLM 实际加载的模型名>`；
+- VLM URL、VLM model 指向支持图像与工具所需能力的本地服务；
+- 如果本地服务无需鉴权，在 `.env` 中将 `OPENAI_API_KEY` 设置为测试占位值即可；
+- 不使用真实密钥，也不将模型 URL 指向云 API。
+
+实机验收建议顺序：
+
+1. 在 `.env` 中设置更新后的密钥，在 Settings 设置 Robot IP，创建新地图并启动，检查相机/雷达/Rerun。
+2. 聊天“报告状态，不要移动”，检查回复、thinking/idle 和工具 I/O。
+3. 观察自动标签；分别手动标记物品和房间，再查询确认 ID/坐标。
+4. 选择标签导航，检查规划器状态及实际到达；测试取消导航。
+5. 保存并正常停止，选择 Restore，重启并遥控采集。
+6. 停稳、结束采集，检查两片点云；测试拒绝，再检查新的候选并人工确认。
+7. 确认 world 坐标一致、旧标签可查询、导航恢复；最后正常停止。
+
+### 17.5 可选 PGO 回环修正
+
+在 **Settings → Mapping & tagging** 勾选
+**PGO loop correction (fixed world; applies on restart)**，保存后停止并重新启动机器人栈。
+默认关闭，不改变原有建图方式。直接启动持久化蓝图时，也可添加
+`--persistentgo2map.pgo-enabled=true`。需要当前 Python 环境安装 GTSAM；缺少依赖会报错，
+不会悄悄切回普通建图。首次使用建议先备份整个 Scene directory。
+
+启用后：
+
+- `PGOMap` 对本次运行的关键帧做 ICP 回环检测与位姿图优化。
+  本次运行的第一个关键帧固定在已对齐的世界坐标系，后续点云、机器人位姿与 TF 一起修正。
+- 本次运行新增的房间/物品标签和图像检索坐标根据采集时间、原始位姿同步更新；
+  慢速模型返回的标签也会在保存时应用最新修正，不会重复叠加同一次修正。
+- Restore 模式保留上次保存的点云和旧标签，不用本次回环整体拖动它们。
+  新点云经过修正后与旧地图一起保存；`starting location` 保持在本次起始世界坐标。
+- 接受回环后短暂停车，同步地图与标签、保存地图，再自动重新规划当前导航。
+  标签导航通过原来的标签 ID 重新查询修正后的坐标，不按名称重新匹配，也不继续使用旧路径；
+  直接指定的世界坐标目标（包括 starting location）保持固定。
+  重新规划前同步计算修正地图的 costmap 并更新机器人位姿。日志显示
+  `Navigation resumed after PGO`，不代表已到达。
+  用户取消、遥控接管、目标已经结束，或暂停期间提交了新目标时，不会恢复旧导航；
+  暂停期间的新目标会明确拒绝，待同步结束后可重新提交。
+- 回环后立即保存地图，普通 Save map 和正常停止也保存修正后的地图。
+  标签同步、回环检查点保存或导航刷新失败时，停止运动、阻止导航与后续地图保存；
+  日志给出具体错误，修复后需要重启并重新检查配准。
+
+这不是持续匹配旧地图的全局重定位：PGO 只检测本次运行之间的回环，
+重新连接时仍需采集、检查并人工确认启动配准。错误的启动配准或错误的 ICP 回环
+不保证被自动修复；首次验收请在空旷安全区域、有人看护并可急停的情况下进行。
+
+回环不是固定周期：位移超过 0.5 米或转向超过 45° 才添加关键帧，
+至少 10 个关键帧后搜索 2 米内、采集时间相隔超过 20 秒的历史帧。
+成功回环之间至少相隔 5 秒（按传感器时间），每次仍需 ICP 通过；
+demo 接受回环后立即应用修正，不是每 20 秒必然修正一次。
+
+地图文件采用原子替换，但地图和 Chroma 数据库不是一个跨文件事务。
+不要在回环同步期间强制杀进程或断电；异常中断后应检查地图与标签是否一致，
+必要时恢复完整 Scene directory 备份。`vlm_tags_*.jsonl` 是当时估计的诊断记录，
+不会随之后的回环重写；Agent 查询与导航使用更新后的数据库坐标。

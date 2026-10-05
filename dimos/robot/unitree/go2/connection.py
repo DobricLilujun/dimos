@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+from collections.abc import Awaitable, Callable
 import copy
 from enum import Enum
 from importlib import resources
@@ -20,6 +22,9 @@ from threading import Lock, Thread
 import time
 from typing import Any, Protocol
 
+from av import AudioFrame
+from av.audio.resampler import AudioResampler
+from openai import OpenAI
 from pydantic import Field
 from reactivex import defer, empty, operators as ops
 from reactivex.abc import SchedulerBase
@@ -45,6 +50,8 @@ from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.robot.unitree.connection import UnitreeWebRTCConnection
+from dimos.robot.unitree.go2.puppy import PuppyConversation, load_local_transcriber
+from dimos.robot.unitree.go2.reply_speaker import Go2ReplySpeaker
 from dimos.robot.unitree.type.lowstate import LowStateMsg
 from dimos.spec.perception import Camera, Pointcloud
 from dimos.utils.decorators.decorators import cached_property, simple_mcache
@@ -69,6 +76,10 @@ class ConnectionConfig(ModuleConfig):
     lidar: bool = True
     camera: bool = True
     velocity_api: bool = False
+    tts_url: str | None = None
+    puppy_enabled: bool = False
+    puppy_model: str = "gpt-4o-mini"
+    puppy_whisper_model: str = "base"
     # "mcf" for stair traversal, "normal" for basic, None to leave it as is
     motion_mode: str | None = None
     # Per-device AES-128 key (Go2 fw >=1.1.15); defaults from GlobalConfig.
@@ -350,6 +361,7 @@ class GO2Connection(Module, Camera, Pointcloud):
     color_image: Out[Image]
     camera_info: Out[CameraInfo]
     tf: Out[TFMessage]
+    puppy_events: Out[dict[str, Any]]
 
     connection: Go2ConnectionProtocol
     camera_info_static: CameraInfo = _camera_info_static()
@@ -370,6 +382,11 @@ class GO2Connection(Module, Camera, Pointcloud):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        self._reply_speaker: Go2ReplySpeaker | None = None
+        self._puppy: PuppyConversation | None = None
+        self._puppy_jpeg: bytes | None = None
+        self._puppy_frame_time = 0.0
+        self._puppy_audio_callback: Callable[[AudioFrame], Awaitable[None]] | None = None
         self.connection = make_connection(
             self.config.ip,
             self.config.g,
@@ -397,6 +414,9 @@ class GO2Connection(Module, Camera, Pointcloud):
         def onimage(image: Image) -> None:
             image.frame_id = _prefixed(self.config.frame_id_prefix, image.frame_id)
             self.color_image.publish(image)
+            if self.config.puppy_enabled and self._puppy is not None:
+                self._puppy_jpeg = image.to_jpeg_bytes()
+                self._puppy_frame_time = time.monotonic()
 
         if self.config.lidar:
             self.register_disposable(self.connection.lidar_stream().subscribe(self.lidar.publish))
@@ -434,6 +454,11 @@ class GO2Connection(Module, Camera, Pointcloud):
     @rpc
     def stop(self) -> None:
         # Best-effort steps: teardown must always reach the WebRTC disconnect.
+        if self._puppy is not None:
+            try:
+                self.configure_reply_speaker(False)
+            except Exception:
+                logger.exception("Puppy shutdown failed")
         try:
             self.liedown()
         except Exception:
@@ -543,6 +568,136 @@ class GO2Connection(Module, Camera, Pointcloud):
     def stop_movement(self) -> None:
         """Zero the base immediately (webrtc deadman stop)."""
         self.connection.stop_movement()
+
+    def _robot_speaker(self) -> Go2ReplySpeaker:
+        if not isinstance(self.connection, UnitreeWebRTCConnection):
+            raise RuntimeError("Go2 speaker playback is available only on a real WebRTC Go2.")
+        if self._reply_speaker is None:
+            self._reply_speaker = Go2ReplySpeaker(
+                self.connection.publish_request, self.config.g.openai_api_key, self.config.tts_url
+            )
+        return self._reply_speaker
+
+    @rpc
+    def reply_speaker_status(self) -> dict[str, Any]:
+        status = (
+            self._reply_speaker.status()
+            if self._reply_speaker
+            else {"enabled": False, "generation": 0}
+        )
+        return {
+            **status,
+            "puppy_configured": self.config.puppy_enabled,
+            "puppy": self._puppy.status() if self._puppy is not None else None,
+            "microphone": self._puppy_audio_callback is not None,
+            "camera_age_s": (
+                round(time.monotonic() - self._puppy_frame_time, 1)
+                if self._puppy_jpeg is not None
+                else None
+            ),
+        }
+
+    @rpc
+    def configure_puppy_murmur(self, enabled: bool) -> dict[str, Any]:
+        if self._puppy is None:
+            raise RuntimeError(
+                "Puppy is not running; restart the stack and enable Go2 speaker first"
+            )
+        self._puppy.configure_murmur(enabled)
+        return self.reply_speaker_status()
+
+    @rpc
+    def configure_reply_speaker(self, enabled: bool) -> dict[str, Any]:
+        """Enable maximum-volume Go2 reply playback, or cancel and pause it."""
+        speaker = self._robot_speaker()
+        if not self.config.puppy_enabled:
+            return speaker.configure(enabled)
+        if not isinstance(self.connection, UnitreeWebRTCConnection):
+            raise RuntimeError("Puppy microphone requires a real WebRTC Go2")
+        if self._puppy is not None:
+            previous = self._puppy
+            try:
+                speaker.configure(False)
+            finally:
+                try:
+                    self._switch_puppy_audio(False)
+                finally:
+                    previous.stop()
+                    self._puppy = None
+        if not enabled:
+            return {**speaker.configure(False), "murmur": False, "microphone": False}
+        self.puppy_events.publish(
+            {
+                "role": "tool",
+                "content": "Puppy: loading local Whisper; first use may download model weights.",
+            }
+        )
+        logger.info("Loading Puppy local Whisper", model=self.config.puppy_whisper_model)
+        transcribe = load_local_transcriber(self.config.puppy_whisper_model)
+        status = speaker.configure(True)
+        generation = status["generation"]
+        puppy = None
+        try:
+            client = OpenAI(
+                api_key=self.config.g.openai_api_key,
+                base_url=self.config.tts_url,
+                timeout=15,
+                max_retries=0,
+            )
+            puppy = PuppyConversation(
+                client,
+                transcribe,
+                self._puppy_camera,
+                lambda text: speaker.speak(text, generation),
+                lambda: speaker.is_speaking,
+                self.puppy_events.publish,
+                model=self.config.puppy_model,
+            )
+            self._puppy = puppy
+            self._switch_puppy_audio(True)
+            puppy.start()
+            logger.info("Puppy murmur and microphone started", model=self.config.puppy_model)
+        except Exception:
+            self._puppy = None
+            try:
+                self._switch_puppy_audio(False)
+            finally:
+                if puppy is not None:
+                    puppy.stop()
+                speaker.configure(False)
+            raise
+        return {**status, "murmur": True, "microphone": True}
+
+    def _puppy_camera(self) -> bytes | None:
+        return self._puppy_jpeg if time.monotonic() - self._puppy_frame_time <= 3 else None
+
+    def _switch_puppy_audio(self, enabled: bool) -> None:
+        if not isinstance(self.connection, UnitreeWebRTCConnection):
+            raise RuntimeError("Puppy audio requires a real WebRTC Go2")
+        channel = self.connection.conn.audio
+
+        async def configure() -> None:
+            if self._puppy_audio_callback is not None:
+                channel.track_callbacks.remove(self._puppy_audio_callback)
+                self._puppy_audio_callback = None
+            if enabled:
+                resampler = AudioResampler(format="s16", layout="mono", rate=16000)
+
+                async def receive(frame: AudioFrame) -> None:
+                    puppy = self._puppy
+                    if puppy is not None:
+                        for mono in resampler.resample(frame):
+                            puppy.receive_pcm(mono.to_ndarray())
+
+                self._puppy_audio_callback = receive
+                channel.add_track_callback(receive)
+            channel.switchAudioChannel(enabled)
+
+        asyncio.run_coroutine_threadsafe(configure(), self.connection.loop).result(timeout=5)
+
+    @rpc
+    def speak_agent_reply(self, text: str, generation: int) -> str:
+        return self._robot_speaker().speak(text, generation)
 
     def _on_lowstate(self, msg: LowStateMsg) -> None:
         """Cache the latest low-level state push (battery, IMU, motors, etc.)."""

@@ -32,13 +32,37 @@ the persistent stack's stream wiring; it only observes/publishes by channel
 name through the shared transport.
 """
 
+from dataclasses import replace
+
+from dimos.agents.mcp.mcp_client import McpClient
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent import (
     unitree_go2_agentic_persistent,
 )
+from dimos.robot.unitree.go2.connection import GO2Connection
+from dimos.visualization.rerun.bridge import RerunBridgeModule
 from dimos.web.console.module import RobotConsoleModule
+from dimos.web.console.prompts import CONSOLE_AGENT_PROMPT
 
 unitree_go2_agentic_persistent_console = autoconnect(
-    unitree_go2_agentic_persistent,
+    replace(
+        unitree_go2_agentic_persistent,
+        blueprints=tuple(
+            replace(atom, kwargs={**atom.kwargs, "rerun_web": True})
+            if atom.module is RerunBridgeModule
+            else replace(
+                atom,
+                kwargs={
+                    **atom.kwargs,
+                    "system_prompt": CONSOLE_AGENT_PROMPT,
+                },
+            )
+            if atom.module is McpClient
+            else replace(atom, kwargs={**atom.kwargs, "puppy_enabled": True})
+            if atom.module is GO2Connection
+            else atom
+            for atom in unitree_go2_agentic_persistent.blueprints
+        ),
+    ),
     RobotConsoleModule.blueprint(),
 ).global_config(n_workers=9)

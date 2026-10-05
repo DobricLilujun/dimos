@@ -13,12 +13,38 @@
 # limitations under the License.
 
 import numpy as np
+import pytest
 
 from dimos.core.global_config import GlobalConfig
 from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
+from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.go2.replanning_a_star.global_planner import GlobalPlanner
+
+
+@pytest.fixture
+def planner():
+    global_planner = GlobalPlanner(GlobalConfig())
+    yield global_planner
+    global_planner.stop()
+
+
+def test_cancel_while_path_is_computed_does_not_start_stale_navigation(planner, mocker):
+    start = mocker.patch.object(planner._local_planner, "start_planning")
+    mocker.patch.object(planner, "_find_safe_goal", return_value=Vector3(2, 0, 0))
+
+    def cancel_while_finding_path(_goal, _position):
+        planner.cancel_goal()
+        return Path(poses=[PoseStamped(position=[0, 0, 0]), PoseStamped(position=[2, 0, 0])])
+
+    mocker.patch.object(planner, "_find_wide_path", side_effect=cancel_while_finding_path)
+    planner.handle_odom(PoseStamped(position=[0, 0, 0]))
+
+    planner.handle_goal_request(PoseStamped(position=[2, 0, 0]))
+
+    start.assert_not_called()
 
 
 def test_find_wide_path_with_start_inside_inflation() -> None:

@@ -56,12 +56,14 @@ class PGOMap:
         frame_id: str = "world",
         rebuild_cooldown_s: float = 10.0,
         pgo: PGOConfig | None = None,
+        fixed_world: bool = False,
     ) -> None:
         self._pgo = _PGOState(pgo or LIVE_PGO)
         self._grid = VoxelGrid(
             voxel_size=voxel_size, frame_id=frame_id, stamped=True, show_startup_log=False
         )
         self._cooldown = rebuild_cooldown_s
+        self._fixed_world = fixed_world
         self._placed_loops = 0
         self._last_rebuild_ts = -math.inf
         # How long the latest loop-closing PGO step and the latest rebuild took.
@@ -79,7 +81,11 @@ class PGOMap:
     def add(self, cloud: PointCloud2, pose: Pose | None) -> bool:
         """Insert a world-frame lidar frame taken at odom `pose`. True if the map was rebuilt."""
         self._grid.add_frame(cloud)
-        if pose is not None and not (pose.position.is_zero() or pose.orientation.is_zero()):
+        if (
+            pose is not None
+            and (self._fixed_world or not pose.position.is_zero())
+            and not pose.orientation.is_zero()
+        ):
             t0, loops = time.perf_counter(), self.n_loops
             self._pgo.process(_pose_to_pose3(pose), cloud.ts, cloud)
             if self.n_loops != loops:
@@ -89,7 +95,8 @@ class PGOMap:
         if self.n_loops == self._placed_loops or cloud.ts - self._last_rebuild_ts < self._cooldown:
             return False
         t0 = time.perf_counter()
-        self._grid.reproject(self.graph().place)
+        graph = self.graph()
+        self._grid.reproject(lambda cloud: graph.place(cloud, fixed_world=self._fixed_world))
         self._placed_loops, self._last_rebuild_ts = self.n_loops, cloud.ts
         self.rebuild_ms = (time.perf_counter() - t0) * 1e3
         logger.info(
@@ -113,7 +120,19 @@ class PGOMap:
         return self._pgo.loop_segments()
 
     def global_map(self) -> PointCloud2:
+        if self._fixed_world and self.n_keyframes:
+            graph = self.graph()
+            self._grid.reproject(lambda cloud: graph.place(cloud, fixed_world=True))
         return self._grid.get_global_pointcloud2()
+
+    def flush(self) -> bool:
+        """Apply pending loop corrections before saving, irrespective of cooldown."""
+        if self.n_loops == self._placed_loops:
+            return False
+        graph = self.graph()
+        self._grid.reproject(lambda cloud: graph.place(cloud, fixed_world=self._fixed_world))
+        self._placed_loops = self.n_loops
+        return True
 
     def dispose(self) -> None:
         self._grid.dispose()

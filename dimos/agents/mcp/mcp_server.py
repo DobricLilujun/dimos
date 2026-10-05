@@ -72,8 +72,11 @@ def _jsonrpc_result(req_id: Any, result: Any) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
 
-def _jsonrpc_result_text(req_id: Any, text: str) -> dict[str, Any]:
-    return _jsonrpc_result(req_id, {"content": [{"type": "text", "text": text}]})
+def _jsonrpc_result_text(req_id: Any, text: str, *, is_error: bool = False) -> dict[str, Any]:
+    result: dict[str, Any] = {"content": [{"type": "text", "text": text}]}
+    if is_error:
+        result["isError"] = True
+    return _jsonrpc_result(req_id, result)
 
 
 def _jsonrpc_error(req_id: Any, code: int, message: str) -> dict[str, Any]:
@@ -122,7 +125,7 @@ async def _handle_tools_call(
     rpc_call = rpc_calls.get(name)
     if rpc_call is None:
         logger.warning("MCP tool not found", tool=name)
-        return _jsonrpc_result_text(req_id, f"Tool not found: {name}")
+        return _jsonrpc_result_text(req_id, f"Tool not found: {name}", is_error=True)
 
     skill_info = app.state.skills_by_name.get(name)
     uses: list[str] = list(skill_info.uses) if skill_info is not None else []
@@ -173,6 +176,7 @@ async def _handle_tools_call(
             return _jsonrpc_result_text(
                 req_id,
                 f"Cannot start '{name}': capability '{cap}' is held by '{holder}'. {advice}",
+                is_error=True,
             )
 
     logger.info("MCP tool call", tool=name, args=args, progress_token=progress_token)
@@ -201,7 +205,7 @@ async def _handle_tools_call(
             )
         except Exception as e:
             logger.exception("MCP tool error", tool=name, duration=f"{time.monotonic() - t0:.3f}s")
-            return _jsonrpc_result_text(req_id, f"Error running tool '{name}': {e}")
+            return _jsonrpc_result_text(req_id, f"Error running tool '{name}': {e}", is_error=True)
 
         if lifecycle == "background":
             # Hand ownership of the caps off to the tool-stream lifecycle.
