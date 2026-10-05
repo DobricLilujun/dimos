@@ -65,6 +65,7 @@ class ConsoleSettings(FusionGateConfig):
     obstacle_avoidance: bool = True
     agent_url: str = "https://api.openai.com/v1"
     agent_model: str = "gpt-5.6-luna"
+    puppy_noise_reduction: bool = True
     vlm_url: str = "https://api.openai.com"
     vlm_model: str = "gpt-5.6-luna"
     place_tagging: bool = True
@@ -131,6 +132,7 @@ class ConsoleSettings(FusionGateConfig):
             f"--mcpclient.model={self.agent_model}",
             f"--mcpclient.system-prompt={CONSOLE_AGENT_PROMPT}",
             "--go2connection.puppy-enabled=true",
+            f"--go2connection.puppy-noise-reduction={str(self.puppy_noise_reduction).lower()}",
             f"--persistentgo2planner.nearby-arrival-distance={self.nearby_arrival_distance}",
             f"--persistentgo2planner.robot-width={self.planner_robot_width}",
             f"--persistentgo2planner.navigation-speed-limit={self.navigation_speed_limit}",

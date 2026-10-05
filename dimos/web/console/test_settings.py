@@ -275,7 +275,20 @@ def test_console_puppy_is_opt_in_and_original_robot_default_is_off():
         if atom.module is GO2Connection
     )
     assert console.kwargs["puppy_enabled"] is True
+    assert console.kwargs["puppy_noise_reduction"] is True
     assert ConnectionConfig().puppy_enabled is False
+    assert ConnectionConfig().puppy_noise_reduction is False
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_console_microphone_noise_reduction_persists_and_reaches_robot(runtime, enabled):
+    runtime.save(SettingsUpdate(settings=ConsoleSettings(puppy_noise_reduction=enabled)))
+    restored = ConsoleRuntime(runtime.project_dir, runtime.settings_path)
+    parsed = BlueprintConfigParser(unitree_go2_agentic_persistent_demo).parse(
+        restored.settings.argv()[5:], environ={}
+    )
+    assert restored.settings.puppy_noise_reduction is enabled
+    assert parsed.module_kwargs("go2connection")["puppy_noise_reduction"] is enabled
 
 
 @pytest.fixture

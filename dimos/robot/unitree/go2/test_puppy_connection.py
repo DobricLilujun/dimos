@@ -48,6 +48,7 @@ def test_enabling_speaker_starts_local_asr_murmur_and_disabling_stops_microphone
     assert result == {"enabled": True, "generation": 2, "murmur": True, "microphone": True}
     model.assert_called_once_with("base")
     puppy.return_value.start.assert_called_once()
+    assert puppy.call_args.kwargs["noise_reduction"] is False
     switch.assert_called_once_with(True)
 
     result = module.configure_reply_speaker(False)
@@ -57,6 +58,14 @@ def test_enabling_speaker_starts_local_asr_murmur_and_disabling_stops_microphone
     puppy.return_value.stop.assert_called_once()
     assert speaker.configure.call_args.args == (False,)
     assert module._puppy is None
+
+
+def test_noise_reduction_setting_is_passed_without_changing_default_robot(robot, mocker):
+    module, _, _, _, puppy = robot
+    mocker.patch.object(module, "_switch_puppy_audio")
+    mocker.patch.object(module.config, "puppy_noise_reduction", True)
+    module.configure_reply_speaker(True)
+    assert puppy.call_args.kwargs["noise_reduction"] is True
 
 
 def test_default_robot_keeps_reply_only_speaker_behavior(robot, mocker):

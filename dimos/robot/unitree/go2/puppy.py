@@ -43,6 +43,63 @@ Never claim you moved or performed an action. Do not repeat private data visible
 in an image. Do not invent people, events or conversations."""
 
 
+class MicrophoneDenoiser:
+    """Small streaming spectral gate for mono 16 kHz PCM, not acoustic echo cancellation."""
+
+    def __init__(self) -> None:
+        self._window = np.sqrt(np.hanning(512))
+        frequencies = np.fft.rfftfreq(512, 1 / 16000)
+        self._band = np.clip((frequencies - 80) / 100, 0, 1)
+        self._input = np.zeros(256, dtype=np.float32)
+        self._discard_first_hop = True
+        self._overlap = np.zeros(512)
+        self._weights = np.zeros(512)
+        self._noise_power = np.zeros(257)
+        self._gain = np.ones(257)
+        self._calibration_frames = 0
+
+    @property
+    def ready(self) -> bool:
+        return self._calibration_frames >= 63
+
+    def reset_stream(self) -> None:
+        """Discard playback-adjacent samples, retaining the learned background profile."""
+        self._input = np.zeros(256, dtype=np.float32)
+        self._discard_first_hop = True
+        self._overlap.fill(0)
+        self._weights.fill(0)
+
+    def process(self, samples: np.ndarray) -> np.ndarray:
+        self._input = np.concatenate((self._input, samples.astype(np.float32) / 32768))
+        output: list[np.ndarray] = []
+        while len(self._input) >= 512:
+            spectrum = np.fft.rfft(self._input[:512] * self._window)
+            power = np.abs(spectrum) ** 2
+            if not self.ready:
+                # The user is asked to remain silent for the first second after enabling.
+                self._calibration_frames += 1
+                self._noise_power += (power - self._noise_power) / self._calibration_frames
+                filtered = np.zeros(512)
+            else:
+                gain = np.clip(1 - 1.5 * self._noise_power / np.maximum(power, 1e-12), 0.12, 1)
+                gain = np.convolve(np.pad(gain, (1, 1), mode="edge"), [0.25, 0.5, 0.25], "valid")
+                self._gain = 0.6 * self._gain + 0.4 * gain
+                filtered = np.fft.irfft(spectrum * self._gain * self._band, n=512)
+            self._overlap += filtered * self._window
+            self._weights += self._window**2
+            # Discard the padded prefix so startup/reset cannot amplify window-edge noise.
+            if self._discard_first_hop:
+                self._discard_first_hop = False
+            else:
+                output.append(self._overlap[:256] / np.maximum(self._weights[:256], 1e-6))
+            self._overlap = np.concatenate((self._overlap[256:], np.zeros(256)))
+            self._weights = np.concatenate((self._weights[256:], np.zeros(256)))
+            self._input = self._input[256:]
+        if not output:
+            return np.empty(0, dtype=np.int16)
+        return np.asarray(np.clip(np.concatenate(output) * 32768, -32768, 32767), dtype=np.int16)
+
+
 class PuppyConversation:
     def __init__(
         self,
@@ -53,6 +110,7 @@ class PuppyConversation:
         busy: Callable[[], bool],
         emit: Callable[[dict[str, Any]], None],
         model: str = "gpt-4o-mini",
+        noise_reduction: bool = False,
     ) -> None:
         self.client = client
         self.transcribe = transcribe
@@ -61,6 +119,7 @@ class PuppyConversation:
         self.busy = busy
         self.emit = emit
         self.model = model
+        self._denoiser = MicrophoneDenoiser() if noise_reduction else None
         self._murmur_enabled = True
         self._last_error: str | None = None
         self._last_reply_time: float | None = None
@@ -99,6 +158,8 @@ class PuppyConversation:
             "stage": self._stage,
             "microphone_capturing": bool(self._audio),
             "queued_utterances": self._utterances.qsize(),
+            "noise_reduction": self._denoiser is not None,
+            "noise_calibrating": self._denoiser is not None and not self._denoiser.ready,
         }
 
     def receive_pcm(self, samples: np.ndarray) -> None:
@@ -110,10 +171,16 @@ class PuppyConversation:
             if self._stop.is_set() or self.busy() or time.monotonic() < self._echo_until:
                 self._audio.clear()
                 self._samples = self._silence = 0
+                if self._denoiser is not None:
+                    self._denoiser.reset_stream()
                 return
             pcm = np.asarray(samples, dtype=np.int16).reshape(-1)
             if not len(pcm):
                 return
+            if self._denoiser is not None:
+                pcm = self._denoiser.process(pcm)
+                if not len(pcm):
+                    return
             rms = float(np.sqrt(np.mean((pcm.astype(np.float32) / 32768.0) ** 2)))
             voice = rms >= 0.015
             if not voice and not self._audio:
@@ -169,7 +236,11 @@ class PuppyConversation:
                 self.emit({"role": "user", "content": heard, "source": "Go2 microphone"})
         if heard is None:
             if not self._murmur_enabled or now < self._next_comment:
-                self._stage = "Murmur paused" if not self._murmur_enabled else "Waiting for next camera comment"
+                self._stage = (
+                    "Murmur paused"
+                    if not self._murmur_enabled
+                    else "Waiting for next camera comment"
+                )
                 return
             with self._lock:
                 # Motor/fan noise can hold RMS voice detection open continuously.
@@ -226,10 +297,13 @@ class PuppyConversation:
             [{"role": "user", "content": prompt}, {"role": "assistant", "content": reply}]
         )
         self._history = self._history[-12:]
-        self.emit({
-            "role": "agent", "content": reply,
-            "source": "Puppy · Microphone" if heard else "Puppy · Murmur",
-        })
+        self.emit(
+            {
+                "role": "agent",
+                "content": reply,
+                "source": "Puppy · Microphone" if heard else "Puppy · Murmur",
+            }
+        )
         try:
             self._stage = "Generating TTS / uploading / playing on Go2"
             playback = self.speak(reply)
@@ -241,6 +315,8 @@ class PuppyConversation:
                 self._echo_until = time.monotonic() + 1.0
                 self._audio.clear()
                 self._samples = self._silence = 0
+                if self._denoiser is not None:
+                    self._denoiser.reset_stream()
         self._next_comment = time.monotonic() + 10.0
         self._stage = "Waiting for next camera comment"
 
@@ -260,6 +336,8 @@ class PuppyConversation:
         with self._lock:
             self._audio.clear()
             self._samples = self._silence = 0
+            if self._denoiser is not None:
+                self._denoiser.reset_stream()
             while True:
                 try:
                     self._utterances.get_nowait()

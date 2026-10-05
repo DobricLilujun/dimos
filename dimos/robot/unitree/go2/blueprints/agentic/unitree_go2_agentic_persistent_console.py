@@ -73,7 +73,9 @@ unitree_go2_agentic_persistent_console = autoconnect(
                 },
             )
             if atom.module is McpClient
-            else replace(atom, kwargs={**atom.kwargs, "puppy_enabled": True})
+            else replace(
+                atom, kwargs={**atom.kwargs, "puppy_enabled": True, "puppy_noise_reduction": True}
+            )
             if atom.module is GO2Connection
             else atom
             for atom in unitree_go2_agentic_persistent_demo.blueprints

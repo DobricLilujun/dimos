@@ -80,6 +80,7 @@ class ConnectionConfig(ModuleConfig):
     puppy_enabled: bool = False
     puppy_model: str = "gpt-4o-mini"
     puppy_whisper_model: str = "base"
+    puppy_noise_reduction: bool = False
     # "mcf" for stair traversal, "normal" for basic, None to leave it as is
     motion_mode: str | None = None
     # Per-device AES-128 key (Go2 fw >=1.1.15); defaults from GlobalConfig.
@@ -652,6 +653,7 @@ class GO2Connection(Module, Camera, Pointcloud):
                 lambda: speaker.is_speaking,
                 self.puppy_events.publish,
                 model=self.config.puppy_model,
+                noise_reduction=self.config.puppy_noise_reduction,
             )
             self._puppy = puppy
             self._switch_puppy_audio(True)

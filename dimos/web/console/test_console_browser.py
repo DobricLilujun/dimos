@@ -238,6 +238,8 @@ def test_settings_save_all_workflow_parameters_without_exposing_keys(page, conso
         assert page.locator(f"#setting-{key}").input_value() == "********"
     page.locator("#setting-agent_url").fill("http://127.0.0.1:8000/v1")
     page.locator("#setting-agent_model").fill("openai:local-model")
+    assert page.locator("#setting-puppy_noise_reduction").is_checked()
+    page.locator("#setting-puppy_noise_reduction").uncheck()
     page.locator("#setting-vlm_url").fill("http://127.0.0.1:8000")
     page.locator("#setting-vlm_model").fill("local-vision")
     page.locator("#setting-scene_map_dir").fill("assets/scene_maps/browser_test")
@@ -257,6 +259,7 @@ def test_settings_save_all_workflow_parameters_without_exposing_keys(page, conso
     runtime = console_server[2]
     assert runtime.settings.robot_ip == "192.168.63.218"
     assert runtime.settings.agent_model == "openai:local-model"
+    assert runtime.settings.puppy_noise_reduction is False
     assert runtime.settings.vlm_distance_m == 2.5
     assert runtime.settings.place_tagging is False
     assert runtime.settings.pgo_enabled is True
@@ -273,6 +276,7 @@ def test_settings_save_all_workflow_parameters_without_exposing_keys(page, conso
     assert "test-only-key" not in runtime.settings_path.read_text()
     page.locator("#settings-open").click()
     page.locator("#settings-dialog").wait_for(state="visible")
+    assert not page.locator("#setting-puppy_noise_reduction").is_checked()
     assert page.locator("#setting-pgo_enabled").is_checked()
     assert page.locator("#setting-openai_api_key").input_value() == "********"
     assert (
@@ -695,6 +699,7 @@ def test_go2_speaker_requires_max_volume_confirmation_and_can_be_disabled(
 ):
     start_stack(page)
     enabled = [False]
+    calibrating = [True]
 
     async def rpc(op, args):
         if op.key == "nearby_navigation_status":
@@ -717,6 +722,8 @@ def test_go2_speaker_requires_max_volume_confirmation_and_can_be_disabled(
                     "model": "gpt-4o-mini",
                     "last_error": None,
                     "busy": False,
+                    "noise_reduction": True,
+                    "noise_calibrating": calibrating[0],
                 }
                 if enabled[0]
                 else None,
@@ -727,8 +734,16 @@ def test_go2_speaker_requires_max_volume_confirmation_and_can_be_disabled(
     page.locator("#speaker-toggle").click()
     page.get_by_role("heading", name="Enable Go2 speaker + Puppy murmur", exact=True).wait_for()
     assert enabled[0] is False
+    assert "keep quiet for the first second" in page.locator("#operation-description").inner_text()
     page.locator("#operation-form button[type=submit]").click()
     page.get_by_role("button", name="Go2 speaker: On (max) · Puppy mic ON", exact=True).wait_for()
+    assert "noise calibration" in page.locator("#puppy-status").inner_text()
+    calibrating[0] = False
+    page.evaluate("refreshStatus()")
+    page.wait_for_function(
+        "document.querySelector('#puppy-status').textContent.includes('Noise reduction: On')"
+    )
+    assert "Half-duplex" in page.locator("#puppy-status").inner_text()
     page.locator("#speaker-toggle").click()
     page.get_by_role("button", name="Go2 speaker: Off", exact=True).wait_for()
     assert enabled[0] is False

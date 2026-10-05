@@ -18,11 +18,15 @@ import numpy as np
 import pytest
 
 from dimos.robot.unitree.go2 import puppy as puppy_module
-from dimos.robot.unitree.go2.puppy import PuppyConversation, load_local_transcriber
+from dimos.robot.unitree.go2.puppy import (
+    MicrophoneDenoiser,
+    PuppyConversation,
+    load_local_transcriber,
+)
 
 
 @pytest.fixture
-def puppy(mocker):
+def puppy(mocker, request):
     mocker.patch.object(puppy_module.time, "monotonic", return_value=100.0)
     client = mocker.Mock()
     client.chat.completions.create.return_value = SimpleNamespace(
@@ -39,9 +43,104 @@ def puppy(mocker):
         mocker.Mock(return_value="played"),
         mocker.Mock(return_value=False),
         mocker.Mock(),
+        noise_reduction=getattr(request, "param", False),
     )
     yield assistant
     assistant.stop()
+
+
+def background_pcm(seconds=4):
+    t = np.arange(int(seconds * 16000)) / 16000
+    noise = 0.06 * np.sin(2 * np.pi * 60 * t)
+    noise += np.random.default_rng(42).normal(0, 0.018, len(t))
+    return np.clip(noise * 32768, -32768, 32767).astype(np.int16)
+
+
+def test_denoiser_reduces_motor_and_fan_noise_with_bounded_output():
+    denoiser = MicrophoneDenoiser()
+    pcm = background_pcm()
+    output = np.concatenate([denoiser.process(chunk) for chunk in np.array_split(pcm, 200)])
+    input_rms = np.sqrt(np.mean((pcm[-16000:].astype(float) / 32768) ** 2))
+    output_rms = np.sqrt(np.mean((output[-16000:].astype(float) / 32768) ** 2))
+    assert denoiser.ready
+    assert output.dtype == np.int16
+    assert output_rms < input_rms * 0.5
+    assert output_rms < 0.015
+    assert len(pcm) - len(output) < 512
+
+
+def test_denoiser_preserves_speech_band_signal_after_background_calibration():
+    denoiser = MicrophoneDenoiser()
+    pcm = background_pcm(3)
+    denoiser.process(pcm[:19200])
+    t = np.arange(16000) / 16000
+    voice = 0.12 * np.sin(2 * np.pi * 440 * t) + 0.06 * np.sin(2 * np.pi * 880 * t)
+    mixed = np.clip(pcm[19200:35200].astype(float) + voice * 32768, -32768, 32767).astype(np.int16)
+    output = denoiser.process(mixed).astype(float) / 32768
+    delay = 19200 % 256
+    expected = voice[: len(output) - delay]
+    actual = output[delay:]
+    # The steady speech-band amplitudes should survive, not merely produce nonzero output.
+    amplitude = 2 * np.abs(
+        np.mean(actual[1024:] * np.exp(-2j * np.pi * 440 * np.arange(len(actual[1024:])) / 16000))
+    )
+    assert amplitude > 0.09
+    assert np.sqrt(np.mean(actual[1024:] ** 2)) > np.sqrt(np.mean(expected[1024:] ** 2)) * 0.7
+
+
+def test_denoiser_chunk_boundaries_do_not_change_filtered_audio():
+    pcm = background_pcm()
+    whole = MicrophoneDenoiser().process(pcm)
+    streaming = MicrophoneDenoiser()
+    pieces = [streaming.process(chunk) for chunk in np.array_split(pcm, 333)]
+    np.testing.assert_array_equal(np.concatenate(pieces), whole)
+
+
+def test_denoiser_reset_retains_profile_without_creating_voice_sized_transient():
+    denoiser = MicrophoneDenoiser()
+    pcm = background_pcm()
+    denoiser.process(pcm[:32000])
+    denoiser.reset_stream()
+    output = denoiser.process(pcm[32000:48000])
+    assert denoiser.ready
+    assert np.sqrt(np.mean((output[:320].astype(float) / 32768) ** 2)) < 0.015
+
+
+@pytest.mark.parametrize("puppy", [True], indirect=True)
+def test_denoised_microphone_does_not_queue_stationary_noise_then_recognizes_voice(puppy):
+    pcm = background_pcm(12)
+    assert puppy.status()["noise_calibrating"] is True
+    for chunk in np.array_split(pcm[:160000], 500):
+        puppy.receive_pcm(chunk)
+    assert puppy.status()["noise_calibrating"] is False
+    assert puppy._utterances.empty()
+    puppy.transcribe.assert_not_called()
+    t = np.arange(16000) / 16000
+    mixed = pcm[160000:176000].astype(float) + 0.12 * 32768 * np.sin(2 * np.pi * 440 * t)
+    voice = np.clip(mixed, -32768, 32767).astype(np.int16)
+    for chunk in np.array_split(voice, 50):
+        puppy.receive_pcm(chunk)
+    for chunk in np.array_split(pcm[176000:], 50):
+        puppy.receive_pcm(chunk)
+    assert puppy._utterances.qsize() == 1
+    puppy._step(101)
+    puppy.transcribe.assert_called_once()
+    assert puppy.transcribe.call_args.args[0].dtype == np.float32
+    assert puppy.status()["noise_reduction"] is True
+
+
+@pytest.mark.parametrize("puppy", [True], indirect=True)
+def test_denoising_preserves_half_duplex_echo_guard(puppy, mocker):
+    puppy.receive_pcm(background_pcm(2))
+    puppy.busy.return_value = True
+    puppy.receive_pcm(np.full(16000, 12000, dtype=np.int16))
+    puppy.busy.return_value = False
+    puppy.receive_pcm(np.full(16000, 12000, dtype=np.int16))
+    assert puppy._utterances.empty()
+    assert puppy._denoiser.ready
+    assert not np.any(puppy._denoiser._input)
+    assert not np.any(puppy._denoiser._overlap)
+    puppy.transcribe.assert_not_called()
 
 
 def test_murmur_waits_ten_seconds_uses_camera_and_never_calls_tools(puppy):
@@ -103,12 +202,12 @@ def test_continuous_microphone_noise_cannot_starve_camera_comment(puppy):
     assert "microphone utterance" in puppy.status()["stage"]
     puppy._step(118)
     puppy.speak.assert_called_once()
-    reply=[call.args[0] for call in puppy.emit.call_args_list if call.args[0]["role"] == "agent"]
+    reply = [call.args[0] for call in puppy.emit.call_args_list if call.args[0]["role"] == "agent"]
     assert reply[0]["source"] == "Puppy · Murmur"
 
 
 def test_empty_whisper_result_does_not_skip_due_camera_comment(puppy):
-    puppy.transcribe.return_value=""
+    puppy.transcribe.return_value = ""
     puppy.receive_pcm(np.full(8000, 2000, dtype=np.int16))
     puppy.receive_pcm(np.zeros(11200, dtype=np.int16))
     puppy._step(110)
@@ -116,7 +215,7 @@ def test_empty_whisper_result_does_not_skip_due_camera_comment(puppy):
     assert "Waiting for next camera comment" == puppy.status()["stage"]
     puppy.busy.return_value = True
     puppy._step(150)
-    puppy.client.chat.completions.create.assert_not_called()
+    puppy.client.chat.completions.create.assert_called_once()
 
 
 def test_disable_during_model_response_prevents_speech(puppy):

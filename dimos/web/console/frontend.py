@@ -1034,7 +1034,8 @@ const settingFields = [
   ]],
   ["Agent & vision", [
     ["agent_url","Agent API base URL (including /v1)","url"], ["agent_model","Agent model","text"],
-    ["vlm_url","Vision API base URL","url"], ["vlm_model","Vision model","text"]
+    ["vlm_url","Vision API base URL","url"], ["vlm_model","Vision model","text"],
+    ["puppy_noise_reduction","Puppy microphone noise reduction (restart; keep quiet for first second when enabled)","checkbox"]
   ]],
   ["Mapping & tagging", [
     ["auto_pause_fusion","Auto-pause permanent map on low-speed odometry (restart; does not fix pose drift)","checkbox"],
@@ -1223,7 +1224,7 @@ async function toggleSpeaker() {
   const button=$("#speaker-toggle");button.disabled=true;
   try {
     const enabled=!(await api("/api/speaker")).result.enabled;
-    if(enabled && await requestOperation({label:"Enable Go2 speaker + Puppy murmur",human_only:true,description:"MAXIMUM volume (10/10). Warn nearby people. Enables Go2 microphone with LOCAL Whisper recognition and cute camera comments approximately every 10 seconds. Camera frames and recognized text use the configured OpenAI-compatible service (gpt-4o-mini); raw microphone audio stays local. Do not enable around private conversations or sensitive camera content. First use may download the local Whisper base model. Speech playback pauses listening; voice chat cannot move the robot. Playback unavailable in replay/simulation."})===null)return;
+    if(enabled && await requestOperation({label:"Enable Go2 speaker + Puppy murmur",human_only:true,description:"MAXIMUM volume (10/10). Warn nearby people. Enables Go2 microphone with LOCAL Whisper recognition and cute camera comments approximately every 10 seconds. With noise reduction enabled, keep quiet for the first second to learn Go2 background noise. Camera frames and recognized text use the configured OpenAI-compatible service (gpt-4o-mini); raw microphone audio stays local. Do not enable around private conversations or sensitive camera content. First use may download the local Whisper base model. Speech playback pauses listening; voice chat cannot move the robot. Playback unavailable in replay/simulation."})===null)return;
     const result=(await api("/api/speaker",{enabled,confirmed:true})).result;
     speakerEnabled=result.enabled;button.textContent=`Go2 speaker: ${result.enabled?"On (max) · Puppy mic ON":"Off"}`;
     await refreshStatus();
@@ -1240,10 +1241,13 @@ function applyPuppyStatus(status) {
     "Old/non-Puppy stack. Restart console and robot stack to enable murmur." :
     !puppy ? "Enable Go2 speaker to start Puppy (first Whisper load may take time)." :
     puppy.last_error ? "Puppy error: "+puppy.last_error :
+    puppy.noise_calibrating ? "Microphone noise calibration: keep quiet for one second." :
     status.camera_age_s===null || status.camera_age_s>3 ? "Murmur waiting: no fresh Go2 camera frame." :
     puppy.busy ? "Puppy speaker busy; commentary waits." :
     puppy.murmur ? "Murmur active · "+puppy.model+" · "+(puppy.stage || "approximately every 10 s while idle") :
     "Murmur paused; microphone conversation remains enabled.";
+  if(puppy && !puppy.noise_calibrating)
+    $("#puppy-status").textContent+=" · Noise reduction: "+(puppy.noise_reduction?"On":"Off")+" · Half-duplex";
 }
 boot();
 </script>
