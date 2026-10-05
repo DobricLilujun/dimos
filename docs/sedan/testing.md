@@ -97,7 +97,7 @@ mkdocs build --config-file mkdocs.github-pages.yml
 ```
 
 The GitHub Pages site is deployed by
-[`.github/workflows/deploy-github-pages.yml`](https://github.com/DobricLilujun/dimos)
+[`.github/workflows/pages.yml`](https://github.com/DobricLilujun/dimos)
 to `https://dobriclilujun.github.io/dimos`. It runs `uv sync --only-group docs`
 (installs the docs toolchain only — no heavy robot deps), builds with
 `mkdocs.github-pages.yml`, pulls the LFS media, uploads the artifact, and

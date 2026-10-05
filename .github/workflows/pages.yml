@@ -25,7 +25,7 @@ on:
       - "assets/**"
       - "pyproject.toml"
       - "uv.lock"
-      - ".github/workflows/deploy-github-pages.yml"
+      - ".github/workflows/pages.yml"
   # Manual deploy from the Actions tab.
   workflow_dispatch:
 
