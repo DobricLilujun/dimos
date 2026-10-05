@@ -167,7 +167,7 @@ OPERATIONS: dict[str, Operation] = {
                 "check_interval",
             ],
         },
-        description="Autonomous movement: supervise and keep the area clear. frontier uses classic scoring; efficient uses information per reachable path metre. min_goals counts successful arrivals before low-gain checks (not a trip limit). gain_percent is percent, e.g. 1 = 1%. check_interval polls progress; navigation failures retry immediately, not after a fixed target timeout.",
+        description="Explore with frontier or efficient mode. Tune gain and progress checks; failures retry immediately. Supervise robot movement.",
     ),
     "end_demo_exploration": Operation(
         "end_demo_exploration",

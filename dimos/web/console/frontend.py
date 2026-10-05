@@ -133,7 +133,15 @@ header {
 .btn.human { border-color: rgba(246,183,60,.35); }
 .btn .ic { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; background: #0b1622; color: var(--accent); font-size: 15px; flex: none; }
 .btn .lbl { flex: 1; }
-.btn .lbl small { display: block; color: var(--muted); font-weight: 500; font-size: 11px; }
+.deck-tooltip {
+  position:fixed; z-index:100; width:320px; max-width:calc(100vw - 24px);
+  padding:13px 16px; border:1px solid rgba(33,212,200,.4); border-radius:12px;
+  background:linear-gradient(145deg,#132337,#09131f); color:var(--text);
+  box-shadow:0 12px 36px rgba(0,0,0,.45); font-size:12px; line-height:1.6;
+  pointer-events:none; overflow-wrap:anywhere;
+}
+.deck-tooltip[hidden] { display:none; }
+.deck-tooltip strong { display:block; color:var(--accent); margin-bottom:5px; font-size:11px; letter-spacing:.06em; }
 .btn .kind { font-size: 9.5px; color: var(--dim); letter-spacing: .08em; text-transform: uppercase; }
 .deck .hint { padding: 6px 16px 0; color: var(--dim); font-size: 11px; }
 .log { margin: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: #08101a; max-height: 180px; overflow: auto; }
@@ -294,16 +302,15 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
         <label class="field" for="stack-map-mode"><span>Map mode</span>
           <select id="stack-map-mode"><option value="restore">Restore saved map</option><option value="new">New map</option></select>
         </label>
-        <button class="btn primary" id="stack-start">Start robot stack</button>
-        <button class="btn human" id="stack-stop">Save and stop</button>
-        <p class="note">Choose New map for the first run and Restore when reconnecting. Restore starts without a map-choice dialog; rotation capture may rotate the robot automatically. Automatic tagging may call your configured model service. Supervise capture on site and keep the area clear. Canceling navigation is not a hardware emergency stop.</p>
+        <button class="btn primary" id="stack-start" data-help="Choose New map for the first run and Restore when reconnecting. Restore starts directly; rotation capture may rotate the robot automatically. Automatic tagging may call your model service. Supervise and keep the area clear.">Start robot stack</button>
+        <button class="btn human" id="stack-stop" data-help="Save and stop only the robot stack launched by this console. This is not a hardware emergency stop.">Save and stop</button>
       </div>
       <h2>Control deck</h2>
       <div id="deck-groups"></div>
       <div id="alignment-detail" role="status"></div>
       <div class="inventory" id="inventory"></div>
       <div class="group">
-        <button class="btn" id="diagnostics">MCP tools and modules</button>
+        <button class="btn" id="diagnostics" data-help="Inspect available MCP tools and modules without moving the robot.">MCP tools and modules</button>
         <pre id="diagnostic-output"></pre>
       </div>
       <h2>Operation log</h2>
@@ -497,15 +504,17 @@ function buildDeck() {
       const btn = el("button", "btn" + (op.primary ? " primary" : "") + (op.human_only ? " human" : ""));
       btn.innerHTML = `
         <span class="ic">${opIcon(op)}</span>
-        <span class="lbl">${esc(op.label)}<small>${esc(op.description || "")}</small></span>
+        <span class="lbl">${esc(op.label)}</span>
         <span class="kind">${op.kind === "rpc" ? "rpc" : "skill"}</span>`;
       btn.onclick = () => runOp(op, btn);
       btn.dataset.operation = op.key;
+      btn.dataset.help=op.description || "";
       g.appendChild(btn);
     }
     if(group==="Tagging") {
       const toggle=el("button","btn");
       toggle.id="tagging-toggle";toggle.textContent="Automatic tagging: Check status";
+      toggle.dataset.help="Enable or pause automatic room and object tagging. Tagging may upload camera images to your model service.";
       toggle.onclick=toggleTagging;g.appendChild(toggle);
     }
     if(group==="Map") {
@@ -526,6 +535,45 @@ function opIcon(op) {
     tag_object: "◈", tag_location: "⌖", query_memory_tags: "⌕",
     navigate_near_memory_tag: "⤖", navigate_to_memory_tag: "⤖", stop_navigation: "⏹" };
   return map[op.key] || "•";
+}
+function setupDeckTooltips() {
+  const deck=$("#deck"),tip=el("div","deck-tooltip");
+  tip.id="deck-tooltip";tip.setAttribute("role","tooltip");tip.hidden=true;
+  const heading=el("strong"),text=el("div");tip.append(heading,text);document.body.appendChild(tip);
+  let timer=null,target=null;
+  const hide=()=>{
+    clearTimeout(timer);timer=null;tip.hidden=true;
+    if(target)target.removeAttribute("aria-describedby");
+    target=null;
+  };
+  const schedule=button=>{
+    if(!button || !button.dataset.help){hide();return;}
+    if(target===button)return;
+    hide();target=button;
+    timer=setTimeout(()=>{
+      if(!button.isConnected || document.querySelector("dialog[open]")){hide();return;}
+      heading.textContent=button.querySelector(".lbl")?.textContent || button.textContent;
+      text.textContent=button.dataset.help;tip.hidden=false;
+      button.setAttribute("aria-describedby",tip.id);
+      const rect=button.getBoundingClientRect(),box=tip.getBoundingClientRect();
+      tip.style.left=Math.max(12,Math.min(rect.right+12,window.innerWidth-box.width-12))+"px";
+      tip.style.top=Math.max(12,Math.min(rect.top,window.innerHeight-box.height-12))+"px";
+    },1000);
+  };
+  deck.addEventListener("pointerover",e=>{
+    if(e.pointerType==="touch")return;
+    schedule(e.target.closest("button[data-help]"));
+  });
+  deck.addEventListener("pointerout",e=>{
+    if(target && !target.contains(e.relatedTarget))hide();
+  });
+  deck.addEventListener("focusin",e=>schedule(e.target.closest("button[data-help]")));
+  deck.addEventListener("focusout",hide);
+  deck.addEventListener("pointerdown",hide);
+  deck.addEventListener("click",hide);
+  deck.addEventListener("scroll",hide);
+  window.addEventListener("resize",hide);
+  document.addEventListener("keydown",e=>{if(e.key==="Escape")hide();});
 }
 function requestOperation(op, preset = {}) {
   return new Promise(resolve => {
@@ -589,7 +637,7 @@ function renderInventory(result) {
   const table = el("table"); const head = el("tr"); for (const title of ["Name / ID","Position","Go"]) {const th=el("th");th.textContent=title;head.appendChild(th);}table.appendChild(head);
   for (const tag of result.tags) {
     const tr = el("tr"); for (const value of [tag.name + "\n" + tag.id, pretty(tag.position)]) {const td=el("td");td.textContent=value;tr.appendChild(td);}
-    const td = el("td"); const btn=el("button","btn");btn.textContent="Navigate nearby";btn.dataset.navigation="true";btn.disabled=!state.nav;btn.onclick=()=>runOp(CONFIG.operations.find(op=>op.key==="navigate_near_memory_tag"),btn,{location_id:tag.id});td.appendChild(btn);tr.appendChild(td);table.appendChild(tr);
+    const td = el("td"); const btn=el("button","btn");btn.textContent="Navigate nearby";btn.dataset.help="Navigate near this saved tag using the configured arrival distance. Supervise robot movement.";btn.dataset.navigation="true";btn.disabled=!state.nav;btn.onclick=()=>runOp(CONFIG.operations.find(op=>op.key==="navigate_near_memory_tag"),btn,{location_id:tag.id});td.appendChild(btn);tr.appendChild(td);table.appendChild(tr);
   }
   wrap.appendChild(table);
 }
@@ -789,6 +837,7 @@ async function send() {
 
 // ---------- boot ----------
 async function boot() {
+  setupDeckTooltips();
   try {
     CONFIG = await api("/api/config");
     $("#f-mcp").textContent = (CONFIG.mcp_url || "").replace(/^http:\/\//, "");
@@ -954,7 +1003,7 @@ const settingFields = [
     ["fusion_resume_rotation_deg","Resume rotation threshold (deg/s; > stationary)","number"],
     ["pgo_enabled","PGO loop correction (fixed world; applies on restart)","checkbox"],
     ["nearby_arrival_distance","Nearby stop distance (m; 0.3-3.0; restart default)","number"],
-    ["planner_robot_width","Demo planner width (m; 0.30-1.00; restart; never below actual footprint; does not increase speed)","number"],
+    ["planner_robot_width","Demo planner width (m; 0.05-1.00; restart; below actual footprint risks collisions)","number"],
     ["navigation_speed_limit","Navigation speed limit (m/s; 0.10-0.55; restart default; live slider is session-only)","number"],
     ["scene_map_dir","Scene directory (maps and tags)","text"],
     ["capture_mode","Restore capture mode","select",["manual","rotation"]],
@@ -985,7 +1034,7 @@ async function openSettings() {
         if(type==="password"){input.readOnly=true;input.value=data.secrets[key.toUpperCase()]?"********":"";input.placeholder=data.secrets[key.toUpperCase()]?"Configured in .env":"Not configured in .env";input.required=false;}
         else if(type!=="checkbox")input.required=true;
         if(type==="number")input.step=key.endsWith("port")?"1":"any";
-        if(key==="planner_robot_width"){input.min="0.30";input.max="1.00";input.step="0.01";}
+        if(key==="planner_robot_width"){input.min="0.05";input.max="1.00";input.step="0.01";}
         if(key==="navigation_speed_limit"){input.min="0.10";input.max="0.55";input.step="0.05";}
         label.appendChild(input);wrap.appendChild(label);
       }

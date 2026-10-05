@@ -73,7 +73,7 @@ class ConsoleSettings(FusionGateConfig):
     object_segmenter: Literal["auto", "yolo", "vlm"] = "yolo"
     pgo_enabled: bool = False
     nearby_arrival_distance: float = Field(default=1, ge=0.3, le=3, allow_inf_nan=False)
-    planner_robot_width: float = Field(default=0.3, ge=0.3, le=1.0, allow_inf_nan=False)
+    planner_robot_width: float = Field(default=0.3, ge=0.05, le=1.0, allow_inf_nan=False)
     navigation_speed_limit: float = Field(default=0.55, ge=0.1, le=0.55, allow_inf_nan=False)
     mcp_port: int = Field(default=global_config.mcp_port, ge=1024, le=65535)
     rerun_web_port: int = Field(default=RERUN_WEB_VIEWER_PORT, ge=1024, le=65535)

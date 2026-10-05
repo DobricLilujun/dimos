@@ -174,6 +174,45 @@ def start_stack(page):
     page.locator("#b-stack").get_by_text("running", exact=True).wait_for()
 
 
+def test_deck_button_help_appears_only_after_one_second_and_keeps_confirmation(page):
+    start_stack(page)
+    page.clock.install()
+    button = page.locator('[data-operation="begin_demo_exploration"]')
+    assert button.locator("small").count() == 0
+    button.scroll_into_view_if_needed()
+    page.clock.run_for(100)
+    button.hover()
+    page.clock.run_for(999)
+    assert page.locator("#deck-tooltip").is_hidden()
+    page.clock.run_for(1)
+    assert page.locator("#deck-tooltip").is_visible()
+    assert "Supervise robot movement" in page.locator("#deck-tooltip").inner_text()
+    assert button.get_attribute("aria-describedby") == "deck-tooltip"
+    bounds = page.locator("#deck-tooltip").bounding_box()
+    assert bounds["x"] >= 0
+    assert bounds["x"] + bounds["width"] <= page.viewport_size["width"]
+    button.click()
+    assert page.locator("#deck-tooltip").is_hidden()
+    assert page.locator("#operation-dialog").is_visible()
+    assert "Supervise robot movement" in page.locator("#operation-description").inner_text()
+
+
+def test_deck_tooltip_cancels_on_leave_and_supports_keyboard_focus(page):
+    page.clock.install()
+    button = page.locator("#diagnostics")
+    button.hover()
+    page.clock.run_for(500)
+    page.locator(".title").hover()
+    page.clock.run_for(1000)
+    assert page.locator("#deck-tooltip").is_hidden()
+    button.focus()
+    page.clock.run_for(1000)
+    assert page.locator("#deck-tooltip").is_visible()
+    page.keyboard.press("Escape")
+    assert page.locator("#deck-tooltip").is_hidden()
+    assert button.get_attribute("aria-describedby") is None
+
+
 def test_settings_save_all_workflow_parameters_without_exposing_keys(page, console_server):
     runtime = console_server[2]
     (runtime.project_dir / ".env").write_text(
@@ -196,7 +235,8 @@ def test_settings_save_all_workflow_parameters_without_exposing_keys(page, conso
     assert page.locator("#setting-auto_pause_fusion").is_checked()
     page.locator("#setting-fusion_resume_speed").fill("0.05")
     assert page.locator("#setting-planner_robot_width").input_value() == "0.3"
-    page.locator("#setting-planner_robot_width").fill("0.4")
+    assert page.locator("#setting-planner_robot_width").get_attribute("min") == "0.05"
+    page.locator("#setting-planner_robot_width").fill("0.05")
     page.locator("#setting-navigation_speed_limit").fill("0.35")
     page.locator("#setting-vlm_distance_m").fill("2.5")
     page.locator("#setting-rerun_grpc_port").fill("9887")
@@ -210,7 +250,7 @@ def test_settings_save_all_workflow_parameters_without_exposing_keys(page, conso
     assert runtime.settings.pgo_enabled is True
     assert runtime.settings.auto_pause_fusion is True
     assert runtime.settings.fusion_resume_speed == 0.05
-    assert runtime.settings.planner_robot_width == 0.4
+    assert runtime.settings.planner_robot_width == 0.05
     assert runtime.settings.navigation_speed_limit == 0.35
     assert runtime.settings.replay is True
     assert runtime.settings.rerun_grpc_port == 9887

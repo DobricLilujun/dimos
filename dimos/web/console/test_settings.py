@@ -171,25 +171,26 @@ def test_demo_uses_new_explorer_but_original_blueprint_keeps_legacy():
     assert parsed.module_kwargs("go2connection")["puppy_enabled"] is True
 
 
-@pytest.mark.parametrize("width", [0.29, 1.01, float("nan"), float("inf")])
+@pytest.mark.parametrize("width", [0.049, 1.01, float("nan"), float("inf")])
 def test_demo_planner_width_rejects_invalid_values(width):
     with pytest.raises(ValidationError):
         ConsoleSettings(planner_robot_width=width)
 
 
-def test_demo_planner_width_persists_and_overrides_only_planner(runtime):
-    runtime.save(SettingsUpdate(settings=ConsoleSettings(planner_robot_width=0.4)))
+@pytest.mark.parametrize("width", [0.05, 0.3, 0.4, 1.0])
+def test_demo_planner_width_persists_and_overrides_only_planner(runtime, width):
+    runtime.save(SettingsUpdate(settings=ConsoleSettings(planner_robot_width=width)))
     restored = ConsoleRuntime(runtime.project_dir, runtime.settings_path)
     parsed = BlueprintConfigParser(unitree_go2_agentic_persistent_demo).parse(
         restored.settings.argv()[5:], environ={}
     )
-    assert parsed.module_kwargs("persistentgo2planner")["robot_width"] == 0.4
+    assert parsed.module_kwargs("persistentgo2planner")["robot_width"] == width
     original = BlueprintConfigParser(unitree_go2_agentic_persistent).parse([], environ={})
     assert original.module_kwargs("persistentgo2planner").get("robot_width") is None
-    module = PersistentGo2Planner(robot_width=0.4)
+    module = PersistentGo2Planner(robot_width=width)
     try:
-        assert module._planner._navigation_map._global_config.robot_width == 0.4
-        assert module._planner._local_planner._global_config.robot_width == 0.4
+        assert module._planner._navigation_map._global_config.robot_width == width
+        assert module._planner._local_planner._global_config.robot_width == width
         assert module.config.g.robot_width == 0.3
         assert module._planner._global_config.robot_rotation_diameter == 0.6
     finally:
