@@ -25,7 +25,6 @@ intrinsics + TF + lidar pointcloud.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
 
 import numpy as np
 
@@ -128,7 +127,6 @@ class YoloSegSegmenter(ObjectSegmentationProvider):
 
         result = results[0]
         masks = result.masks.data.cpu().numpy()  # (N, H, W)
-        boxes = result.boxes.xyxy.cpu().numpy()  # (N, 4)
         classes = result.boxes.cls.cpu().numpy().astype(int)
         names = result.names
 

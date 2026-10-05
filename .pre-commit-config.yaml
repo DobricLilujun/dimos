@@ -55,7 +55,9 @@ repos:
       - id: check-yaml
         # mkdocs-material configures extensions with !!python/name: tags,
         # which pyyaml's safe loader refuses to construct.
-        exclude: ^mkdocs\.yml$
+        # mkdocs.github-pages.yml is a copy of mkdocs.yml for the GitHub Pages
+        # deploy and carries the same !!python/name: tags, so it is excluded too.
+        exclude: ^mkdocs\.(yml|github-pages\.yml)$
       - id: pretty-format-json
         name: format json
         args: [ --autofix, --no-sort-keys ]
