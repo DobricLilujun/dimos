@@ -83,30 +83,8 @@ jobs:
           echo "Built pages:"
           find site -name "*.html" | sort | sed 's/^/  /' | head -40
 
-      - name: Prepare the publish branch
-        # .nojekyll tells GitHub Pages to serve the built site as static
-        # files instead of running a Jekyll build over it.
-        run: |
-          printf 'Served as a static site by GitHub Pages; do not run Jekyll.\n' > site/.nojekyll
-
-      - name: Publish to the gh-pages branch
-        # Push the built site to the publish branch. GitHub Pages serves this
-        # branch directly, so the published artifact is not overwritten by a
-        # Jekyll "legacy" build of the source branch. The push runs from the
-        # checked-out repo (whose credentials the checkout action configured
-        # with the GITHUB_TOKEN), so it authenticates without putting the
-        # token in a URL. We replace the working tree with the built site so
-        # only the site is committed to the publish branch.
-        run: |
-          set -e
-          # Stash the built site aside before wiping the source working tree.
-          cp -r site _built
-          # Clear the checked-out source working tree (keep the .git dir).
-          git rm -rf --quiet . >/dev/null || true
-          # Replace the working tree with the built site.
-          cp -r _built/. .
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "deploy docs: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || true
-          git push --force origin HEAD:${GH_PUBLISH_BRANCH}
+      - name: Deploy to GitHub Pages
+        # Publish the built site as the GitHub Pages artifact. With the repo's
+        # Pages source set to "GitHub Actions", this artifact is what is served
+        # (no competing Jekyll "legacy" build).
+        uses: actions/deploy-pages@v4
