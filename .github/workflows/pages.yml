@@ -83,8 +83,13 @@ jobs:
           echo "Built pages:"
           find site -name "*.html" | sort | sed 's/^/  /' | head -40
 
-      - name: Deploy to GitHub Pages
+      - name: Upload the pages artifact
         # Publish the built site as the GitHub Pages artifact. With the repo's
         # Pages source set to "GitHub Actions", this artifact is what is served
         # (no competing Jekyll "legacy" build).
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
