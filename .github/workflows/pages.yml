@@ -1,18 +1,12 @@
 name: Deploy docs (GitHub Pages)
 
-# Publish the MkDocs site to https://dobriclilujun.github.io/dimos
+# Deploys the English documentation site (the comparison home + the "new
+# features" section) to https://dobriclilujun.github.io/dimos/.
 #
-# The site is built by the same `mkdocs` toolchain used locally (see
-# `mkdocs.github-pages.yml`), so what you get on GitHub Pages is exactly what
-# `mkdocs build --config-file mkdocs.github-pages.yml` produces on your
-# machine. The build imports nothing from the `dimos` package, so we install
-# only the `docs` dependency group — this avoids pulling the heavy runtime
-# stack (torch, etc.) into the runner.
-#
-# Enable Pages in the repository settings:
-#   Settings > Pages > Build and deployment > Source > GitHub Actions
-# and make sure the "Source branch" is the branch this workflow deploys from
-# (learning-branch, or main if you merge the docs there).
+# The site is built by mkdocs and then committed to the `gh-pages` branch,
+# which GitHub Pages serves as a static site. Publishing through a dedicated
+# branch (with a .nojekyll file) avoids the "legacy" build_type race where a
+# Jekyll build of the source branch overwrites the freshly deployed artifact.
 
 on:
   push:
@@ -29,9 +23,13 @@ on:
   # Manual deploy from the Actions tab.
   workflow_dispatch:
 
+env:
+  # The branch GitHub Pages serves. The job pushes the built site here.
+  GH_PUBLISH_BRANCH: gh-pages
+
 permissions:
-  contents: read
-  # Required by actions/deploy-pages and actions/upload-pages-artifact.
+  # contents: write lets the job push the built site to the publish branch.
+  contents: write
   pages: write
   id-token: write
 
@@ -42,10 +40,8 @@ concurrency:
 
 jobs:
   build:
-    name: Build and deploy docs
+    name: Build and publish docs
     runs-on: ubuntu-latest
-    # Only one deploy job runs at a time (also enforced by `concurrency` above).
-    environment: github-pages
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
@@ -76,24 +72,34 @@ jobs:
             --site-dir site
 
       - name: Verify the build
+        # Guard against an empty, broken, or hook-generated home before we
+        # publish. The home must be the comparison page, never a generated
+        # README landing page.
         run: |
           test -f site/index.html || { echo "No site/index.html - build failed"; exit 1; }
+          grep -q "Comparison: original dimOS" site/index.html || {
+            echo "HOME IS NOT THE COMPARISON PAGE (a hook may have overridden it)"; exit 1;
+          }
           echo "Built pages:"
           find site -name "*.html" | sort | sed 's/^/  /' | head -40
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+      - name: Prepare the publish branch
+        # .nojekyll tells GitHub Pages to serve the built site as static
+        # files instead of running a Jekyll build over it.
+        run: |
+          printf 'Served as a static site by GitHub Pages; do not run Jekyll.\n' > site/.nojekyll
 
-      - name: Upload the built site
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-  deploy:
-    name: Deploy to GitHub Pages
-    needs: build
-    runs-on: ubuntu-latest
-    environment: github-pages
-    steps:
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
+      - name: Publish to the gh-pages branch
+        # Commit the built site to the publish branch. GitHub Pages serves this
+        # branch directly, so the published artifact is not overwritten by a
+        # Jekyll "legacy" build of the source branch.
+        run: |
+          cd site
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "deploy docs: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || true
+          git push --force --set-upstream \
+            "https://${GITHUB_ACTOR}:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            HEAD:${GH_PUBLISH_BRANCH}
