@@ -49,8 +49,14 @@ jobs:
       # The docs media (diagrams, screenshots, the favicon) is LFS-tracked.
       # A bare checkout leaves 130-byte pointer files where the images should
       # be, so fetch the media the site actually references before building.
+      #
+      # Non-fatal: the site is built from docs/assets/ (normal, non-LFS files)
+      # and never from the repo-root assets/ tree, so a repo-root LFS object
+      # that the upstream LFS server cannot serve must not block the deploy.
       - name: Fetch the LFS media the site needs
-        run: git lfs pull --include="docs/**,assets/**" --exclude=""
+        run: |
+          git lfs pull --include="docs/**,assets/**" --exclude="" \
+            || echo "WARNING: some LFS objects could not be fetched; continuing (the build uses docs/assets/, not repo-root assets/)"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.2.0
