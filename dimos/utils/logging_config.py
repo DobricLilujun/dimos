@@ -76,6 +76,22 @@ def get_run_log_dir() -> Path | None:
     return _RUN_LOG_DIR
 
 
+def set_log_level(level: int | None = None) -> None:
+    """Apply a level to every configured logger and handler.
+
+    Mirrors set_run_log_dir() so a level chosen after setup_logger() has
+    already created loggers at import time still reaches them.  Pass None to
+    re-read DIMOS_LOG_LEVEL from the environment.
+    """
+    if level is None:
+        level = getattr(logging, os.getenv("DIMOS_LOG_LEVEL", "INFO"), logging.INFO)
+    for name in list(logging.Logger.manager.loggerDict):
+        logger = logging.getLogger(name)
+        logger.setLevel(level)
+        for handler in logger.handlers:
+            handler.setLevel(level)
+
+
 def _get_log_directory() -> Path:
     log_dir = LOG_DIR
 

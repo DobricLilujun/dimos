@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -39,9 +40,11 @@ from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent_c
     unitree_go2_agentic_persistent_demo,
 )
 from dimos.robot.unitree.go2.connection import ConnectionConfig, GO2Connection
+from dimos.utils.logging_config import setup_logger
 from dimos.visualization.rerun.bridge import RerunBridgeModule
 from dimos.visualization.rerun.constants import RERUN_GRPC_PORT
 from dimos.web.console import __main__ as entrypoint
+from dimos.web.console.logging_setup import setup_console_logging
 from dimos.web.console.module import RobotConsoleModule
 from dimos.web.console.prompts import CONSOLE_AGENT_PROMPT
 from dimos.web.console.settings import ConsoleRuntime, ConsoleSettings, SettingsUpdate
@@ -609,3 +612,80 @@ def test_exit_shutdown_removes_real_owned_process_tree(runtime, owned_process_tr
     assert process.poll() is not None
     assert not worker.is_running() or worker.status() == psutil.STATUS_ZOMBIE
     assert runtime.status()["state"] == "stopped"
+
+
+def test_setup_console_logging_creates_log_dir_and_enables_debug(
+    tmp_path, monkeypatch, mocker
+):
+    monkeypatch.setenv("DIMOS_LOG_DIR", str(tmp_path))
+    monkeypatch.delenv("DIMOS_LOG_LEVEL", raising=False)
+    mocker.patch("dimos.web.console.logging_setup.set_run_log_dir")
+    mocker.patch("dimos.web.console.logging_setup.setup_exception_handler")
+
+    log_dir = setup_console_logging(debug=True)
+
+    assert log_dir.exists()
+    assert log_dir.parent.name == "web-console"
+    assert os.environ["DIMOS_LOG_LEVEL"] == "DEBUG"
+    # The level must reach loggers that were already created at import time.
+    assert setup_logger().level == logging.DEBUG
+
+
+def test_setup_console_logging_default_is_info(monkeypatch):
+    monkeypatch.delenv("DIMOS_LOG_LEVEL", raising=False)
+
+    setup_console_logging()
+
+    # Without --debug the level stays at the INFO default (no env override set).
+    assert os.environ.get("DIMOS_LOG_LEVEL") is None
+    assert setup_logger().level == logging.INFO
+
+
+def test_runtime_persists_captured_stack_lines_to_log_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("UNITREE_AES_128_KEY", raising=False)
+    log_dir = tmp_path / "logs" / "web-console"
+    runtime = ConsoleRuntime(
+        tmp_path, tmp_path / "console.json", console_port=8090, log_dir=log_dir
+    )
+
+    assert runtime.log_dir == log_dir
+    assert (log_dir / "stack.log").exists()
+
+    class FakeProcess:
+        stdout = iter(["line one", "line two"])
+
+    runtime._read_output(FakeProcess())
+    content = (log_dir / "stack.log").read_text()
+    assert "line one" in content
+    assert "line two" in content
+    assert runtime.logs() == ["line one", "line two"]
+    runtime._close_stack_log()
+
+
+def test_persisted_stack_logs_redact_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only-key")
+    monkeypatch.delenv("UNITREE_AES_128_KEY", raising=False)
+    log_dir = tmp_path / "logs" / "web-console"
+    runtime = ConsoleRuntime(
+        tmp_path, tmp_path / "console.json", console_port=8090, log_dir=log_dir
+    )
+    runtime._secrets = {"OPENAI_API_KEY": "test-only-key"}
+
+    class FakeProcess:
+        stdout = iter(["OPENAI_API_KEY=test-only-key"])
+
+    runtime._read_output(FakeProcess())
+    content = (log_dir / "stack.log").read_text()
+    assert "test-only-key" not in content
+    assert "[REDACTED]" in content
+    runtime._close_stack_log()
+
+
+def test_runtime_without_log_dir_opens_no_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("UNITREE_AES_128_KEY", raising=False)
+    runtime = ConsoleRuntime(tmp_path, tmp_path / "console.json", console_port=8090)
+
+    assert runtime.log_dir is None
+    assert runtime._stack_log is None

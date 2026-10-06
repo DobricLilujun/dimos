@@ -29,7 +29,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from typing import Any, Literal
+from typing import Any, Literal, TextIO
 from urllib.parse import urlsplit
 import uuid
 
@@ -172,7 +172,11 @@ class SettingsUpdate(BaseModel):
 
 class ConsoleRuntime:
     def __init__(
-        self, project_dir: Path, settings_path: Path | None = None, console_port: int = 8090
+        self,
+        project_dir: Path,
+        settings_path: Path | None = None,
+        console_port: int = 8090,
+        log_dir: Path | None = None,
     ) -> None:
         self.project_dir = project_dir.resolve()
         self.settings_path = settings_path or CONFIG_DIR / "robot-console.json"
@@ -193,8 +197,47 @@ class ConsoleRuntime:
         self._error: str | None = None
         self._overwrite_token: str | None = None
         self._overwrite_settings: ConsoleSettings | None = None
+        self._log_dir: Path | None = log_dir
+        self._stack_log: TextIO | None = None
+        if log_dir is not None:
+            self._open_stack_log()
         self.on_event: Callable[[dict[str, Any]], None] = lambda event: None
         self.on_settings: Callable[[ConsoleSettings], None] = lambda settings: None
+
+    @property
+    def log_dir(self) -> Path | None:
+        """Directory where this console's structured and stack logs live."""
+        return self._log_dir
+
+    def _open_stack_log(self) -> None:
+        """Open the captured robot-stack log file, degrading gracefully."""
+        if self._log_dir is None:
+            return
+        try:
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+            self._stack_log = (self._log_dir / "stack.log").open(
+                "a", encoding="utf-8", buffering=1
+            )
+        except OSError:
+            logger.warning("Could not open console stack log", log_dir=str(self._log_dir))
+            self._stack_log = None
+
+    def _append_stack_log(self, line: str) -> None:
+        """Persist a captured stack line so it survives the in-memory ring."""
+        if self._stack_log is None:
+            return
+        try:
+            self._stack_log.write(line + "\n")
+        except OSError:
+            pass
+
+    def _close_stack_log(self) -> None:
+        if self._stack_log is not None:
+            try:
+                self._stack_log.close()
+            except OSError:
+                pass
+            self._stack_log = None
 
     @property
     def ready(self) -> bool:
@@ -400,6 +443,13 @@ class ConsoleRuntime:
                 self._lines.append(message)
                 self.on_event({"type": "stack_log", "text": message})
             self._state, self._error = "starting", None
+            logger.info(
+                "Console started robot stack",
+                pid=self._process.pid,
+                map_mode=launch_settings.map_mode,
+                scene=str(scene),
+                log_dir=str(self._log_dir),
+            )
             self._monitor = threading.Thread(
                 target=self._watch, name="console-stack-monitor", daemon=True
             )
@@ -448,6 +498,7 @@ class ConsoleRuntime:
             safe = self._redact(line.rstrip())
             with self._lock:
                 self._lines.append(safe)
+                self._append_stack_log(safe)
             self.on_event({"type": "stack_log", "text": safe})
 
     def logs(self) -> list[str]:
@@ -461,6 +512,7 @@ class ConsoleRuntime:
                 return self.status()
 
             self._state = "stopping"
+            logger.info("Stopping robot stack", pid=process.pid)
             try:
                 process.send_signal(signal.SIGTERM)
             except ProcessLookupError:
@@ -468,6 +520,10 @@ class ConsoleRuntime:
         try:
             process.wait(timeout=30)
         except subprocess.TimeoutExpired as exc:
+            logger.error(
+                "Graceful stop timed out; no forced kill was issued. Check the stack logs.",
+                pid=process.pid,
+            )
             raise ValueError(
                 "Graceful stop timed out; check the stack terminal. No forced kill was issued."
             ) from exc
@@ -530,6 +586,7 @@ class ConsoleRuntime:
         with self._lock:
             self._process = None
             self._state, self._error = "stopped", None
+        self._close_stack_log()
         logger.info("Console robot stack stopped")
 
 
@@ -572,6 +629,13 @@ def register_runtime_routes(
     @app.get("/api/stack/logs")
     def stack_logs() -> dict[str, Any]:
         return {"lines": runtime.logs()}
+
+    @app.get("/api/log")
+    def log_info() -> dict[str, Any]:
+        return {
+            "log_dir": str(runtime.log_dir) if runtime.log_dir else None,
+            "debug": os.environ.get("DIMOS_LOG_LEVEL", "INFO") == "DEBUG",
+        }
 
     @app.post("/api/stack/prepare")
     def prepare_start() -> dict[str, Any]:

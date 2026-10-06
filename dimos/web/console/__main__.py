@@ -25,8 +25,12 @@ from types import FrameType
 from fastapi import FastAPI
 import uvicorn
 
+from dimos.utils.logging_config import setup_logger
+from dimos.web.console.logging_setup import setup_console_logging
 from dimos.web.console.module import RobotConsoleModule
 from dimos.web.console.settings import ConsoleRuntime, ConsoleSettings
+
+logger = setup_logger()
 
 
 def _on_terminal_close(_signal: int, _frame: FrameType | None) -> None:
@@ -37,8 +41,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="SEDAN GROUP local robot console")
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--project-dir", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable DEBUG-level logging for the console and its robot stack.",
+    )
     args = parser.parse_args()
-    runtime = ConsoleRuntime(args.project_dir, console_port=args.port)
+    log_dir = setup_console_logging(debug=args.debug)
+    logger.info("Console logging configured", log_dir=str(log_dir), debug=args.debug)
+    runtime = ConsoleRuntime(
+        args.project_dir,
+        console_port=args.port,
+        log_dir=log_dir,
+    )
     module = RobotConsoleModule(
         port=args.port,
         mcp_port=runtime.settings.mcp_port,
