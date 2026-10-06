@@ -1,4 +1,4 @@
-site_name: DimOS
+site_name: DimOS Agents
 site_description: >-
   Documentation for the new dimOS features: persistent maps, a web console,
   demo exploration, nearby/visual arrival, person recognition, a scene graph
@@ -46,7 +46,7 @@ theme:
   static_templates:
     - llms.txt
   favicon: assets/favicon.png
-  logo: assets/dimensional-logo-master-transparent.png
+  logo: assets/dimos-agents-logo.svg
   font:
     text: Inter
     code: JetBrains Mono
@@ -61,14 +61,25 @@ theme:
     - search.highlight
     - content.code.copy
     - content.action.edit
-  # Dark only: one palette entry means material renders no toggle.
+  # Light + dark, with a manual toggle (top-right). The first palette is
+  # the default on load; the toggle entries add the switch buttons.
   palette:
-    scheme: slate
-    primary: custom
-    accent: custom
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-6
+        name: Switch to dark mode
+    - scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-5
+        name: Switch to light mode
 
-extra_css:
-  - assets/mkdocs-theme.css
+# assets/mkdocs-theme.css is not shipped in this build; the theme lives in the
+# custom_dir (misc/mkdocs). Nothing external to load here.
+extra_css: []
 
 markdown_extensions:
   - abbr

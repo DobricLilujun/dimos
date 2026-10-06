@@ -1,6 +1,6 @@
-# SEDAN GROUP Additions
+# DimOS Agents Additions
 
-This section documents the **SEDAN GROUP additions** built on top of the
+This section documents the **DimOS Agents additions** built on top of the
 upstream [dimOS](../index.md) robotics stack. They turn the existing Go2
 agentic robot into a **persistent, human-supervised, web-controllable**
 system: it can remember a scene across sessions, align to a saved map,
@@ -10,7 +10,7 @@ browser control deck with a ChatGPT-style chat.
 > **Base commit.** Everything here is built on top of upstream commit
 > `13e4a21fa` (*"plain go2 real time loop closure (#4331)"*). The home page
 > [compares the original dimOS with these additions](../index.md); the pages in
-> this section describe what the SEDAN GROUP **added** on top of it.
+> this section describe what the DimOS Agents **added** on top of it.
 
 ## What is dimOS (the base)?
 

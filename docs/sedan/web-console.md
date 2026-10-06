@@ -1,5 +1,7 @@
 # The web console
 
+![The DimOS Agents web console](../assets/webconsole.png)
+
 The **web console** (`RobotConsoleModule`) turns the persistent workflow into a
 browser control deck. It serves a single-page UI on `http://127.0.0.1:8090`
 that embeds the existing Rerun web viewer and adds button-driven control of the

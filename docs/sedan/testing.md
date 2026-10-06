@@ -1,6 +1,6 @@
 # Testing & verification
 
-This section explains **how to verify** the SEDAN GROUP additions, what is
+This section explains **how to verify** the DimOS Agents additions, what is
 verifiable **automatically** versus what needs a **real Go2**, and how to build
 this documentation site.
 

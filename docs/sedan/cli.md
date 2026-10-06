@@ -1,6 +1,6 @@
 # CLI reference
 
-This page lists the **new commands and flags** for the SEDAN GROUP additions.
+This page lists the **new commands and flags** for the DimOS Agents additions.
 Flags follow the usual dimOS form: `--<module>.<field>`, with field names
 kebab-cased (e.g. `--persistentgo2map.map-file`). Every new feature is **opt-in**:
 the original `unitree-go2-agentic` blueprint is unchanged.
