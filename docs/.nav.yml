@@ -1,5 +1,0 @@
-# Top-level nav. The site keeps the single comparison page and the new-feature
-# section. The upstream dimOS docs live under docs_base/ and are not built.
-nav:
-  - index.md
-  - sedan

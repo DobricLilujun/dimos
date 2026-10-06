@@ -1,0 +1,22 @@
+# DimOS
+
+> Documentation for the new dimOS features: persistent maps, a web console, demo exploration, nearby/visual arrival, person recognition, a scene graph server, and VLM/segmentation perception — built on top of upstream dimOS, with one comparison of the original and the new feature set.
+
+Every page is also served as markdown at its docs/ path: `usage/modules/` is
+`usage/modules.md`, and a section's index page is `usage/index.md`.
+
+- [dimOS: what's new](https://dobriclilujun.github.io/dimos/index.md)
+
+## SEDAN GROUP Additions
+
+- [SEDAN GROUP Additions](https://dobriclilujun.github.io/dimos/sedan/index.md)
+- [Quick start: the persistent workflow](https://dobriclilujun.github.io/dimos/sedan/quickstart.md)
+- [The web console](https://dobriclilujun.github.io/dimos/sedan/web-console.md)
+- [Persistent maps & relocalization](https://dobriclilujun.github.io/dimos/sedan/persistent-maps.md)
+- [Demo exploration](https://dobriclilujun.github.io/dimos/sedan/demo-exploration.md)
+- [Nearby & visual arrival, speech, and "Puppy"](https://dobriclilujun.github.io/dimos/sedan/movement-and-arrival.md)
+- [Person recognition](https://dobriclilujun.github.io/dimos/sedan/person-recognition.md)
+- [Scene graph server](https://dobriclilujun.github.io/dimos/sedan/scene-graph.md)
+- [Perception: VLM captioning & object segmentation](https://dobriclilujun.github.io/dimos/sedan/perception-vlm.md)
+- [Testing & verification](https://dobriclilujun.github.io/dimos/sedan/testing.md)
+- [CLI reference](https://dobriclilujun.github.io/dimos/sedan/cli.md)
