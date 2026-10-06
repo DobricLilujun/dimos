@@ -22,8 +22,9 @@ python -m dimos.web.console --debug    # DEBUG logs for the console and its stac
 ```
 
 The standalone console writes its logs (and the captured robot-stack output,
-redacted) to `<log-dir>/web-console/<timestamp>/`; the log directory is printed
-at startup. See [the web console](web-console.md#logging).
+redacted) to a local `<log-dir>/web-console/<timestamp>/`; the log directory is
+printed at startup. See the [Logging system](logging.md) page for what is saved,
+where it is stored, and the file naming rules.
 
 Run a blueprint:
 

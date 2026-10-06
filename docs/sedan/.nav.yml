@@ -11,3 +11,4 @@ nav:
   - perception-vlm.md
   - testing.md
   - cli.md
+  - logging.md
