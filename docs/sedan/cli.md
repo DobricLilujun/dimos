@@ -18,7 +18,12 @@ Standalone console (independent of the robot stack; it manages its own stack):
 ```bash
 python -m dimos.web.console            # browser → http://127.0.0.1:8090
 python -m dimos.web.console --port 8092
+python -m dimos.web.console --debug    # DEBUG logs for the console and its stack
 ```
+
+The standalone console writes its logs (and the captured robot-stack output,
+redacted) to `<log-dir>/web-console/<timestamp>/`; the log directory is printed
+at startup. See [the web console](web-console.md#logging).
 
 Run a blueprint:
 

@@ -57,6 +57,45 @@ python -m dimos.web.console          # browser → http://127.0.0.1:8090
   power loss skips cleanup — check with `dimos status` and `dimos stop` if
   needed.
 
+## Logging
+
+The standalone console records **all of its execution output — including errors
+— to a dedicated, timestamped log directory**, so logs survive the run instead of
+only living in the 200-line in-memory **Backend console**.
+
+- **Log directory** — `python -m dimos.web.console` creates
+  `<log-dir>/web-console/<timestamp>/` and prints its path at startup. `<log-dir>`
+  is `logs/` in the project root (or the system state directory for an installed
+  package). Override the base with `DIMOS_LOG_DIR`.
+- **`main.jsonl`** — the console's own structured logs: startup, lifecycle
+  (start/stop), settings, and errors.
+- **`stack.log`** — the captured output of the robot stack the console started,
+  with secrets (`OPENAI_API_KEY`, `UNITREE_AES_128_KEY`) masked. This records the
+  stack's logs and errors beyond the in-memory **Backend console**.
+- **Error capture** — uncaught exceptions are caught and written with a full
+  traceback (to both the console and `main.jsonl`); a graceful-stop timeout is
+  logged as an error. The robot stack's own output is captured in `stack.log`.
+- **`/api/log`** — returns the log directory path and whether debug mode is on,
+  so the UI can surface where to look.
+
+### Debug level
+
+Pass `--debug` to enable DEBUG-level logging for the console **and** its child
+robot stack (the stack inherits the level from the environment):
+
+```bash
+python -m dimos.web.console --debug
+```
+
+Without `--debug`, the console logs at INFO, or at the level set by
+`DIMOS_LOG_LEVEL` in the environment (e.g. `DIMOS_LOG_LEVEL=DEBUG`). The level is
+applied to loggers already created at import time, so it takes effect even for
+modules loaded before the flag is parsed.
+
+> The **embedded** console (`dimos run unitree-go2-agentic-persistent-console`)
+> uses the normal `dimos run` per-run logs (the CLI's own log directory and
+> exception handler), not this standalone log directory.
+
 ## Settings
 
 Top-right **Settings** configures (and, where relevant, saves for the next
