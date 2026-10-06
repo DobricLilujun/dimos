@@ -1,9 +1,9 @@
 site_name: DimOS
 site_description: >-
-  Documentation for DimOS — the modern operating system for generalist
-  robotics: Python-first, agent-native, and hardware-agnostic. This site
-  documents the upstream dimOS feature set together with the SEDAN GROUP
-  additions (persistent maps, the web console, demo exploration, and more).
+  Documentation for the new dimOS features: persistent maps, a web console,
+  demo exploration, nearby/visual arrival, person recognition, a scene graph
+  server, and VLM/segmentation perception — built on top of upstream dimOS,
+  with one comparison of the original and the new feature set.
 site_url: https://dobriclilujun.github.io/dimos
 repo_url: https://github.com/DobricLilujun/dimos
 repo_name: DobricLilujun/dimos
@@ -28,10 +28,13 @@ exclude_docs: |
   bla*
   None
 
-# Repo-root links and md-babel fence params are translated at build time,
-# so every page under docs/ stays exactly as it is on github.
-hooks:
-  - misc/mkdocs/hooks.py
+# The main site (mkdocs.yml) uses this hook to translate repo-root links and
+# to generate the home page from README.md. The GitHub Pages deploy only
+# publishes the new-feature docs, which are self-contained; that hook would
+# override our docs/index.md (the comparison table) with the README, so we
+# omit it here and let docs/index.md be the home page.
+# hooks:
+#   - misc/mkdocs/hooks.py
 
 # mkdocs serve watches docs/ and the config; the theme lives outside both.
 watch:

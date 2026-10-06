@@ -1,15 +1,5 @@
-# Top-level order only. Each directory fills itself in (index page first,
-# then the rest in natural order), so adding a page is just adding the file.
-# A directory that wants its own order or title gets its own .nav.yml.
+# Top-level nav. The site keeps the single comparison page and the new-feature
+# section. The upstream dimOS docs live under docs_base/ and are not built.
 nav:
   - index.md
-  - quickstart.md
-  - requirements.md
-  - installation
-  - usage
-  - capabilities
-  - web
-  - platforms
   - sedan
-  - development
-  - coding-agents

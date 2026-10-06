@@ -4,9 +4,7 @@ This guide walks the full lifecycle of `unitree-go2-agentic-persistent` (and
 its console variants) end to end: **create** a persistent map, **restore** it,
 **align** to it with a human in the loop, **query** remembered tags,
 **navigate** (precisely or *nearby*), **tag** objects and places, and
-**save**. It is the English companion to the original
-[Chinese workflow guide](../usage/go2-persistent-workflow.zh.md) and
-[relocalization docs](../capabilities/navigation/relocalization.md).
+**save**. It is the English companion of the upstream Chinese workflow guide.
 
 The map and semantic memory live in a *scene directory*:
 
@@ -399,6 +397,5 @@ physical navigation.
 - The persistent navigation gate is **not** a global hardware motion lock —
   direct low-level control can still move the robot.
 
-See also [relocalization](../capabilities/navigation/relocalization.md),
-[CLI usage](../usage/cli.md), [configuration](../usage/configuration.md), and
-[the agent system](../capabilities/agents/index.md).
+See also [CLI reference](cli.md), [Testing & verification](testing.md), and
+the [feature overview](index.md).

@@ -8,9 +8,9 @@ explore a building on its own, recognize named people, and be driven from a
 browser control deck with a ChatGPT-style chat.
 
 > **Base commit.** Everything here is built on top of upstream commit
-> `13e4a21fa` (*"plain go2 real time loop closure (#4331)"*). The upstream
-> feature set is documented in the rest of this site; the pages in this
-> section describe what the SEDAN GROUP **added** on top of it.
+> `13e4a21fa` (*"plain go2 real time loop closure (#4331)"*). The home page
+> [compares the original dimOS with these additions](../index.md); the pages in
+> this section describe what the SEDAN GROUP **added** on top of it.
 
 ## What is dimOS (the base)?
 
@@ -26,9 +26,8 @@ robotics. Its building blocks:
 - The **Go2 navigation stack** maps, plans, and drives a Unitree Go2
   quadruped, with PGO loop closure, costmapping, and frontier exploration.
 
-See [the original navigation docs](../capabilities/navigation/relocalization.md),
-[blueprints](../usage/blueprints.md), [modules](../usage/modules.md), and the
-[agent system](../capabilities/agents/index.md) for the base.
+The original (upstream) dimOS feature set is summarized in the [comparison
+table on the home page](../index.md).
 
 ## What this section adds
 
