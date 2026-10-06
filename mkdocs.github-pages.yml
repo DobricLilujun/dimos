@@ -103,3 +103,5 @@ plugins:
       skip_classes: [no-lightbox]
   - minify:
       minify_html: true
+
+# (deploy re-run @ 2026-10-06T08:32:16Z)
