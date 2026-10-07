@@ -46,6 +46,23 @@ export ROBOT_IP="192.168.123.161"
 mkdir -p assets/scene_maps/sedan_office_persistent
 ```
 
+**venv-dev setup:** If you need the `venv-dev` virtual environment (with sim,
+web, and perception extras), use the sync script:
+
+```bash
+bash scripts/sync-venv-dev.sh
+```
+
+This script:
+1. Creates or updates the `venv-dev` virtual environment (Python 3.12).
+2. Installs DimOS with all extras (`sim`, `web`, `perception`, `visualization`,
+`misc`, `dev`).
+3. Pulls LFS files (`mujoco_sim.tar.gz`, etc.) if available.
+
+The `venv-dev` dependencies are recorded in `docs/venv-dev-requirements.txt`
+(368 packages). If the LFS pull fails, check your LFS credentials or set
+`GIT_LFS_URL` manually.
+
 Make sure the OpenAI (or other model) credentials are set through the project
 config or environment. **Never commit the secret or paste it into chat.** We
 recommend splitting work across terminals:
