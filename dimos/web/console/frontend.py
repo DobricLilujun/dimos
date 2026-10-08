@@ -299,7 +299,18 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
       <div id="lifecycle" class="group" hidden>
         <h2>Robot stack</h2>
         <span class="badge" id="b-stack">stopped</span>
-        <label class="field" for="stack-map-mode"><span>Map mode</span>
+        <label class="field" for="stack-profile"><span>Blueprint</span>
+          <select id="stack-profile"></select>
+        </label>
+        <label class="field" for="stack-connection"><span>Connection</span>
+          <select id="stack-connection">
+            <option value="robot">Real robot</option>
+            <option value="replay">Replay (recorded data)</option>
+            <option value="simulation">MuJoCo simulation</option>
+          </select>
+        </label>
+        <small id="stack-profile-note" role="status"></small>
+        <label class="field" id="stack-map-field" for="stack-map-mode"><span>Map mode</span>
           <select id="stack-map-mode"><option value="restore">Restore saved map</option><option value="new">New map</option></select>
         </label>
         <button class="btn primary" id="stack-start" data-help="Choose New map for the first run and Restore when reconnecting. Restore starts directly; rotation capture may rotate the robot automatically. Automatic tagging may call your model service. Supervise and keep the area clear.">Start robot stack</button>
@@ -307,7 +318,7 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
         <button class="btn human" id="stack-stop-without-save" data-help="Explicitly stop without a final map save. Any earlier autosaved file is retained. Use only after inspecting the save error.">Stop without saving</button>
         <div id="map-save-detail" role="status"></div>
       </div>
-      <h2>Control deck</h2>
+      <h2 id="deck-title">Control deck</h2>
       <div id="deck-groups"></div>
       <div class="group" id="alignment-panel">
         <h2>Alignment <span class="badge" id="alignment-phase">unknown</span></h2>
@@ -385,6 +396,7 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
         <span class="badge" id="b-thinking" style="display:none"><span class="dot"></span>thinking</span>
       </div>
       <div class="msgs" id="msgs" role="log" aria-label="Conversation"></div>
+      <div id="persistent-controls">
       <label class="hint" for="navigation-speed">Live navigation speed limit:
         <output id="navigation-speed-value">0.55 m/s</output>
         <input id="navigation-speed" type="range" min="0.1" max="0.55" step="0.05" value="0.55"
@@ -400,6 +412,7 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
         <button type="button" class="chip link" id="murmur-toggle" disabled>Murmur: Off</button>
         <span id="puppy-status" role="status">Enable Go2 speaker to start Puppy.</span>
       </label>
+      </div>
       <div class="in">
         <div class="row">
           <textarea id="input" placeholder="Message the agent…  (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
@@ -444,7 +457,7 @@ const el = (t, cls, html) => { const n = document.createElement(t); if (cls) n.c
 const now = () => { const d = new Date(); return d.toTimeString().slice(0,8); };
 
 let CONFIG = {};
-const state = { nav: false, stack: null };
+const state = { nav: false, stack: null, agent: true, map: true };
 const openToolCards = new Map();
 const pendingEchoes = new Map();
 let refreshing = false;
@@ -823,6 +836,8 @@ function updateControls() {
   const stackBusy=state.lifecycleBusy || ["starting","running","stopping"].includes(state.stack);
   $("#stack-start").disabled=stackBusy;
   $("#stack-map-mode").disabled=stackBusy;
+  $("#stack-profile").disabled=stackBusy;
+  $("#stack-connection").disabled=stackBusy;
   if(state.lifecycleBusy)$("#stack-stop").disabled=true;
   $("#stack-stop-without-save").disabled=state.lifecycleBusy || !["running","starting","stopping"].includes(state.stack);
   const ready = !CONFIG.standalone || state.stack==="running";
@@ -838,8 +853,8 @@ function updateControls() {
   $("#visual-arrival-toggle").disabled=!ready;
   if(!ready){$("#murmur-toggle").disabled=true;$("#puppy-status").textContent="Robot stack is not running.";}
   for(const btn of document.querySelectorAll("[data-navigation]")) btn.disabled=!ready || !state.nav;
-  $("#send").disabled=!ready || sending;
-  $("#input").disabled=!ready;
+  $("#send").disabled=!ready || sending || !state.agent;
+  $("#input").disabled=!ready || !state.agent;
 }
 
 // ---------- events (SSE) ----------
@@ -888,7 +903,7 @@ async function boot() {
     $("#lifecycle").hidden=!CONFIG.standalone;
     $("#keyboard-bar").hidden=!CONFIG.standalone;
     if(CONFIG.standalone) {
-      $("#stack-map-mode").value=(await api("/api/settings")).settings.map_mode;
+      await syncStackSelectors();
       const logs=await api("/api/stack/logs");for(const line of logs.lines)appendStackLog(line);
     }
   } catch (e) {
@@ -983,6 +998,8 @@ async function boot() {
   $("#settings-cancel").onclick = () => {$("#settings-form").reset();$("#settings-dialog").close();};
   $("#settings-dialog").addEventListener("close",()=>$("#settings-form").reset());
   $("#settings-form").onsubmit = saveSettings;
+  $("#stack-profile").onchange = onStackChoice;
+  $("#stack-connection").onchange = onStackChoice;
   $("#stack-start").onclick = () => lifecycle("start");
   $("#stack-stop").onclick = () => lifecycle("stop");
   $("#stack-stop-without-save").onclick = () => lifecycle("stop",false);
@@ -1093,18 +1110,76 @@ async function saveSettings(e) {
   e.preventDefault();
   const payload={settings:{}};
   payload.settings.map_mode=$("#stack-map-mode").value;
+  payload.settings.profile=$("#stack-profile").value;
   for(const input of $("#settings-fields").querySelectorAll("input,select")) {
     if(input.type==="password") continue;
     payload.settings[input.name]=input.type==="checkbox"?input.checked:input.type==="number"?Number(input.value):input.value;
   }
+  // The Replay checkbox here and the Connection selector describe one choice; replay wins.
+  payload.settings.simulation=$("#stack-connection").value==="simulation" && !payload.settings.replay;
   $("#settings-save").disabled=true;
   try {
     await api("/api/settings",payload);
     $("#settings-form").reset();$("#settings-dialog").close();
-    CONFIG=await api("/api/config");buildDeck();setupRerun(CONFIG.rerun_url);updateControls();
+    CONFIG=await api("/api/config");buildDeck();setupRerun(CONFIG.rerun_url);await syncStackSelectors();updateControls();
     addSystem("Settings saved. Restart the robot stack to apply. Keys are loaded from .env.");
   }catch(err){$("#settings-error").textContent=err.message;}
   finally{$("#settings-save").disabled=false;}
+}
+const CONNECTION_NOTES = {
+  robot: " Uses the Robot IP in Settings; keep the area clear and supervise.",
+  replay: " Plays recorded data, so the robot does not respond to commands.",
+  simulation: " A MuJoCo window opens on this computer."
+};
+function connectionOf(settings) { return settings.simulation?"simulation":settings.replay?"replay":"robot"; }
+function updateStackPanel(profile, connection) {
+  state.agent=profile.has_agent;
+  state.map=profile.has_map;
+  const simulated=connection==="simulation";
+  $("#stack-map-field").hidden=!profile.has_map || simulated;
+  $("#stack-profile-note").textContent=profile.description+(CONNECTION_NOTES[connection]||"")+(profile.has_map && simulated?" A new map is built in a fresh folder each start.":"");
+  $("#stack-stop").textContent=profile.has_map?"Save and stop":"Stop";
+  $("#stack-stop-without-save").hidden=!profile.has_map;
+  $("#alignment-panel").hidden=!profile.has_map;
+  $("#persistent-controls").hidden=!profile.has_map;
+  $("#speaker-toggle").hidden=!profile.has_agent;
+  $("#diagnostics").hidden=!profile.has_agent;
+  $("#diagnostic-output").hidden=!profile.has_agent;
+  $("#deck-title").hidden=!(CONFIG.operations||[]).length;
+  $("#input").placeholder=profile.has_agent?"Message the agent…  (Enter to send, Shift+Enter for newline)":"This stack has no agent to chat with";
+  updateControls();
+}
+async function syncStackSelectors() {
+  if(!CONFIG.standalone) return;
+  const current=(await api("/api/settings")).settings;
+  const profiles=CONFIG.profiles||[];
+  const select=$("#stack-profile");
+  if(select.options.length!==profiles.length) {
+    select.innerHTML="";
+    for(const item of profiles) {const option=document.createElement("option");option.value=item.key;option.textContent=item.label;select.appendChild(option);}
+  }
+  const profile=profiles.find(item=>item.key===current.profile)||profiles[0];
+  if(!profile) return;
+  select.value=profile.key;
+  const connection=$("#stack-connection");
+  for(const option of connection.options) option.disabled=!profile.connections.includes(option.value);
+  connection.value=connectionOf(current);
+  $("#stack-map-mode").value=current.map_mode;
+  updateStackPanel(profile, connectionOf(current));
+}
+async function onStackChoice() {
+  if(state.lifecycleBusy) return;
+  const profile=(CONFIG.profiles||[]).find(item=>item.key===$("#stack-profile").value);
+  if(!profile) return;
+  let connection=$("#stack-connection").value;
+  // A demo that only runs in simulation moves the Connection selector for you.
+  if(!profile.connections.includes(connection)) connection=profile.connections[0];
+  try {
+    const current=(await api("/api/settings")).settings;
+    await api("/api/settings",{settings:{...current,profile:profile.key,replay:connection==="replay",simulation:connection==="simulation"}});
+    CONFIG=await api("/api/config");buildDeck();setupRerun(CONFIG.rerun_url);
+  } catch(e) {addSystem(e.message);}
+  await syncStackSelectors();
 }
 async function lifecycle(action,save=true) {
   if(state.lifecycleBusy)return;
@@ -1118,14 +1193,14 @@ async function lifecycle(action,save=true) {
       if(current.settings.map_mode!==mode)
         await api("/api/settings",{settings:{...current.settings,map_mode:mode}});
       const plan=await api("/api/stack/prepare",{});
-      if(mode==="new") {
+      if(plan.confirm_new_map) {
         const overwrite=await requestOperation({label:plan.overwrite_required?"Overwrite existing scene?":"Create new map?",human_only:true,offer_restore:plan.restore_available,confirm_label:plan.overwrite_required?"Yes — overwrite":"Yes — create new map",description:`${plan.overwrite_required?"Yes: replace maps and tags, keeping a sibling backup.":"Yes: create a new map."} Scene: ${plan.scene_directory}. ${plan.restore_available?"No — use existing map: preserve the scene and start Restore for alignment.":"No saved map is available to restore; use Cancel to abort."} Rotation capture may rotate the robot when restoring. Automatic tagging may call your configured model service. Keep the area clear. Cancel: do not start.`});
         if(overwrite===null)return;
         useExistingMap=overwrite.use_existing_map===true;
         if(!useExistingMap)overwriteToken=plan.overwrite_token;
       }
   } else {
-    const approved=await requestOperation({label:save?"Save and stop robot stack":"Stop WITHOUT saving",human_only:true,description:save?"Save the updated scene map first, then stop this console's stack. If saving fails, the stack stays running and the error is shown.":"Stop this console's stack without a final map write. New unsaved observations will be discarded; earlier autosaves are retained. This is not an emergency stop."});
+    const approved=await requestOperation({label:!state.map?"Stop robot stack":save?"Save and stop robot stack":"Stop WITHOUT saving",human_only:true,description:!state.map?"Stop this console's robot stack. This is not a hardware emergency stop.":save?"Save the updated scene map first, then stop this console's stack. If saving fails, the stack stays running and the error is shown.":"Stop this console's stack without a final map write. New unsaved observations will be discarded; earlier autosaves are retained. This is not an emergency stop."});
     if(approved===null)return;
   }
   const result=await api("/api/stack/"+action,{confirmed:true,overwrite_token:overwriteToken,...(useExistingMap?{use_existing_map:true}:{}),...(action==="stop"?{save,confirm_without_save:!save}:{})});

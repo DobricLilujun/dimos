@@ -70,6 +70,7 @@ from dimos.msgs.sensor_msgs.Image import Image
 from dimos.utils.logging_config import setup_logger
 from dimos.visualization.rerun.constants import RERUN_GRPC_PORT, RERUN_WEB_VIEWER_PORT
 from dimos.web.console.frontend import INDEX_HTML
+from dimos.web.console.profiles import DEFAULT_PROFILE, PROFILES, StackProfile
 from dimos.web.console.settings import register_runtime_routes
 
 if TYPE_CHECKING:
@@ -426,6 +427,10 @@ class RobotConsoleModule(Module):
         self._last_reply_id: str | None = None
 
     # -- lifecycle --------------------------------------------------------
+    def _profile(self) -> StackProfile:
+        """What the running (or selected) stack provides; the embedded console has it all."""
+        return self.runtime.profile if self.runtime is not None else PROFILES[DEFAULT_PROFILE]
+
     @property
     def mcp_url(self) -> str:
         return f"http://127.0.0.1:{self.config.mcp_port}/mcp"
@@ -855,11 +860,14 @@ class RobotConsoleModule(Module):
 
         @app.get("/api/config")
         def api_config() -> dict[str, Any]:
+            profile = self._profile()
             return {
                 "rerun_url": self.rerun_url,
                 "map_module": self.config.map_module,
                 "mcp_url": self.mcp_url,
-                "operations": [OPERATIONS[k].to_dict() for k in OPERATIONS],
+                "operations": [OPERATIONS[k].to_dict() for k in OPERATIONS if profile.allows(k)],
+                "profile": profile.to_dict(),
+                "profiles": [item.to_dict() for item in PROFILES.values()],
                 "standalone": self.runtime is not None,
                 "csrf_token": self._csrf_token,
             }
@@ -989,7 +997,8 @@ class RobotConsoleModule(Module):
 
         @app.get("/api/tools")
         def api_tools() -> list[dict[str, Any]]:
-            return [OPERATIONS[k].to_dict() for k in OPERATIONS]
+            profile = self._profile()
+            return [OPERATIONS[k].to_dict() for k in OPERATIONS if profile.allows(k)]
 
         @app.post("/api/action")
         async def api_action(payload: dict[str, Any]) -> dict[str, Any]:
@@ -997,6 +1006,11 @@ class RobotConsoleModule(Module):
             args = payload.get("args") or {}
             if not isinstance(key, str) or key not in OPERATIONS:
                 return {"ok": False, "error": f"unknown operation: {key!r}"}
+            if not self._profile().allows(key):
+                return {
+                    "ok": False,
+                    "error": f"{OPERATIONS[key].label or key} is not available in this stack",
+                }
             if self.runtime is not None and not self.runtime.ready:
                 return {"ok": False, "error": "Robot stack is not ready"}
             if OPERATIONS[key].human_only and payload.get("confirmed") is not True:
@@ -1019,6 +1033,8 @@ class RobotConsoleModule(Module):
             text = value.strip()
             if not text:
                 return {"ok": False, "error": "empty message"}
+            if not self._profile().has_agent:
+                return {"ok": False, "error": "This stack has no agent to chat with"}
             if self.runtime is not None and not self.runtime.ready:
                 return {"ok": False, "error": "Robot stack is not ready"}
             try:
@@ -1045,6 +1061,8 @@ class RobotConsoleModule(Module):
         async def api_diagnostics() -> dict[str, Any]:
             if self.runtime is not None and not self.runtime.ready:
                 return {"ok": False, "error": "Robot stack is not ready"}
+            if not self._profile().has_agent:
+                return {"ok": False, "error": "This stack has no MCP server"}
             results = await asyncio.gather(
                 self._call_mcp(Operation("server_status", "", "mcp", ""), {}),
                 self._call_mcp(Operation("list_modules", "", "mcp", ""), {}),
@@ -1186,6 +1204,18 @@ class RobotConsoleModule(Module):
                         fusion_status=None,
                         exploration_status=None,
                     )
+                    return dict(self._status)
+                if not self._profile().has_map:
+                    # No persistent map to probe, and no alignment gate on navigation.
+                    self._status.update(
+                        timestamp=time.time(),
+                        navigation_ready=True,
+                        alignment_status=None,
+                        alignment_details=None,
+                        fusion_status=None,
+                        exploration_status=None,
+                    )
+                    self._emit({"type": "status", **self._status})
                     return dict(self._status)
             status = await self._run_blocking(
                 _status_probe, self.rpc, self.config.map_module, self._status

@@ -16,6 +16,54 @@ Two ways to run it:
 
 > **Do not start both consoles at once.**
 
+## Choosing a stack and a connection
+
+The standalone console's **Robot stack** panel has a **Blueprint** and a
+**Connection** selector. Both are locked while a stack runs. (The embedded
+console always runs the persistent stack.)
+
+| Blueprint | Map | Agent chat | Connections | What the console shows |
+|---|---|---|---|---|
+| **Persistent map + agent** (default) | yes | yes | real robot, replay, simulation | Everything on this page. |
+| **Go2** (`unitree-go2`) | no | no | real robot, replay, simulation | Camera, 3D view, keyboard control, logs, and Stop. Click goals in the 3D view. |
+| **Dynamic goal (demo)** (`demo-unitree-go2-dynamic-goal`) | no | no | simulation | The same as Go2; the planner's goal follows a person walking a loop. |
+| **Person following + agent (demo)** (`demo-unitree-go2-agentic-person-following`) | no | yes | simulation | The chat, and the tag / query / navigate buttons that work without a map. The person skills are used through chat (see [person tagging, navigation & following](person-following.md)). |
+
+How the selectors behave:
+
+- A connection a blueprint cannot use is greyed out. Choosing a simulation-only
+  demo switches **Connection** to **MuJoCo simulation** for you.
+- The Settings dialog's **Replay** checkbox and the **Connection** selector are the
+  same choice. If both are changed, replay wins.
+- A stack **without a map** has no Map mode, no Alignment panel and nothing to
+  save, so the stop button reads **Stop**. It is ready as soon as its blueprint
+  reports that it has started.
+- A stack **without an agent** has its chat input disabled and no **MCP tools and
+  modules** button, because it runs no MCP server. Any operation the stack lacks
+  is also refused by the server, not only hidden in the page.
+
+### MuJoCo simulation
+
+**MuJoCo simulation** starts the simulator instead of a robot:
+
+- The simulator opens its **own window on this computer**, so it needs a display.
+  The console's camera and 3D views are fed from the same streams as with a real
+  robot. The Robot IP is not used.
+- With the **Persistent map + agent** blueprint the map is always **New**: Map mode
+  is hidden, and each start builds a fresh map in its own folder
+  `~/.config/dimos/sim-scenes/<date>-<time>-<id>/`. There is no overwrite prompt,
+  your real scene directory is never touched, and the newest five simulated scenes
+  are kept (older ones are deleted; nothing outside that folder is).
+- Restoring a saved map in simulation is not offered: the saved maps come from a
+  real lidar.
+- The Go2 speaker and Puppy microphone need a real Go2; switching them on in
+  simulation reports that clearly.
+
+> **Status.** Every launch command is checked against its real blueprint in the
+> tests, and the Go2 and persistent stacks have been run through the console on
+> replay data. Starting each stack in MuJoCo from the console, with the selectors,
+> readiness, keyboard control and stop, was checked by hand on a display.
+
 ## The module
 
 `RobotConsoleModule` declares **no `In` / `Out` ports**, so it never competes
@@ -80,7 +128,7 @@ start):
 
 | Group | Configurable |
 |---|---|
-| **Connection** | Robot IP, Replay, replay dataset, on-board obstacle avoidance; read-only display of whether `.env` keys are configured |
+| **Connection** | Robot IP, Replay, replay dataset, on-board obstacle avoidance; read-only display of whether `.env` keys are configured. The blueprint and the real robot / replay / simulation choice are in the **Robot stack** panel (see [Choosing a stack and a connection](#choosing-a-stack-and-a-connection)). |
 | **Model services** | Agent API base URL, Agent model, VLM API URL, VLM model |
 | **Map** | Scene directory, manual/rotation capture, rotation speed/duration, PGO loop correction; **New / Restore** is chosen in the main Robot stack |
 | **Auto tagging** | Room tagging on/off, object tagging on/off, travel-distance threshold, segmenter |
@@ -109,7 +157,8 @@ next start.
 ### Map mode on start
 
 After saving, in the main **Robot stack → Map mode** choose **New map** or
-**Restore saved map**, then click **Start**. Changing a setting or mode while
+**Restore saved map**, then click **Start**. (Map mode applies to the persistent
+stack on a real robot or replay; a simulation always builds a new map.) Changing a setting or mode while
 running requires a normal stop first.
 
 - **Restore** keeps the same scene directory; choose Restore and start — there

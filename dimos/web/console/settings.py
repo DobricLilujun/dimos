@@ -19,10 +19,13 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 import ipaddress
 import math
 import os
 from pathlib import Path
+import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -36,7 +39,14 @@ import uuid
 from dotenv import dotenv_values
 from fastapi import FastAPI
 import psutil
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 import requests
 
 from dimos.constants import CONFIG_DIR
@@ -45,17 +55,32 @@ from dimos.core.run_registry import REGISTRY_DIR, RunEntry, is_pid_alive
 from dimos.mapping.relocalization.go2.fusion_gate import FusionGateConfig
 from dimos.utils.logging_config import setup_logger
 from dimos.visualization.rerun.constants import RERUN_GRPC_PORT, RERUN_WEB_VIEWER_PORT
+from dimos.web.console.profiles import (
+    DEFAULT_PROFILE,
+    PROFILES,
+    Connection,
+    StackProfile,
+)
 from dimos.web.console.prompts import CONSOLE_AGENT_PROMPT
 
 logger = setup_logger()
+
+# Logged by ModuleCoordinator.build once every module of a blueprint has started.
+STARTED_MARKER = "Blueprint started"
+# Simulated persistent-map sessions each get a fresh scene folder; keep the newest few.
+SIM_SCENES_KEPT = 5
+_SIM_SCENE_NAME = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{6}$")
 
 
 class ConsoleSettings(FusionGateConfig):
     model_config = ConfigDict(extra="forbid")
 
     auto_pause_fusion: bool = True
+    profile: str = DEFAULT_PROFILE
     robot_ip: str = "192.168.123.161"
     replay: bool = False
+    # Run the MuJoCo simulator instead of a robot (never together with replay).
+    simulation: bool = False
     replay_db: str = "go2_short"
     map_mode: Literal["new", "restore"] = "restore"
     scene_map_dir: str = "assets/scene_maps/sedan_office_persistent"
@@ -79,6 +104,30 @@ class ConsoleSettings(FusionGateConfig):
     mcp_port: int = Field(default=global_config.mcp_port, ge=1024, le=65535)
     rerun_web_port: int = Field(default=RERUN_WEB_VIEWER_PORT, ge=1024, le=65535)
     rerun_grpc_port: int = Field(default=RERUN_GRPC_PORT, ge=1024, le=65535)
+
+    @field_validator("profile")
+    @classmethod
+    def known_profile(cls, value: str) -> str:
+        if value not in PROFILES:
+            raise ValueError(f"Unknown stack: {value!r}; choose one of {sorted(PROFILES)}")
+        return value
+
+    @model_validator(mode="after")
+    def valid_connection(self) -> ConsoleSettings:
+        if self.replay and self.simulation:
+            raise ValueError("Replay and simulation cannot both be on")
+        profile = PROFILES[self.profile]
+        if self.connection not in profile.connections:
+            raise ValueError(f"{profile.label} cannot run with the {self.connection} connection")
+        return self
+
+    @property
+    def connection(self) -> Connection:
+        return "simulation" if self.simulation else "replay" if self.replay else "robot"
+
+    @property
+    def stack(self) -> StackProfile:
+        return PROFILES[self.profile]
 
     @field_validator("robot_ip")
     @classmethod
@@ -116,29 +165,68 @@ class ConsoleSettings(FusionGateConfig):
         return value
 
     def argv(self) -> list[str]:
-        scene = Path(self.scene_map_dir)
+        profile = self.stack
         args = [
             sys.executable,
             "-m",
             "dimos.cli.dimos",
             "run",
-            "unitree-go2-agentic-persistent-demo",
+            profile.blueprint,
+            *self._connection_args(),
+            *self._rerun_args(),
+        ]
+        if profile.has_agent:
+            args += self._agent_args()
+        if profile.key == "persistent":
+            args += self._persistent_args()
+        elif profile.key == "person-following":
+            args += self._person_following_args()
+        return args
+
+    def _connection_args(self) -> list[str]:
+        return [
             f"--robot-ip={self.robot_ip}",
             f"--replay={'true' if self.replay else 'false'}",
             f"--replay-db={self.replay_db}",
             f"--obstacle-avoidance={'true' if self.obstacle_avoidance else 'false'}",
+            *(["--simulation=mujoco"] if self.simulation else []),
+        ]
+
+    def _rerun_args(self) -> list[str]:
+        return [
+            "--rerunbridgemodule.rerun-web=true",
+            f"--rerunbridgemodule.web-port={self.rerun_web_port}",
+            f"--rerunbridgemodule.connect-url=rerun+http://127.0.0.1:{self.rerun_grpc_port}/proxy",
+        ]
+
+    def _agent_args(self) -> list[str]:
+        args = [
             f"--mcp-port={self.mcp_port}",
             f"--mcpclient.mcp-server-url=http://127.0.0.1:{self.mcp_port}/mcp",
             f"--mcpclient.model={self.agent_model}",
-            f"--mcpclient.system-prompt={CONSOLE_AGENT_PROMPT}",
+        ]
+        if self.stack.key == "persistent":
+            args.append(f"--mcpclient.system-prompt={CONSOLE_AGENT_PROMPT}")
+        return args
+
+    def _person_following_args(self) -> list[str]:
+        # The blueprint carries its own system prompt; only point its vision models at
+        # the configured service.
+        return [
+            f"--personnavigationskillcontainer.vlm-url={self.vlm_url}",
+            f"--personnavigationskillcontainer.vlm-model={self.vlm_model}",
+            f"--navigationskillcontainer.vlm-url={self.vlm_url}",
+            f"--navigationskillcontainer.vlm-model={self.vlm_model}",
+        ]
+
+    def _persistent_args(self) -> list[str]:
+        scene = Path(self.scene_map_dir)
+        args = [
             "--go2connection.puppy-enabled=true",
             f"--go2connection.puppy-noise-reduction={str(self.puppy_noise_reduction).lower()}",
             f"--persistentgo2planner.nearby-arrival-distance={self.nearby_arrival_distance}",
             f"--persistentgo2planner.robot-width={self.planner_robot_width}",
             f"--persistentgo2planner.navigation-speed-limit={self.navigation_speed_limit}",
-            "--rerunbridgemodule.rerun-web=true",
-            f"--rerunbridgemodule.web-port={self.rerun_web_port}",
-            f"--rerunbridgemodule.connect-url=rerun+http://127.0.0.1:{self.rerun_grpc_port}/proxy",
             f"--persistentgo2map.map-file={scene / 'map.pc2.lcm'}",
             f"--persistentgo2map.create-new={'true' if self.map_mode == 'new' else 'false'}",
             f"--persistentgo2map.manual-capture={'true' if self.map_mode == 'restore' and self.capture_mode == 'manual' else 'false'}",
@@ -197,6 +285,8 @@ class ConsoleRuntime:
         self._error: str | None = None
         self._overwrite_token: str | None = None
         self._overwrite_settings: ConsoleSettings | None = None
+        self._launch_profile: StackProfile | None = None
+        self._started_seen = False
         self._log_dir: Path | None = log_dir
         self._stack_log: TextIO | None = None
         if log_dir is not None:
@@ -215,9 +305,7 @@ class ConsoleRuntime:
             return
         try:
             self._log_dir.mkdir(parents=True, exist_ok=True)
-            self._stack_log = (self._log_dir / "stack.log").open(
-                "a", encoding="utf-8", buffering=1
-            )
+            self._stack_log = (self._log_dir / "stack.log").open("a", encoding="utf-8", buffering=1)
         except OSError:
             logger.warning("Could not open console stack log", log_dir=str(self._log_dir))
             self._stack_log = None
@@ -238,6 +326,19 @@ class ConsoleRuntime:
             except OSError:
                 pass
             self._stack_log = None
+
+    @property
+    def profile(self) -> StackProfile:
+        """The running stack's profile, or the selected one while stopped."""
+        with self._lock:
+            running = self._process is not None and self._process.poll() is None
+            if running and self._launch_profile is not None:
+                return self._launch_profile
+            return self.settings.stack
+
+    @property
+    def sim_scene_root(self) -> Path:
+        return self.settings_path.parent / "sim-scenes"
 
     @property
     def ready(self) -> bool:
@@ -268,6 +369,7 @@ class ConsoleRuntime:
                     for name in ("OPENAI_API_KEY", "UNITREE_AES_128_KEY")
                 },
                 "command": self.settings.argv()[3:],
+                "profiles": [profile.to_dict() for profile in PROFILES.values()],
             }
 
     def _read_env_keys(self) -> dict[str, str]:
@@ -333,11 +435,10 @@ class ConsoleRuntime:
                 raise ValueError(
                     "Another DimOS stack is running. Stop it in its own terminal before starting this console's stack."
                 )
-        for port in (
-            self.settings.mcp_port,
-            self.settings.rerun_web_port,
-            self.settings.rerun_grpc_port,
-        ):
+        ports = [self.settings.rerun_web_port, self.settings.rerun_grpc_port]
+        if self.settings.stack.has_agent:
+            ports.insert(0, self.settings.mcp_port)
+        for port in ports:
             with socket.socket() as probe:
                 try:
                     probe.bind(("127.0.0.1", port))
@@ -345,6 +446,23 @@ class ConsoleRuntime:
                     raise ValueError(
                         f"Port {port} is occupied; stop the existing stack or change Settings"
                     ) from exc
+
+    def _new_sim_scene(self) -> Path:
+        """A fresh, empty scene folder for one simulated session.
+
+        Simulated maps are throwaway, so each start gets its own folder (no overwrite
+        prompt, and the real scene is never touched) and only the newest few are kept.
+        """
+        root = self.sim_scene_root
+        root.mkdir(parents=True, exist_ok=True)
+        scene = root / f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
+        scene.mkdir()
+        old = sorted(
+            path for path in root.iterdir() if path.is_dir() and _SIM_SCENE_NAME.match(path.name)
+        )
+        for path in old[: max(0, len(old) - SIM_SCENES_KEPT)]:
+            shutil.rmtree(path, ignore_errors=True)
+        return scene
 
     def _scene_path(self) -> Path:
         scene = Path(self.settings.scene_map_dir)
@@ -360,12 +478,24 @@ class ConsoleRuntime:
 
     def prepare_start(self) -> dict[str, Any]:
         with self._lock:
+            if not self.settings.stack.has_map or self.settings.simulation:
+                # Nothing to overwrite: no map, or a fresh simulated scene is made at start.
+                self._overwrite_token = self._overwrite_settings = None
+                return {
+                    "ok": True,
+                    "confirm_new_map": False,
+                    "overwrite_required": False,
+                    "scene_directory": None,
+                    "overwrite_token": None,
+                    "restore_available": False,
+                }
             scene = self._scene_path()
             overwrite = self.settings.map_mode == "new" and scene.exists() and any(scene.iterdir())
             self._overwrite_token = uuid.uuid4().hex if overwrite else None
             self._overwrite_settings = self.settings.model_copy(deep=True) if overwrite else None
             return {
                 "ok": True,
+                "confirm_new_map": self.settings.map_mode == "new",
                 "overwrite_required": overwrite,
                 "scene_directory": str(scene),
                 "overwrite_token": self._overwrite_token,
@@ -381,26 +511,38 @@ class ConsoleRuntime:
             self._ports_available()
             if not self.project_dir.is_dir():
                 raise ValueError("Project directory does not exist")
-            scene = self._scene_path()
-            map_path = scene / "map.pc2.lcm"
-            launch_settings = (
-                self.settings.model_copy(update={"map_mode": "restore"})
-                if use_existing_map
-                else self.settings
-            )
-            overwrite = (
-                launch_settings.map_mode == "new" and scene.exists() and any(scene.iterdir())
-            )
-            if overwrite and (
-                not overwrite_token
-                or overwrite_token != self._overwrite_token
-                or self.settings != self._overwrite_settings
-            ):
-                raise ValueError(
-                    "Existing scene requires overwrite confirmation. Click Start again."
+            profile = self.settings.stack
+            launch_settings = self.settings
+            scene: Path | None = None
+            map_path: Path | None = None
+            overwrite = False
+            if profile.has_map and self.settings.simulation:
+                # A simulated session always builds a new map in its own fresh folder.
+                scene = self._new_sim_scene()
+                launch_settings = self.settings.model_copy(
+                    update={"map_mode": "new", "scene_map_dir": str(scene)}
                 )
-            if launch_settings.map_mode == "restore" and not map_path.is_file():
-                raise ValueError("Saved map does not exist; select New map for the first run")
+            elif profile.has_map:
+                scene = self._scene_path()
+                map_path = scene / "map.pc2.lcm"
+                launch_settings = (
+                    self.settings.model_copy(update={"map_mode": "restore"})
+                    if use_existing_map
+                    else self.settings
+                )
+                overwrite = (
+                    launch_settings.map_mode == "new" and scene.exists() and any(scene.iterdir())
+                )
+                if overwrite and (
+                    not overwrite_token
+                    or overwrite_token != self._overwrite_token
+                    or self.settings != self._overwrite_settings
+                ):
+                    raise ValueError(
+                        "Existing scene requires overwrite confirmation. Click Start again."
+                    )
+                if launch_settings.map_mode == "restore" and not map_path.is_file():
+                    raise ValueError("Saved map does not exist; select New map for the first run")
             env = os.environ.copy()
             self._secrets = self._read_env_keys()
             for name in ("OPENAI_API_KEY", "UNITREE_AES_128_KEY"):
@@ -414,10 +556,13 @@ class ConsoleRuntime:
             self._lines.clear()
             backup = None
             if overwrite:
+                assert scene is not None
                 backup = scene.with_name(f"{scene.name}.backup-{uuid.uuid4().hex}")
                 scene.rename(backup)
                 self._overwrite_token = None
                 self._overwrite_settings = None
+            self._launch_profile = profile
+            self._started_seen = False
             try:
                 self._process = subprocess.Popen(
                     launch_settings.argv(),
@@ -430,6 +575,7 @@ class ConsoleRuntime:
                 )
             except OSError:
                 if backup is not None:
+                    assert scene is not None
                     backup.rename(scene)
                 raise
             if backup is not None:
@@ -442,12 +588,18 @@ class ConsoleRuntime:
                 message = f"Using existing map at {map_path}; Restore alignment is required."
                 self._lines.append(message)
                 self.on_event({"type": "stack_log", "text": message})
+            if profile.has_map and self.settings.simulation:
+                message = f"Simulated session: building a new map in {scene}"
+                self._lines.append(message)
+                self.on_event({"type": "stack_log", "text": message})
             self._state, self._error = "starting", None
             logger.info(
                 "Console started robot stack",
                 pid=self._process.pid,
-                map_mode=launch_settings.map_mode,
-                scene=str(scene),
+                profile=profile.key,
+                connection=self.settings.connection,
+                map_mode=launch_settings.map_mode if profile.has_map else None,
+                scene=str(scene) if scene is not None else None,
                 log_dir=str(self._log_dir),
             )
             self._monitor = threading.Thread(
@@ -466,6 +618,14 @@ class ConsoleRuntime:
         try:
             while process.poll() is None and not self._halt.wait(0.5):
                 if self._state == "starting":
+                    profile = self._launch_profile
+                    if profile is not None and not profile.ready_tools:
+                        if self._started_seen:
+                            with self._lock:
+                                if self._state == "starting":
+                                    self._state = "running"
+                        continue
+                    required = profile.ready_tools if profile is not None else frozenset()
                     try:
                         response = requests.post(
                             f"http://127.0.0.1:{self.settings.mcp_port}/mcp",
@@ -480,7 +640,7 @@ class ConsoleRuntime:
                         if not isinstance(tools, list):
                             raise ValueError("MCP tool list is invalid")
                         names = {tool["name"] for tool in tools if isinstance(tool, dict)}
-                        if {"tag_object", "query_memory_tags", "stop_navigation"} <= names:
+                        if required <= names:
                             with self._lock:
                                 if self._state == "starting":
                                     self._state = "running"
@@ -496,6 +656,8 @@ class ConsoleRuntime:
         assert process.stdout is not None
         for line in process.stdout:
             safe = self._redact(line.rstrip())
+            if STARTED_MARKER in safe:
+                self._started_seen = True
             with self._lock:
                 self._lines.append(safe)
                 self._append_stack_log(safe)
@@ -674,7 +836,11 @@ def register_runtime_routes(
                     )
                     shutdown_result = None
                 else:
-                    if prepare_shutdown is not None and runtime.status().get("pid"):
+                    if (
+                        prepare_shutdown is not None
+                        and runtime.profile.has_map
+                        and runtime.status().get("pid")
+                    ):
                         if shutdown_result is None:
                             acknowledgement = await prepare_shutdown(save)
                             if not acknowledgement.get("ok"):
