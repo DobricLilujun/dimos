@@ -105,3 +105,6 @@ site/
 # Optuna study store, written by the relocalization eval (see lidar/eval.md)
 optuna.db
 assets/scene_maps/
+
+# MuJoCo writes this log into the working directory
+MUJOCO_LOG.TXT
