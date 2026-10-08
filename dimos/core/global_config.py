@@ -117,6 +117,9 @@ class GlobalConfig(BaseSettings):
     # Add a second, differently dressed person (body "person2", poses on
     # /person2_pose) to the MuJoCo scene.
     mujoco_second_person: bool = False
+    # How far the simulated lidar sees, in metres; None keeps the default (3 m). The
+    # people in the person-following demo stand 3-6 m from the robot's start.
+    mujoco_lidar_max_range: float | None = None
     # Shadow-mapping the office scene costs ~4x per offscreen render on
     # integrated GPUs (e.g. Apple Silicon), dropping the sim below realtime.
     # "auto" keeps shadows and turns them off if the sim falls behind realtime.

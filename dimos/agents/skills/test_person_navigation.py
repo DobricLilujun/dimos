@@ -24,6 +24,7 @@ import pytest
 
 from dimos.agents.skills.person_navigation import (
     PersonNavigationSkillContainer,
+    _Miss,
     _parse_bbox,
     _Sighting,
 )
@@ -182,12 +183,26 @@ def test_tag_person_reports_when_nobody_matches(make_rig) -> None:  # type: igno
     assert rig.tags == []
 
 
-def test_a_person_without_lidar_depth_is_not_tagged(make_rig) -> None:  # type: ignore[no-untyped-def]
+def test_a_person_without_lidar_depth_is_not_tagged_and_the_reason_is_given(make_rig) -> None:  # type: ignore[no-untyped-def]
     rig = make_rig()
     rig.memory.locate_in_observation.return_value = None
 
-    assert "No person matching" in rig.module.tag_person(WHITE)
+    result = rig.module.tag_person(WHITE)
+
+    assert "too far away for the lidar" in result
+    assert "move_to" in result
+    assert "No person matching" not in result
     assert rig.tags == []
+
+
+def test_a_person_who_is_not_visible_is_reported_as_such(make_rig) -> None:  # type: ignore[no-untyped-def]
+    rig = make_rig()
+    rig.vlm.query.return_value = _person_json(None)
+
+    result = rig.module.tag_person(WHITE)
+
+    assert "No person matching" in result
+    assert "too far" not in result
 
 
 def test_describe_visible_people_lists_everyone_with_positions(make_rig) -> None:  # type: ignore[no-untyped-def]
@@ -265,6 +280,27 @@ def test_navigate_to_person_without_sighting_or_tag_says_so(make_rig) -> None:  
     rig.navigation.set_goal.assert_not_called()
 
 
+def test_navigate_to_person_seen_but_without_depth_asks_to_move_closer(make_rig) -> None:  # type: ignore[no-untyped-def]
+    rig = make_rig()
+    rig.memory.locate_in_observation.return_value = None
+
+    result = rig.module.navigate_to_person(WHITE)
+
+    assert "too far away for the lidar" in result
+    rig.navigation.set_goal.assert_not_called()
+
+
+def test_follow_skill_seen_but_without_depth_asks_to_move_closer(make_rig) -> None:  # type: ignore[no-untyped-def]
+    rig = make_rig()
+    rig.memory.locate_in_observation.return_value = None
+
+    result = rig.module.follow_person_with_planner(WHITE)
+
+    assert "too far away for the lidar" in result
+    rig.tracker.start_tracking.assert_not_called()
+    rig.module.stop_tool.assert_called_once_with("follow_person_with_planner")
+
+
 def test_navigation_refusal_is_reported(make_rig) -> None:  # type: ignore[no-untyped-def]
     rig = make_rig()
     rig.navigation.set_goal.return_value = False
@@ -293,7 +329,7 @@ def _drive_follow_loop(rig: Rig, sightings: list[bool], mocker) -> None:  # type
     """Run the follow loop once per entry: True = person found, False = not found."""
     stop = Event()
     _stop_after(stop, len(sightings), mocker)
-    results = iter([_sighting(rig) if found else None for found in sightings])
+    results = iter([_sighting(rig) if found else _Miss(False) for found in sightings])
     mocker.patch.object(rig.module, "_find_person", side_effect=lambda _d: next(results))
     rig.module._follow_loop(WHITE, stop)
 
@@ -318,6 +354,18 @@ def test_follow_loop_gives_up_after_consecutive_misses(make_rig, mocker) -> None
     update = rig.module.tool_update.call_args.args[1]
     assert "lost sight" in update
     rig.tracker.stop_tracking.assert_called_once()
+
+
+def test_follow_loop_counts_a_person_seen_without_depth_as_a_miss(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
+    rig = make_rig(max_missed_looks=2)
+    stop = Event()
+    _stop_after(stop, 5, mocker)
+    mocker.patch.object(rig.module, "_find_person", return_value=_Miss(seen_without_depth=True))
+
+    rig.module._follow_loop(WHITE, stop)
+
+    rig.tracker.update_target.assert_not_called()
+    assert "lost sight" in rig.module.tool_update.call_args.args[1]
 
 
 def test_a_found_person_resets_the_miss_count(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]

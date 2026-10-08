@@ -105,6 +105,12 @@ class _Sighting(NamedTuple):
     description: str
 
 
+class _Miss(NamedTuple):
+    """No usable sighting; ``seen_without_depth`` means the VLM found them but lidar did not."""
+
+    seen_without_depth: bool
+
+
 class PersonNavigationSkillContainer(Module):
     config: PersonNavigationConfig
 
@@ -186,8 +192,8 @@ class PersonNavigationSkillContainer(Module):
             description: How to recognise the person, e.g. "white t-shirt".
         """
         sighting = self._find_person(description)
-        if sighting is None:
-            return self._not_found_message(description)
+        if isinstance(sighting, _Miss):
+            return self._not_found_message(description, sighting)
         tag_id = self._remember(sighting)
         x, y, _ = sighting.position
         return (
@@ -208,14 +214,14 @@ class PersonNavigationSkillContainer(Module):
             description: How to recognise the person, e.g. "white t-shirt".
         """
         sighting = self._find_person(description)
-        if sighting is not None:
+        if not isinstance(sighting, _Miss):
             self._remember(sighting)
             x, y, z = sighting.position
             note = "Seen just now"
         else:
             tag = self._latest_person_tag(description)
             if tag is None:
-                return self._not_found_message(description)
+                return self._not_found_message(description, sighting)
             x, y, z = tag.position
             note = (
                 f"Not visible; going to where they were last seen {time.time() - tag.timestamp:.0f}"
@@ -250,8 +256,8 @@ class PersonNavigationSkillContainer(Module):
         launched = False
         try:
             sighting = self._find_person(description)
-            if sighting is None:
-                return self._not_found_message(description)
+            if isinstance(sighting, _Miss):
+                return self._not_found_message(description, sighting)
             self._goal_tracker.start_tracking()
             self._goal_tracker.update_target(sighting.position[0], sighting.position[1])
             if self.config.refresh_tag_while_following:
@@ -290,10 +296,10 @@ class PersonNavigationSkillContainer(Module):
                 sighting = self._find_person(description)
             except Exception:
                 logger.exception("Person lookup failed while following", description=description)
-                sighting = None
+                sighting = _Miss(False)
             if stop_event.is_set():
                 break
-            if sighting is None:
+            if isinstance(sighting, _Miss):
                 missed += 1
                 if missed >= self.config.max_missed_looks:
                     reason = f"it lost sight of the person '{description}'"
@@ -317,19 +323,19 @@ class PersonNavigationSkillContainer(Module):
         if thread is not None:
             thread.join(DEFAULT_THREAD_JOIN_TIMEOUT)
 
-    def _find_person(self, description: str) -> _Sighting | None:
+    def _find_person(self, description: str) -> _Sighting | _Miss:
         image, context = self._spatial_memory.capture_object_observation()
         response = self._vl_model.query(image, _FIND_PERSON_PROMPT.format(description=description))
         parsed = extract_json_from_llm_response(response)
         bbox = _parse_bbox(parsed.get("bbox") if isinstance(parsed, dict) else None)
         if bbox is None:
-            return None
+            return _Miss(seen_without_depth=False)
         estimate = self._spatial_memory.locate_in_observation(
             f"person {description}", bbox, image, context
         )
         if estimate is None:
             logger.warning("Person found but has no valid lidar depth", description=description)
-            return None
+            return _Miss(seen_without_depth=True)
         x, y, z = estimate["position"]
         return _Sighting((x, y, z), bbox, image, description)
 
@@ -382,10 +388,16 @@ class PersonNavigationSkillContainer(Module):
         return policy.next_goal(person, odom.position, time.monotonic())
 
     @staticmethod
-    def _not_found_message(description: str) -> str:
+    def _not_found_message(description: str, miss: _Miss) -> str:
+        if miss.seen_without_depth:
+            return (
+                f"A person matching '{description}' is visible, but too far away for the lidar "
+                "to measure where they are. Move closer to them (move_to with relative=True, "
+                "x forward) and try again."
+            )
         return (
-            f"No person matching '{description}' is visible with valid lidar depth. "
-            "Call describe_visible_people to see who is in view, or turn the robot and retry."
+            f"No person matching '{description}' is visible. Call describe_visible_people to "
+            "see who is in view, or turn the robot and retry."
         )
 
 

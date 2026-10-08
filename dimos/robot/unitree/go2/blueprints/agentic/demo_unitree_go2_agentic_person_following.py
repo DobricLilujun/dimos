@@ -55,5 +55,7 @@ demo_unitree_go2_agentic_person_following = (
         robot_model="unitree_go2",
         mujoco_start_pos="-6.18 0.96",
         mujoco_second_person=True,
+        # People stand 3-6 m away at the start; the default 3 m lidar would not see them.
+        mujoco_lidar_max_range=8.0,
     )
 )

@@ -33,6 +33,7 @@ from dimos.simulation.mujoco.constants import (
     DEPTH_CAMERA_FOV,
     LIDAR_FPS,
     LIDAR_RESOLUTION,
+    MAX_RANGE,
     VIDEO_FPS,
     VIDEO_HEIGHT,
     VIDEO_WIDTH,
@@ -181,6 +182,7 @@ def _run_simulation(config: GlobalConfig, shm: ShmReader) -> None:
         last_lidar_time = 0.0
         video_interval = 1.0 / VIDEO_FPS
         lidar_interval = 1.0 / LIDAR_FPS
+        lidar_max_range = config.mujoco_lidar_max_range or MAX_RANGE
 
         m_viewer.cam.lookat = config.mujoco_camera_position_float[0:3]
         m_viewer.cam.distance = config.mujoco_camera_position_float[3]
@@ -253,7 +255,11 @@ def _run_simulation(config: GlobalConfig, shm: ShmReader) -> None:
 
                 for depth_image, camera_pos, camera_mat in cameras_data:
                     points = depth_image_to_point_cloud(
-                        depth_image, camera_pos, camera_mat, fov_degrees=DEPTH_CAMERA_FOV
+                        depth_image,
+                        camera_pos,
+                        camera_mat,
+                        fov_degrees=DEPTH_CAMERA_FOV,
+                        max_range=lidar_max_range,
                     )
                     if points.size > 0:
                         all_points.append(points)
