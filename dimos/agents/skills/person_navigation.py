@@ -37,10 +37,11 @@ from dimos.agents.capabilities import CAP_MOVEMENT
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
-from dimos.core.stream import In
+from dimos.core.stream import In, Out
 from dimos.models.vl.base import VlModel
 from dimos.models.vl.openai import OpenAIVlModel
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.navigation.go2.replanning_a_star.goal_tracker import GoalUpdatePolicy
@@ -55,6 +56,16 @@ logger = setup_logger()
 
 PERSON_TAG_KIND = "person"
 _FOLLOW_TOOL = "follow_person_with_planner"
+
+# Searching for a lost person: turning on the spot, closed loop on odometry yaw.
+_TURN_TICK_S = 0.1
+_TURN_TOLERANCE_RAD = math.radians(6)
+_TURN_MIN_SPEED_RAD_S = 0.25
+_TURN_GAIN = 1.5
+# Time for the robot to stop swaying before a camera frame is taken.
+_SETTLE_S = 0.4
+# Only turn toward where the person was last seen if that is clearly off to one side.
+_FACE_LAST_SEEN_MIN_RAD = math.radians(20)
 
 _FIND_PERSON_PROMPT = (
     "Look at this image and find the one person who matches this description: "
@@ -78,7 +89,7 @@ PERSON_NAVIGATION_PROMPT = """
 
 ## People
 - To go to or follow a person, identify them by what they wear. If several people could match, or you are unsure who is in view, call `describe_visible_people` first and use a description that tells them apart.
-- `follow_person_with_planner(description)` follows one person and re-plans around obstacles as they move. It ignores other people. Stop it with `stop_following_person`.
+- `follow_person_with_planner(description)` follows one person and re-plans around obstacles as they move. It ignores other people. If it loses them it turns on the spot to look for them before giving up. Stop it with `stop_following_person`.
 - `navigate_to_person(description)` walks to where a person is right now, once. `tag_person(description)` remembers where they were seen; people move, so a person tag is only a last-seen position.
 - If a person cannot be found, say so and ask what to do, or turn and look again. Never invent a position for a person.
 """
@@ -90,8 +101,16 @@ class PersonNavigationConfig(ModuleConfig):
     vlm_url: str | None = None
     # Time between looks while following. A look takes as long as the model call.
     follow_interval_s: float = Field(default=1.5, gt=0.0, allow_inf_nan=False)
-    # Consecutive looks without finding the person before following gives up.
+    # Consecutive looks without finding the person before following gives up. Only used
+    # when searching is off (search_step_deg = 0); otherwise a full search comes first.
     max_missed_looks: int = Field(default=4, ge=1)
+    # A lost person is searched for by turning on the spot in steps of this many degrees,
+    # looking after each step, until a full revolution has found nobody. 0 turns searching
+    # off. Keep it well under the camera's horizontal field of view so views overlap.
+    search_step_deg: float = Field(default=60.0, ge=0.0, le=120.0, allow_inf_nan=False)
+    # Consecutive looks without finding the person before the search starts.
+    search_after_missed_looks: int = Field(default=2, ge=1)
+    search_turn_speed_rad_s: float = Field(default=0.6, gt=0.0, le=1.0, allow_inf_nan=False)
     # Distance at which navigate_to_person stops short of the person.
     approach_distance_m: float = Field(default=0.5, ge=0.0, allow_inf_nan=False)
     # Keep the person's tag at their latest seen position while following.
@@ -115,6 +134,8 @@ class PersonNavigationSkillContainer(Module):
     config: PersonNavigationConfig
 
     odom: In[PoseStamped]
+    # Only used to turn on the spot while searching; the planner drives the robot otherwise.
+    cmd_vel: Out[Twist]
 
     _spatial_memory: PersonMemorySpec
     _navigation: NavigationInterfaceSpec
@@ -243,8 +264,9 @@ class PersonNavigationSkillContainer(Module):
 
         Finds the person, then keeps looking for them about every second and a half and
         re-plans whenever they have moved about half a metre, stopping close behind them.
-        It re-identifies them by appearance each time, so it ignores other people. Gives up
-        after several looks without seeing them. Stop it with stop_following_person.
+        It re-identifies them by appearance each time, so it ignores other people. If it
+        loses them it turns on the spot to look for them, and gives up only after a full
+        turn finds nobody. Stop it with stop_following_person.
 
         Args:
             description: How to recognise the person, e.g. "white t-shirt".
@@ -267,7 +289,7 @@ class PersonNavigationSkillContainer(Module):
                 self._stop_following = stop_event
                 self._follow_thread = Thread(
                     target=self._follow_loop,
-                    args=(description, stop_event),
+                    args=(description, stop_event, sighting.position[:2]),
                     name="PersonFollowLoop",
                     daemon=True,
                 )
@@ -288,31 +310,135 @@ class PersonNavigationSkillContainer(Module):
         self._goal_tracker.stop_tracking()
         return "Stopped following."
 
-    def _follow_loop(self, description: str, stop_event: Event) -> None:
+    def _follow_loop(
+        self,
+        description: str,
+        stop_event: Event,
+        last_position: tuple[float, float] | None = None,
+    ) -> None:
         missed = 0
         reason = "it was requested to stop following"
+        searching = self.config.search_step_deg > 0
         while not stop_event.wait(self.config.follow_interval_s):
-            try:
-                sighting = self._find_person(description)
-            except Exception:
-                logger.exception("Person lookup failed while following", description=description)
-                sighting = _Miss(False)
+            sighting = self._look(description)
             if stop_event.is_set():
                 break
             if isinstance(sighting, _Miss):
                 missed += 1
-                if missed >= self.config.max_missed_looks:
+                if searching and missed >= self.config.search_after_missed_looks:
+                    sighting = self._search_for_person(description, stop_event, last_position)
+                    if stop_event.is_set():
+                        break
+                    if isinstance(sighting, _Miss):
+                        reason = (
+                            f"it lost sight of the person '{description}' and did not find "
+                            "them after turning all the way around"
+                        )
+                        break
+                    self._goal_tracker.start_tracking()
+                    self.tool_update(
+                        _FOLLOW_TOOL, f"Found the person '{description}' again. Following them."
+                    )
+                elif not searching and missed >= self.config.max_missed_looks:
                     reason = f"it lost sight of the person '{description}'"
                     break
-                continue
+                else:
+                    continue
             missed = 0
-            self._goal_tracker.update_target(sighting.position[0], sighting.position[1])
+            last_position = (sighting.position[0], sighting.position[1])
+            self._goal_tracker.update_target(*last_position)
             if self.config.refresh_tag_while_following:
                 self._remember(sighting)
         self._goal_tracker.stop_tracking()
         self.tool_update(_FOLLOW_TOOL, f"Person follow stopped. Reason: {reason}.")
         self.stop_tool(_FOLLOW_TOOL)
         logger.info("Person follow stopped", description=description, reason=reason)
+
+    def _look(self, description: str) -> _Sighting | _Miss:
+        try:
+            return self._find_person(description)
+        except Exception:
+            logger.exception("Person lookup failed while following", description=description)
+            return _Miss(seen_without_depth=False)
+
+    def _search_for_person(
+        self, description: str, stop_event: Event, last_position: tuple[float, float] | None
+    ) -> _Sighting | _Miss:
+        """Stop, then turn on the spot looking for the person until a full revolution is done.
+
+        Starts by facing where they were last seen, and keeps turning toward that side.
+        """
+        self._goal_tracker.stop_tracking()
+        self.tool_update(
+            _FOLLOW_TOOL,
+            f"Lost sight of the person '{description}'. Turning on the spot to look for them.",
+        )
+        logger.info("Searching for lost person", description=description)
+        step = math.radians(self.config.search_step_deg)
+        direction = 1.0
+        try:
+            if last_position is not None:
+                bearing = self._bearing_to(last_position)
+                if abs(bearing) >= _FACE_LAST_SEEN_MIN_RAD:
+                    direction = math.copysign(1.0, bearing)
+                    self._turn_by(bearing, stop_event)
+            result = self._look(description)
+            # Aim at absolute headings so each step's small shortfall does not add up.
+            first_heading = self._yaw()
+            for index in range(1, math.ceil(2 * math.pi / step) + 1):
+                if not isinstance(result, _Miss) or stop_event.is_set():
+                    break
+                self._turn_to(_wrap_angle(first_heading + direction * step * index), stop_event)
+                if stop_event.is_set():
+                    break
+                result = self._look(description)
+            return result
+        except Exception:
+            logger.exception("Search for the person failed", description=description)
+            return _Miss(seen_without_depth=False)
+        finally:
+            self._stop_turning()
+
+    def _turn_by(self, delta_rad: float, stop_event: Event) -> None:
+        """Turn on the spot by ``delta_rad``, left positive."""
+        self._turn_to(_wrap_angle(self._yaw() + delta_rad), stop_event)
+
+    def _turn_to(self, target: float, stop_event: Event) -> None:
+        """Turn on the spot to the heading ``target``, then wait for the robot to settle."""
+        max_speed = self.config.search_turn_speed_rad_s
+        # Generous: the robot should manage half the commanded speed, plus a margin.
+        distance = abs(_wrap_angle(target - self._yaw()))
+        deadline = time.monotonic() + distance / (0.5 * max_speed) + 2.0
+        try:
+            while not stop_event.is_set() and time.monotonic() < deadline:
+                error = _wrap_angle(target - self._yaw())
+                if abs(error) < _TURN_TOLERANCE_RAD:
+                    break
+                speed = min(max_speed, max(_TURN_MIN_SPEED_RAD_S, _TURN_GAIN * abs(error)))
+                self.cmd_vel.publish(Twist(angular=Vector3(0.0, 0.0, math.copysign(speed, error))))
+                stop_event.wait(_TURN_TICK_S)
+        finally:
+            self._stop_turning()
+        stop_event.wait(_SETTLE_S)
+
+    def _stop_turning(self) -> None:
+        self.cmd_vel.publish(Twist())
+
+    def _yaw(self) -> float:
+        with self._lock:
+            odom = self._latest_odom
+        if odom is None:
+            raise RuntimeError("No odometry yet; cannot turn on the spot")
+        return float(odom.orientation.euler.z)
+
+    def _bearing_to(self, position: tuple[float, float]) -> float:
+        """Angle from the robot's heading to ``position``, left positive."""
+        with self._lock:
+            odom = self._latest_odom
+        if odom is None:
+            raise RuntimeError("No odometry yet; cannot turn on the spot")
+        heading = math.atan2(position[1] - odom.position.y, position[0] - odom.position.x)
+        return _wrap_angle(heading - float(odom.orientation.euler.z))
 
     def _halt_following(self) -> None:
         with self._lock:
@@ -399,6 +525,10 @@ class PersonNavigationSkillContainer(Module):
             f"No person matching '{description}' is visible. Call describe_visible_people to "
             "see who is in view, or turn the robot and retry."
         )
+
+
+def _wrap_angle(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))
 
 
 def _tag_name(description: str) -> str:

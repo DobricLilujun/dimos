@@ -15,6 +15,7 @@
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 import json
+import math
 from threading import Event
 import time
 from typing import Any
@@ -29,6 +30,8 @@ from dimos.agents.skills.person_navigation import (
     _Sighting,
 )
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.types.robot_location import RobotLocation
@@ -48,11 +51,13 @@ class Rig:
     navigation: Any
     tracker: Any
     tags: list[RobotLocation]
+    twists: list[Twist]
 
 
 @pytest.fixture
 def make_rig(mocker) -> Generator[Callable[..., Rig], None, None]:  # type: ignore[no-untyped-def]
     modules: list[PersonNavigationSkillContainer] = []
+    unsubscribes: list[Callable[[], None]] = []
 
     def make(**config: Any) -> Rig:
         module = PersonNavigationSkillContainer(**config)
@@ -91,14 +96,18 @@ def make_rig(mocker) -> Generator[Callable[..., Rig], None, None]:  # type: igno
         module._navigation.set_goal.return_value = True
         module._goal_tracker = mocker.Mock()
         module._on_odom(PoseStamped(frame_id="world", position=Vector3(0.0, 0.0, 0.0)))
+        twists: list[Twist] = []
+        unsubscribes.append(module.cmd_vel.subscribe(twists.append))
         # Tool streams only exist inside a running McpServer call.
         mocker.patch.object(module, "start_tool")
         mocker.patch.object(module, "tool_update")
         mocker.patch.object(module, "stop_tool")
-        return Rig(module, vlm, memory, module._navigation, module._goal_tracker, tags)
+        return Rig(module, vlm, memory, module._navigation, module._goal_tracker, tags, twists)
 
     yield make
 
+    for unsubscribe in unsubscribes:
+        unsubscribe()
     for module in modules:
         module._halt_following()
         module._close_module()
@@ -335,7 +344,7 @@ def _drive_follow_loop(rig: Rig, sightings: list[bool], mocker) -> None:  # type
 
 
 def test_follow_loop_feeds_each_sighting_to_the_goal_tracker(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
-    rig = make_rig(max_missed_looks=2)
+    rig = make_rig(max_missed_looks=2, search_step_deg=0.0)
 
     _drive_follow_loop(rig, [True, True], mocker)
 
@@ -346,7 +355,7 @@ def test_follow_loop_feeds_each_sighting_to_the_goal_tracker(make_rig, mocker) -
 
 
 def test_follow_loop_gives_up_after_consecutive_misses(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
-    rig = make_rig(max_missed_looks=3)
+    rig = make_rig(max_missed_looks=3, search_step_deg=0.0)
 
     _drive_follow_loop(rig, [True, False, False, False, True], mocker)
 
@@ -357,7 +366,7 @@ def test_follow_loop_gives_up_after_consecutive_misses(make_rig, mocker) -> None
 
 
 def test_follow_loop_counts_a_person_seen_without_depth_as_a_miss(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
-    rig = make_rig(max_missed_looks=2)
+    rig = make_rig(max_missed_looks=2, search_step_deg=0.0)
     stop = Event()
     _stop_after(stop, 5, mocker)
     mocker.patch.object(rig.module, "_find_person", return_value=_Miss(seen_without_depth=True))
@@ -369,7 +378,7 @@ def test_follow_loop_counts_a_person_seen_without_depth_as_a_miss(make_rig, mock
 
 
 def test_a_found_person_resets_the_miss_count(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
-    rig = make_rig(max_missed_looks=2)
+    rig = make_rig(max_missed_looks=2, search_step_deg=0.0)
 
     _drive_follow_loop(rig, [False, True, False, True], mocker)
 
@@ -378,7 +387,7 @@ def test_a_found_person_resets_the_miss_count(make_rig, mocker) -> None:  # type
 
 
 def test_follow_loop_survives_a_failing_lookup(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
-    rig = make_rig(max_missed_looks=5)
+    rig = make_rig(max_missed_looks=5, search_step_deg=0.0)
     stop = Event()
     _stop_after(stop, 2, mocker)
     mocker.patch.object(
@@ -394,7 +403,7 @@ def test_follow_skill_starts_tracking_and_stop_skill_ends_it(make_rig, mocker) -
     rig = make_rig()
     started = Event()
 
-    def idle_loop(_description: str, stop_event: Event) -> None:
+    def idle_loop(_description: str, stop_event: Event, _last_position: Any = None) -> None:
         started.set()
         stop_event.wait()
 
@@ -422,3 +431,197 @@ def test_follow_skill_releases_movement_when_the_person_is_not_found(make_rig) -
     assert "No person matching" in result
     rig.tracker.start_tracking.assert_not_called()
     rig.module.stop_tool.assert_called_once_with("follow_person_with_planner")
+
+
+_TICK = 0.1
+
+
+def _wrap(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+class TurningRobot:
+    """Integrates the yaw commanded through cmd_vel into the module's odometry."""
+
+    def __init__(self, rig: Rig, yaw: float = 0.0) -> None:
+        self.rig = rig
+        self.yaw = yaw
+        self.total_turned = 0.0
+        self.rate = 0.0
+        self._seen = 0
+        self._publish_odom()
+
+    def tick(self, dt: float = _TICK) -> None:
+        for twist in self.rig.twists[self._seen :]:
+            self.rate = twist.angular.z
+        self._seen = len(self.rig.twists)
+        self.yaw = _wrap(self.yaw + self.rate * dt)
+        self.total_turned += abs(self.rate * dt)
+        self._publish_odom()
+
+    def _publish_odom(self) -> None:
+        self.rig.module._on_odom(
+            PoseStamped(
+                frame_id="world",
+                position=Vector3(0.0, 0.0, 0.0),
+                orientation=Quaternion.from_euler(Vector3(0.0, 0.0, self.yaw)),
+            )
+        )
+
+
+def _run_search(  # type: ignore[no-untyped-def]
+    rig: Rig,
+    results: list[Any],
+    mocker,
+    *,
+    top_level_looks: int,
+    last_position: tuple[float, float] | None = None,
+    robot_yaw: float = 0.0,
+    on_tick: Callable[[Event, int], None] | None = None,
+) -> tuple[TurningRobot, Event]:
+    """Run the follow loop with a simulated robot; ``results`` feeds _find_person in order."""
+    robot = TurningRobot(rig, robot_yaw)
+    stop = Event()
+    looks = 0
+    ticks = 0
+
+    def wait(timeout: float) -> bool:
+        nonlocal looks, ticks
+        if timeout == rig.module.config.follow_interval_s:
+            looks += 1
+            return looks > top_level_looks or stop.is_set()
+        robot.tick()
+        ticks += 1
+        if on_tick is not None:
+            on_tick(stop, ticks)
+        return stop.is_set()
+
+    mocker.patch.object(stop, "wait", side_effect=wait)
+    queue = iter(results)
+    mocker.patch.object(rig.module, "_find_person", side_effect=lambda _d: next(queue))
+    rig.module._follow_loop(WHITE, stop, last_position)
+    return robot, stop
+
+
+def test_a_lost_person_is_searched_for_by_turning_and_following_resumes(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
+    rig = make_rig()
+    found = _sighting(rig)
+    # Two misses start the search; the search looks, turns, looks, turns, then sees them.
+    results = [_Miss(False)] * 4 + [found]
+
+    robot, _ = _run_search(rig, results, mocker, top_level_looks=2)
+
+    assert robot.total_turned == pytest.approx(2 * math.radians(60), abs=math.radians(15))
+    rig.tracker.start_tracking.assert_called_once()
+    rig.tracker.update_target.assert_called_once_with(3.0, 1.0)
+    updates = [call.args[1] for call in rig.module.tool_update.call_args_list]
+    assert any("Turning on the spot" in update for update in updates)
+    assert any("again" in update for update in updates)
+    # The robot is told to stop when the turning is over.
+    assert rig.twists[-1] == Twist()
+
+
+def test_the_planner_goal_is_cancelled_before_turning(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
+    rig = make_rig()
+    order: list[str] = []
+    rig.tracker.stop_tracking.side_effect = lambda: order.append("cancel")
+    rig.module.cmd_vel.subscribe(lambda twist: order.append("turn") if twist.angular.z else None)
+
+    _run_search(rig, [_Miss(False)] * 4 + [_sighting(rig)], mocker, top_level_looks=2)
+
+    assert order[0] == "cancel"
+    assert "turn" in order
+
+
+def test_following_gives_up_after_a_full_turn_finds_nobody(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
+    rig = make_rig()
+
+    robot, _ = _run_search(rig, [_Miss(False)] * 20, mocker, top_level_looks=2)
+
+    assert robot.total_turned >= math.radians(340)
+    assert robot.total_turned <= math.radians(420)
+    rig.tracker.update_target.assert_not_called()
+    assert "turning all the way around" in rig.module.tool_update.call_args.args[1]
+    assert rig.twists[-1] == Twist()
+
+
+@pytest.mark.parametrize(("last_position", "sign"), [((0.0, 5.0), 1), ((0.0, -5.0), -1)])
+def test_the_search_starts_by_facing_where_the_person_was_last_seen(  # type: ignore[no-untyped-def]
+    make_rig, mocker, last_position, sign
+) -> None:
+    rig = make_rig()
+
+    robot, _ = _run_search(
+        rig,
+        [_Miss(False), _Miss(False), _sighting(rig)],
+        mocker,
+        top_level_looks=2,
+        last_position=last_position,
+    )
+
+    # They were 90 degrees to one side; the robot turned that way and saw them there.
+    assert robot.yaw == pytest.approx(sign * math.pi / 2, abs=math.radians(10))
+    first_turn = next(twist.angular.z for twist in rig.twists if twist.angular.z)
+    assert math.copysign(1.0, first_turn) == sign
+    rig.tracker.update_target.assert_called_once_with(3.0, 1.0)
+
+
+def test_a_last_seen_position_straight_ahead_does_not_cause_a_first_turn(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
+    rig = make_rig()
+
+    robot, _ = _run_search(
+        rig,
+        [_Miss(False), _Miss(False), _sighting(rig)],
+        mocker,
+        top_level_looks=2,
+        last_position=(5.0, 0.2),
+    )
+
+    assert robot.total_turned == 0.0
+
+
+def test_a_stop_request_during_a_turn_stops_the_robot_at_once(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
+    rig = make_rig()
+
+    robot, stop = _run_search(
+        rig,
+        [_Miss(False)] * 20,
+        mocker,
+        top_level_looks=2,
+        on_tick=lambda stop, ticks: stop.set() if ticks == 3 else None,
+    )
+
+    assert stop.is_set()
+    assert robot.total_turned < math.radians(30)
+    assert rig.twists[-1] == Twist()
+    rig.tracker.start_tracking.assert_not_called()
+
+
+def test_searching_can_be_turned_off(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
+    rig = make_rig(search_step_deg=0.0, max_missed_looks=2)
+
+    robot, _ = _run_search(rig, [_Miss(False)] * 5, mocker, top_level_looks=5)
+
+    assert robot.total_turned == 0.0
+    assert not any(twist.angular.z for twist in rig.twists)
+    assert "lost sight" in rig.module.tool_update.call_args.args[1]
+
+
+def test_search_without_odometry_gives_up_instead_of_crashing(make_rig, mocker) -> None:  # type: ignore[no-untyped-def]
+    rig = make_rig()
+    rig.module._latest_odom = None
+    stop = Event()
+    waits = 0
+
+    def wait(_timeout: float) -> bool:
+        nonlocal waits
+        waits += 1
+        return waits > 2
+
+    mocker.patch.object(stop, "wait", side_effect=wait)
+    mocker.patch.object(rig.module, "_find_person", return_value=_Miss(False))
+
+    rig.module._follow_loop(WHITE, stop, (0.0, 5.0))
+
+    assert not any(twist.angular.z for twist in rig.twists)
+    assert "turning all the way around" in rig.module.tool_update.call_args.args[1]
