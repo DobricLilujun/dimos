@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 import io
+import json
 import socket
 import subprocess
 import sys
@@ -33,18 +34,24 @@ import pytest
 
 from dimos.core.coordination.blueprint_config.parser import BlueprintConfigParser
 from dimos.robot.all_blueprints import all_blueprints
+from dimos.robot.unitree.go2.blueprints.agentic.demo_unitree_go2_agentic_persistent_person_following import (
+    demo_unitree_go2_agentic_persistent_person_following,
+)
 from dimos.robot.unitree.go2.blueprints.agentic.demo_unitree_go2_agentic_person_following import (
     demo_unitree_go2_agentic_person_following,
 )
 from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent_console import (
     unitree_go2_agentic_persistent_demo,
 )
+from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent_person_following import (
+    unitree_go2_agentic_persistent_person_following,
+)
 from dimos.robot.unitree.go2.blueprints.smart.demo_unitree_go2_dynamic_goal import (
     demo_unitree_go2_dynamic_goal,
 )
 from dimos.robot.unitree.go2.blueprints.smart.unitree_go2 import unitree_go2
 from dimos.web.console.module import OPERATIONS, RobotConsoleModule
-from dimos.web.console.profiles import PROFILES
+from dimos.web.console.profiles import PEOPLE_OPERATIONS, PROFILES
 from dimos.web.console.settings import (
     SIM_SCENES_KEPT,
     ConsoleRuntime,
@@ -55,10 +62,13 @@ PORT = 8192
 
 BLUEPRINTS = {
     "persistent": unitree_go2_agentic_persistent_demo,
+    "persistent-people": unitree_go2_agentic_persistent_person_following,
     "go2": unitree_go2,
     "dynamic-goal": demo_unitree_go2_dynamic_goal,
     "person-following": demo_unitree_go2_agentic_person_following,
 }
+# Stacks whose simulation needs modules a real robot or replay does not.
+SIMULATION_BLUEPRINTS = {"persistent-people": demo_unitree_go2_agentic_persistent_person_following}
 ALL_CHOICES = [
     (key, connection) for key, profile in PROFILES.items() for connection in profile.connections
 ]
@@ -136,8 +146,13 @@ def test_launch_command_parses_against_the_real_blueprint(key, connection):
     settings = _settings(key, connection)
     argv = settings.argv()
 
-    assert argv[4] == PROFILES[key].blueprint
-    parsed = BlueprintConfigParser(BLUEPRINTS[key]).parse(argv[5:], environ={})
+    assert argv[4] == PROFILES[key].blueprint_for(connection)
+    blueprint = (
+        SIMULATION_BLUEPRINTS[key]
+        if connection == "simulation" and key in SIMULATION_BLUEPRINTS
+        else BLUEPRINTS[key]
+    )
+    parsed = BlueprintConfigParser(blueprint).parse(argv[5:], environ={})
     assert parsed.global_config["simulation"] == ("mujoco" if connection == "simulation" else "")
     assert parsed.global_config["replay"] is (connection == "replay")
 
@@ -212,20 +227,20 @@ def test_a_stack_without_a_map_starts_without_any_scene(runtime, process):
     assert runtime.profile.key == "go2"
 
 
-def test_a_simulated_persistent_session_builds_a_new_map_in_a_fresh_folder(runtime, process):
+@pytest.mark.parametrize("key", ["persistent", "persistent-people"])
+def test_a_simulated_persistent_session_builds_a_new_map_in_a_fresh_folder(runtime, process, key):
     saved = runtime.project_dir / "real_office"
     saved.mkdir()
     (saved / "map.pc2.lcm").write_bytes(b"saved map")
-    runtime.settings = _settings(
-        "persistent", "simulation", map_mode="restore", scene_map_dir=str(saved)
-    )
+    runtime.settings = _settings(key, "simulation", map_mode="restore", scene_map_dir=str(saved))
 
     plan = runtime.prepare_start()
     runtime.start()
 
     argv = process.popen.call_args.args[0]
+    blueprint = SIMULATION_BLUEPRINTS.get(key, BLUEPRINTS[key])
     config = (
-        BlueprintConfigParser(unitree_go2_agentic_persistent_demo)
+        BlueprintConfigParser(blueprint)
         .parse(argv[5:], environ={})
         .module_kwargs("persistentgo2map")
     )
@@ -421,14 +436,26 @@ def _attach(module: RobotConsoleModule, tmp_path, key: str, connection: str) -> 
     return module.runtime
 
 
-async def test_the_persistent_stack_shows_every_operation(module, tmp_path):
+async def test_the_persistent_stack_shows_every_operation_but_the_people_ones(module, tmp_path):
     _attach(module, tmp_path, "persistent", "replay")
     async with _client(module) as client:
         config = (await client.get("/api/config")).json()
 
-    assert [op["key"] for op in config["operations"]] == list(OPERATIONS)
+    assert [op["key"] for op in config["operations"]] == [
+        key for key in OPERATIONS if key not in PEOPLE_OPERATIONS
+    ]
     assert config["profile"]["has_map"] and config["profile"]["has_agent"]
+    assert not config["profile"]["has_people"]
     assert [item["key"] for item in config["profiles"]] == list(PROFILES)
+
+
+async def test_the_persistent_stack_with_people_shows_every_operation(module, tmp_path):
+    _attach(module, tmp_path, "persistent-people", "replay")
+    async with _client(module) as client:
+        config = (await client.get("/api/config")).json()
+
+    assert [op["key"] for op in config["operations"]] == list(OPERATIONS)
+    assert config["profile"]["has_people"]
 
 
 async def test_a_plain_stack_shows_no_agent_or_map_operations(module, tmp_path):
@@ -447,7 +474,7 @@ async def test_the_agent_stack_without_a_map_shows_only_what_works_without_one(m
         config = (await client.get("/api/config")).json()
 
     keys = {op["key"] for op in config["operations"]}
-    assert keys == set(PROFILES["person-following"].operations or ())
+    assert keys == set(PROFILES["person-following"].operations or ()) | PEOPLE_OPERATIONS
     assert keys.isdisjoint({"confirm_alignment", "save_map", "begin_demo_exploration"})
 
 
@@ -509,6 +536,297 @@ async def test_stopping_a_stack_without_a_map_does_not_ask_for_a_map_save(module
     assert response.json()["ok"] is True
     rpc.assert_not_called()
     stop.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# people: blueprints, flags, stopping a follow
+# ---------------------------------------------------------------------------
+def test_a_simulation_can_need_a_different_blueprint_than_a_robot():
+    profile = PROFILES["persistent-people"]
+
+    assert profile.blueprint_for("robot") == profile.blueprint_for("replay")
+    assert profile.blueprint_for("simulation") != profile.blueprint_for("robot")
+    assert PROFILES["go2"].blueprint_for("simulation") == "unitree-go2"
+
+
+def test_the_persistent_people_stack_sends_the_search_turn_through_the_persistent_map():
+    blueprint = unitree_go2_agentic_persistent_person_following
+    effective = {
+        (atom.module.__name__, port.name): blueprint.remapping_map.get(
+            (atom.name, port.name), port.name
+        )
+        for atom in blueprint.active_blueprints
+        for port in atom.streams
+    }
+
+    assert effective[("PersonNavigationSkillContainer", "cmd_vel")] == "session_cmd_vel"
+    assert effective[("PersistentGo2Map", "session_cmd_vel")] == "session_cmd_vel"
+    assert effective[("GO2Connection", "cmd_vel")] == "cmd_vel"
+    modules = {atom.module.__name__ for atom in blueprint.active_blueprints}
+    assert {"GoalTracker", "PersonNavigationSkillContainer", "PersistentGo2Map"} <= modules
+    assert "PersonFollowSkillContainer" not in modules
+
+
+def test_the_simulation_variant_adds_the_walking_people_and_longer_lidar():
+    blueprint = demo_unitree_go2_agentic_persistent_person_following
+    base = unitree_go2_agentic_persistent_person_following
+    modules = {atom.module.__name__ for atom in blueprint.active_blueprints}
+    overrides = blueprint.global_config_overrides
+
+    assert "MujocoPersonTarget" in modules
+    assert overrides["mujoco_second_person"] is True
+    assert overrides["mujoco_lidar_max_range"] == 8.0
+    assert "MujocoPersonTarget" not in {atom.module.__name__ for atom in base.active_blueprints}
+
+
+@pytest.mark.parametrize("key", ["persistent-people", "person-following"])
+def test_the_follow_settings_reach_the_stacks_that_have_the_people_skills(key):
+    settings = _settings(
+        key, "simulation", follow_distance_m=4.5, follow_update_threshold_m=0.8, search_step_deg=45
+    )
+    argv = settings.argv()
+
+    assert "--goaltracker.follow-distance-m=4.5" in argv
+    assert "--goaltracker.update-threshold-m=0.8" in argv
+    assert "--personnavigationskillcontainer.search-step-deg=45.0" in argv
+    blueprint = SIMULATION_BLUEPRINTS.get(key, BLUEPRINTS[key])
+    parsed = BlueprintConfigParser(blueprint).parse(argv[5:], environ={})
+    assert parsed.module_kwargs("goaltracker")["follow_distance_m"] == 4.5
+    assert parsed.module_kwargs("personnavigationskillcontainer")["search_step_deg"] == 45
+
+
+@pytest.mark.parametrize("key", ["persistent", "go2", "dynamic-goal"])
+def test_stacks_without_the_people_skills_get_no_follow_flags(key):
+    argv = _settings(key).argv()
+
+    assert not any("goaltracker" in arg or "personnavigation" in arg for arg in argv)
+
+
+def test_the_persistent_people_stack_speaks_as_the_console_with_the_people_guidance():
+    (prompt,) = [
+        arg
+        for arg in _settings("persistent-people", "replay").argv()
+        if arg.startswith("--mcpclient.system-prompt=")
+    ]
+    (plain,) = [
+        arg
+        for arg in _settings("persistent", "replay").argv()
+        if arg.startswith("--mcpclient.system-prompt=")
+    ]
+
+    assert "puppy" in prompt.lower() and "follow_person_with_planner" in prompt
+    assert "follow_person_with_planner" not in plain
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"follow_distance_m": 0.4},
+        {"follow_distance_m": 8.1},
+        {"follow_distance_m": float("nan")},
+        {"follow_update_threshold_m": 0},
+        {"search_step_deg": -1},
+        {"search_step_deg": 121},
+    ],
+)
+def test_follow_settings_reject_unsafe_values(update):
+    with pytest.raises(ValidationError):
+        ConsoleSettings(**update)
+
+
+def test_the_follow_settings_default_to_a_distance_where_the_camera_sees_the_person():
+    settings = ConsoleSettings()
+
+    assert settings.follow_distance_m == 3.0
+    assert settings.follow_update_threshold_m == 0.5
+    assert settings.search_step_deg == 60
+
+
+async def test_the_people_operations_that_move_the_robot_need_confirmation(module, tmp_path):
+    _attach(module, tmp_path, "persistent-people", "replay")
+    async with _client(module) as client:
+        config = (await client.get("/api/config")).json()
+        ops = {op["key"]: op for op in config["operations"]}
+        refused = (
+            await client.post(
+                "/api/action",
+                json={"name": "follow_person_with_planner", "args": {"description": "red"}},
+            )
+        ).json()
+
+    assert ops["navigate_to_person"]["human_only"]
+    assert ops["follow_person_with_planner"]["human_only"]
+    assert not ops["describe_visible_people"]["human_only"]
+    assert refused == {"ok": False, "error": "Human confirmation is required"}
+
+
+async def test_the_people_operations_call_their_skills(module, tmp_path, mocker):
+    _attach(module, tmp_path, "persistent-people", "replay")
+    call = mocker.patch.object(module, "_call_mcp", return_value={"ok": True, "result": "ok"})
+    async with _client(module) as client:
+        response = await client.post(
+            "/api/action",
+            json={
+                "name": "follow_person_with_planner",
+                "args": {"description": "white top"},
+                "confirmed": True,
+            },
+        )
+
+    assert response.json()["ok"] is True
+    assert call.call_args.args[0].key == "follow_person_with_planner"
+    assert call.call_args.args[1] == {"description": "white top"}
+
+
+async def test_people_operations_are_refused_by_a_stack_without_them(module, tmp_path, mocker):
+    _attach(module, tmp_path, "persistent", "replay")
+    call = mocker.patch.object(module, "_call_mcp")
+    async with _client(module) as client:
+        response = await client.post(
+            "/api/action", json={"name": "tag_person", "args": {"description": "red"}}
+        )
+
+    assert "not available in this stack" in response.json()["error"]
+    call.assert_not_called()
+
+
+async def test_stop_navigation_also_ends_a_follow_first(module, tmp_path, mocker):
+    _attach(module, tmp_path, "persistent-people", "replay")
+    order = []
+
+    async def call(op, args):
+        order.append(op.key)
+        return {"ok": True, "result": "ok"}
+
+    mocker.patch.object(module, "_call_mcp", side_effect=call)
+    async with _client(module) as client:
+        response = await client.post("/api/action", json={"name": "stop_navigation"})
+
+    assert response.json()["ok"] is True
+    assert order == ["stop_following_person", "stop_navigation"]
+
+
+async def test_stop_navigation_without_the_people_skills_does_not_call_them(
+    module, tmp_path, mocker
+):
+    _attach(module, tmp_path, "persistent", "replay")
+    call = mocker.patch.object(module, "_call_mcp", return_value={"ok": True, "result": "ok"})
+    async with _client(module) as client:
+        await client.post("/api/action", json={"name": "stop_navigation"})
+
+    assert [c.args[0].key for c in call.call_args_list] == ["stop_navigation"]
+
+
+def test_taking_over_with_the_keyboard_ends_a_follow(module, tmp_path, mocker):
+    from fastapi.testclient import TestClient
+
+    _attach(module, tmp_path, "persistent-people", "replay")
+    transport = mocker.patch("dimos.web.console.module.make_transport").return_value
+    mocker.patch.object(module, "_call_rpc", return_value={"ok": True, "result": True})
+    stopped = mocker.patch.object(module, "_stop_following")
+    ready = threading.Event()
+    transport.publish.side_effect = lambda twist: ready.set()
+    with TestClient(module._build_app()) as client:
+        with client.websocket_connect(
+            f"/api/teleop?token={module._csrf_token}", headers={"Origin": "http://testserver"}
+        ) as socket:
+            socket.send_json({"keys": [" ", "w"]})
+            assert ready.wait(5)
+
+    stopped.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# live controls
+# ---------------------------------------------------------------------------
+async def test_the_follow_distance_is_read_and_set_through_the_tracker(module, tmp_path, mocker):
+    _attach(module, tmp_path, "person-following", "simulation")
+    rpc = mocker.patch.object(module, "_call_rpc", return_value={"ok": True, "result": {}})
+    async with _client(module) as client:
+        await client.get("/api/follow-distance")
+        await client.post("/api/follow-distance", json={"distance_m": 4.5})
+
+    (read, _), (write, args) = [call.args for call in rpc.call_args_list]
+    assert (read.module, read.method) == ("GoalTracker", "follow_distance_status")
+    assert (write.module, write.method) == ("GoalTracker", "set_follow_distance")
+    assert args == {"distance_m": 4.5}
+
+
+@pytest.mark.parametrize("value", [0.4, 8.1, True, "3", None, float("nan"), float("inf")])
+async def test_an_invalid_live_follow_distance_is_refused_before_it_reaches_the_robot(
+    module, tmp_path, mocker, value
+):
+    _attach(module, tmp_path, "persistent-people", "replay")
+    rpc = mocker.patch.object(module, "_call_rpc")
+    # Python's JSON parser accepts NaN and Infinity, so send them as literal text.
+    body = json.dumps({"distance_m": value})
+    async with _client(module) as client:
+        response = await client.post(
+            "/api/follow-distance", content=body, headers={"content-type": "application/json"}
+        )
+
+    assert response.json() == {"ok": False, "error": "Distance must be between 0.5 and 8 meters"}
+    rpc.assert_not_called()
+
+
+@pytest.mark.parametrize("key", ["persistent", "go2", "dynamic-goal"])
+async def test_a_stack_without_the_people_skills_has_no_follow_distance(
+    module, tmp_path, mocker, key
+):
+    _attach(module, tmp_path, key, "replay" if key == "persistent" else "simulation")
+    rpc = mocker.patch.object(module, "_call_rpc")
+    async with _client(module) as client:
+        read = (await client.get("/api/follow-distance")).json()
+        write = (await client.post("/api/follow-distance", json={"distance_m": 3})).json()
+
+    assert read == write == {"ok": False, "error": "This stack cannot follow people"}
+    rpc.assert_not_called()
+
+
+async def test_the_follow_distance_needs_a_running_stack(module, tmp_path, mocker):
+    runtime = _attach(module, tmp_path, "person-following", "simulation")
+    runtime._state = "starting"
+    rpc = mocker.patch.object(module, "_call_rpc")
+    async with _client(module) as client:
+        response = (await client.get("/api/follow-distance")).json()
+
+    assert response == {"ok": False, "error": "Robot stack is not ready"}
+    rpc.assert_not_called()
+
+
+@pytest.mark.parametrize("route", ["navigation-distance", "navigation-speed", "visual-arrival"])
+@pytest.mark.parametrize("key", ["go2", "person-following"])
+async def test_persistent_planner_controls_answer_at_once_on_stacks_without_the_planner(
+    module, tmp_path, mocker, route, key
+):
+    # They are polled by the page; without this each poll waited out a 120 s RPC timeout.
+    _attach(module, tmp_path, key, "simulation")
+    rpc = mocker.patch.object(module, "_call_rpc")
+    async with _client(module) as client:
+        response = (await client.get(f"/api/{route}")).json()
+
+    assert response == {"ok": False, "error": "This stack has no persistent planner"}
+    rpc.assert_not_called()
+
+
+@pytest.mark.parametrize("route", ["navigation-distance", "navigation-speed", "visual-arrival"])
+async def test_persistent_planner_controls_still_reach_the_planner_on_the_persistent_stack(
+    module, tmp_path, mocker, route
+):
+    _attach(module, tmp_path, "persistent-people", "replay")
+    rpc = mocker.patch.object(module, "_call_rpc", return_value={"ok": True, "result": {}})
+    async with _client(module) as client:
+        await client.get(f"/api/{route}")
+
+    assert rpc.call_args.args[0].module == "PersistentGo2Planner"
+
+
+def test_the_page_has_the_follow_distance_slider_in_the_live_controls():
+    from dimos.web.console.frontend import INDEX_HTML
+
+    for element in ("people-controls", "follow-distance", "follow-distance-value"):
+        assert f'id="{element}"' in INDEX_HTML, element
+    assert "/api/follow-distance" in INDEX_HTML
 
 
 def test_the_page_has_the_stack_selectors():

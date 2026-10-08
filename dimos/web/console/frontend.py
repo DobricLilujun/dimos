@@ -396,6 +396,14 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
         <span class="badge" id="b-thinking" style="display:none"><span class="dot"></span>thinking</span>
       </div>
       <div class="msgs" id="msgs" role="log" aria-label="Conversation"></div>
+      <div id="people-controls" hidden>
+      <label class="hint" for="follow-distance">Live person follow distance:
+        <output id="follow-distance-value">3.0 m</output>
+        <input id="follow-distance" type="range" min="0.5" max="8" step="0.1" value="3"
+          aria-label="Live person follow distance" style="width:100%" disabled>
+        <span>How far behind the person the robot stops. Takes effect at its next re-plan; it closes in to this distance but does not back away. Closer than about 3 m the camera sees only legs. This session only; the saved default is in Settings.</span>
+      </label>
+      </div>
       <div id="persistent-controls">
       <label class="hint" for="navigation-speed">Live navigation speed limit:
         <output id="navigation-speed-value">0.55 m/s</output>
@@ -457,7 +465,7 @@ const el = (t, cls, html) => { const n = document.createElement(t); if (cls) n.c
 const now = () => { const d = new Date(); return d.toTimeString().slice(0,8); };
 
 let CONFIG = {};
-const state = { nav: false, stack: null, agent: true, map: true };
+const state = { nav: false, stack: null, agent: true, map: true, people: false };
 const openToolCards = new Map();
 const pendingEchoes = new Map();
 let refreshing = false;
@@ -526,7 +534,7 @@ function buildDeck() {
   for (const op of CONFIG.operations) {
     (byGroup[op.group] = byGroup[op.group] || []).push(op);
   }
-  const order = ["Alignment", "Map", "Tagging", "Memory", "Navigation", "Exploration"];
+  const order = ["Alignment", "Map", "Tagging", "People", "Memory", "Navigation", "Exploration"];
   for (const group of order) {
     const ops = byGroup[group]; if (!ops) continue;
     const g = el("div", "group");
@@ -842,13 +850,14 @@ function updateControls() {
   $("#stack-stop-without-save").disabled=state.lifecycleBusy || !["running","starting","stopping"].includes(state.stack);
   const ready = !CONFIG.standalone || state.stack==="running";
   for (const btn of document.querySelectorAll("[data-operation]")) {
-    btn.disabled=!ready || (["tag_object","tag_location","navigate_near_memory_tag","navigate_to_memory_tag","return_to_starting_location","begin_demo_exploration"].includes(btn.dataset.operation) && !state.nav);
+    btn.disabled=!ready || (["tag_object","tag_location","navigate_near_memory_tag","navigate_to_memory_tag","return_to_starting_location","begin_demo_exploration","tag_person","navigate_to_person","follow_person_with_planner"].includes(btn.dataset.operation) && !state.nav);
     if(["confirm_alignment","reject_alignment"].includes(btn.dataset.operation))btn.disabled=!ready || !state.candidateId;
   }
   $("#alignment-view").disabled=!ready || !state.candidateId;
   if($("#tagging-toggle"))$("#tagging-toggle").disabled=!ready;
   $("#speaker-toggle").disabled=!ready || !CONFIG.standalone;
   $("#navigation-distance").disabled=!ready;
+  $("#follow-distance").disabled=!ready || !state.people || $("#follow-distance").dataset.saving==="true";
   $("#navigation-speed").disabled=!ready || !state.speedEnabled || $("#navigation-speed").dataset.saving==="true";
   $("#visual-arrival-toggle").disabled=!ready;
   if(!ready){$("#murmur-toggle").disabled=true;$("#puppy-status").textContent="Robot stack is not running.";}
@@ -976,6 +985,21 @@ async function boot() {
       $("#navigation-distance-value").textContent=Number(slider.value).toFixed(1)+" m";
     }finally{delete slider.dataset.saving;updateControls();}
   };
+  $("#follow-distance").oninput = () => {
+    $("#follow-distance-value").textContent=Number($("#follow-distance").value).toFixed(1)+" m";
+  };
+  $("#follow-distance").onchange = async () => {
+    const slider=$("#follow-distance");slider.disabled=true;slider.dataset.saving="true";
+    try {
+      const result=(await api("/api/follow-distance",{distance_m:Number(slider.value)})).result;
+      slider.dataset.confirmed=result.distance_m;slider.value=result.distance_m;
+      $("#follow-distance-value").textContent=Number(result.distance_m).toFixed(1)+" m";
+      log("ok","follow","Person follow distance: "+result.distance_m+" m");
+    }catch(e){
+      addSystem(e.message);slider.value=slider.dataset.confirmed || "3";
+      $("#follow-distance-value").textContent=Number(slider.value).toFixed(1)+" m";
+    }finally{delete slider.dataset.saving;updateControls();}
+  };
   for(const button of document.querySelectorAll("[data-drive]")) {
     button.style.touchAction="none";
     button.onpointerdown=e=>{
@@ -1019,7 +1043,7 @@ async function refreshStatus() {
     const s = await api("/api/refresh-status");
     applyStatus(s);
     const slider=$("#navigation-distance");
-    if((!CONFIG.standalone || state.stack==="running") &&
+    if((!CONFIG.standalone || state.stack==="running") && state.map &&
        document.activeElement!==slider && !slider.dataset.saving) {
       const result=(await api("/api/navigation-distance")).result;
       if(!result || !Number.isFinite(result.distance_m))throw new Error("Invalid nearby distance status");
@@ -1027,17 +1051,29 @@ async function refreshStatus() {
       $("#navigation-distance-value").textContent=Number(result.distance_m).toFixed(1)+" m";
     }
     if(!CONFIG.standalone || state.stack==="running") {
-      const speed=(await api("/api/navigation-speed")).result;
-      state.speedEnabled=speed && speed.enabled===true && Number.isFinite(speed.speed_mps);
-      const speedSlider=$("#navigation-speed");
-      if(state.speedEnabled && document.activeElement!==speedSlider && !speedSlider.dataset.saving){
-        speedSlider.value=speed.speed_mps;speedSlider.dataset.confirmed=speed.speed_mps;
-        $("#navigation-speed-value").textContent=Number(speed.speed_mps).toFixed(2)+" m/s";
+      if(state.map) {
+        const speed=(await api("/api/navigation-speed")).result;
+        state.speedEnabled=speed && speed.enabled===true && Number.isFinite(speed.speed_mps);
+        const speedSlider=$("#navigation-speed");
+        if(state.speedEnabled && document.activeElement!==speedSlider && !speedSlider.dataset.saving){
+          speedSlider.value=speed.speed_mps;speedSlider.dataset.confirmed=speed.speed_mps;
+          $("#navigation-speed-value").textContent=Number(speed.speed_mps).toFixed(2)+" m/s";
+        }
+        const visual=(await api("/api/visual-arrival")).result;
+        $("#visual-arrival-toggle").textContent="Visual arrival: "+(visual.enabled?"On":"Off")+(visual.searching?" (searching)":"");
+      }
+      if(state.people) {
+        const follow=$("#follow-distance");
+        if(document.activeElement!==follow && !follow.dataset.saving) {
+          const distance=(await api("/api/follow-distance")).result;
+          if(distance && Number.isFinite(distance.distance_m)) {
+            follow.value=distance.distance_m;follow.dataset.confirmed=distance.distance_m;
+            $("#follow-distance-value").textContent=Number(distance.distance_m).toFixed(1)+" m";
+          }
+        }
       }
       updateControls();
-      const visual=(await api("/api/visual-arrival")).result;
-      $("#visual-arrival-toggle").textContent="Visual arrival: "+(visual.enabled?"On":"Off")+(visual.searching?" (searching)":"");
-      if(CONFIG.standalone)applyPuppyStatus((await api("/api/murmur")).result);
+      if(CONFIG.standalone && state.agent)applyPuppyStatus((await api("/api/murmur")).result);
     }
   } catch (e) {setBadge("b-nav","bad","status unavailable");log("err","status",e.message);}
   finally {refreshing=false;}
@@ -1076,6 +1112,11 @@ const settingFields = [
     ["vlm_distance_m","Tagging distance threshold (m)","number"],
     ["object_segmenter","Object segmenter","select",["yolo","auto","vlm"]]
   ]],
+  ["Person following", [
+    ["follow_distance_m","Follow distance (m; 0.5-8; stop this far short of the person; the camera needs a few metres to see their top; restart)","number"],
+    ["follow_update_threshold_m","Re-plan when the person moved (m; 0.1-3; restart)","number"],
+    ["search_step_deg","Turn step when searching for a lost person (deg; 0 turns searching off; restart)","number"]
+  ]],
   ["Local services", [
     ["mcp_port","MCP port","number"], ["rerun_web_port","Rerun viewer port","number"],
     ["rerun_grpc_port","Rerun data port (gRPC; change if 9877 is occupied)","number"]
@@ -1098,6 +1139,9 @@ async function openSettings() {
         if(type==="number")input.step=key.endsWith("port")?"1":"any";
         if(key==="planner_robot_width"){input.min="0.05";input.max="1.00";input.step="0.01";}
         if(key==="navigation_speed_limit"){input.min="0.10";input.max="0.55";input.step="0.05";}
+        if(key==="follow_distance_m"){input.min="0.5";input.max="8";input.step="0.1";}
+        if(key==="follow_update_threshold_m"){input.min="0.1";input.max="3";input.step="0.1";}
+        if(key==="search_step_deg"){input.min="0";input.max="120";input.step="5";}
         label.appendChild(input);wrap.appendChild(label);
       }
     }
@@ -1135,6 +1179,8 @@ function connectionOf(settings) { return settings.simulation?"simulation":settin
 function updateStackPanel(profile, connection) {
   state.agent=profile.has_agent;
   state.map=profile.has_map;
+  state.people=profile.has_people===true;
+  $("#people-controls").hidden=!state.people;
   const simulated=connection==="simulation";
   $("#stack-map-field").hidden=!profile.has_map || simulated;
   $("#stack-profile-note").textContent=profile.description+(CONNECTION_NOTES[connection]||"")+(profile.has_map && simulated?" A new map is built in a fresh folder each start.":"");

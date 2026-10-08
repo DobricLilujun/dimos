@@ -61,7 +61,7 @@ from dimos.web.console.profiles import (
     Connection,
     StackProfile,
 )
-from dimos.web.console.prompts import CONSOLE_AGENT_PROMPT
+from dimos.web.console.prompts import CONSOLE_AGENT_PROMPT, CONSOLE_PEOPLE_AGENT_PROMPT
 
 logger = setup_logger()
 
@@ -98,6 +98,12 @@ class ConsoleSettings(FusionGateConfig):
     vlm_distance_m: float = Field(default=1, gt=0, le=100)
     object_segmenter: Literal["auto", "yolo", "vlm"] = "yolo"
     pgo_enabled: bool = False
+    # Person following (stacks that have the person skills). The head camera only sees a
+    # person's top from a few metres away, and the agent tells people apart by what they
+    # wear, so the default stays well back.
+    follow_distance_m: float = Field(default=3.0, ge=0.5, le=8.0, allow_inf_nan=False)
+    follow_update_threshold_m: float = Field(default=0.5, gt=0.0, le=3.0, allow_inf_nan=False)
+    search_step_deg: float = Field(default=60.0, ge=0.0, le=120.0, allow_inf_nan=False)
     nearby_arrival_distance: float = Field(default=1, ge=0.3, le=3, allow_inf_nan=False)
     planner_robot_width: float = Field(default=0.3, ge=0.05, le=1.0, allow_inf_nan=False)
     navigation_speed_limit: float = Field(default=0.55, ge=0.1, le=0.55, allow_inf_nan=False)
@@ -171,16 +177,16 @@ class ConsoleSettings(FusionGateConfig):
             "-m",
             "dimos.cli.dimos",
             "run",
-            profile.blueprint,
+            profile.blueprint_for(self.connection),
             *self._connection_args(),
             *self._rerun_args(),
         ]
         if profile.has_agent:
             args += self._agent_args()
-        if profile.key == "persistent":
+        if profile.has_map:
             args += self._persistent_args()
-        elif profile.key == "person-following":
-            args += self._person_following_args()
+        if profile.has_people:
+            args += self._people_args()
         return args
 
     def _connection_args(self) -> list[str]:
@@ -205,19 +211,27 @@ class ConsoleSettings(FusionGateConfig):
             f"--mcpclient.mcp-server-url=http://127.0.0.1:{self.mcp_port}/mcp",
             f"--mcpclient.model={self.agent_model}",
         ]
-        if self.stack.key == "persistent":
-            args.append(f"--mcpclient.system-prompt={CONSOLE_AGENT_PROMPT}")
+        if self.stack.has_map:
+            # The persistent stacks speak as the console's persona; the demo keeps its own.
+            prompt = CONSOLE_PEOPLE_AGENT_PROMPT if self.stack.has_people else CONSOLE_AGENT_PROMPT
+            args.append(f"--mcpclient.system-prompt={prompt}")
         return args
 
-    def _person_following_args(self) -> list[str]:
-        # The blueprint carries its own system prompt; only point its vision models at
-        # the configured service.
-        return [
+    def _people_args(self) -> list[str]:
+        args = [
             f"--personnavigationskillcontainer.vlm-url={self.vlm_url}",
             f"--personnavigationskillcontainer.vlm-model={self.vlm_model}",
-            f"--navigationskillcontainer.vlm-url={self.vlm_url}",
-            f"--navigationskillcontainer.vlm-model={self.vlm_model}",
+            f"--personnavigationskillcontainer.search-step-deg={self.search_step_deg}",
+            f"--goaltracker.follow-distance-m={self.follow_distance_m}",
+            f"--goaltracker.update-threshold-m={self.follow_update_threshold_m}",
         ]
+        if not self.stack.has_map:
+            # The persistent flags already point this container at the same service.
+            args += [
+                f"--navigationskillcontainer.vlm-url={self.vlm_url}",
+                f"--navigationskillcontainer.vlm-model={self.vlm_model}",
+            ]
+        return args
 
     def _persistent_args(self) -> list[str]:
         scene = Path(self.scene_map_dir)

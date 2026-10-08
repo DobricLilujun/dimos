@@ -25,9 +25,10 @@ console always runs the persistent stack.)
 | Blueprint | Map | Agent chat | Connections | What the console shows |
 |---|---|---|---|---|
 | **Persistent map + agent** (default) | yes | yes | real robot, replay, simulation | Everything on this page. |
+| **Persistent map + agent + people** (`unitree-go2-agentic-persistent-person-following`; in simulation `demo-unitree-go2-agentic-persistent-person-following`) | yes | yes | real robot, replay, simulation | Everything the persistent stack shows, plus a **People** group (see [Person following in the console](#person-following-in-the-console)). |
 | **Go2** (`unitree-go2`) | no | no | real robot, replay, simulation | Camera, 3D view, keyboard control, logs, and Stop. Click goals in the 3D view. |
 | **Dynamic goal (demo)** (`demo-unitree-go2-dynamic-goal`) | no | no | simulation | The same as Go2; the planner's goal follows a person walking a loop. |
-| **Person following + agent (demo)** (`demo-unitree-go2-agentic-person-following`) | no | yes | simulation | The chat, and the tag / query / navigate buttons that work without a map. The person skills are used through chat (see [person tagging, navigation & following](person-following.md)). |
+| **Person following + agent (demo)** (`demo-unitree-go2-agentic-person-following`) | no | yes | simulation | The chat, the tag / query / navigate buttons that work without a map, and the **People** group (see [Person following in the console](#person-following-in-the-console)). |
 
 How the selectors behave:
 
@@ -63,6 +64,43 @@ How the selectors behave:
 > tests, and the Go2 and persistent stacks have been run through the console on
 > replay data. Starting each stack in MuJoCo from the console, with the selectors,
 > readiness, keyboard control and stop, was checked by hand on a display.
+
+### Person following in the console
+
+The two stacks with the person skills (see [person tagging, navigation &
+following](person-following.md)) add a **People** group to the control deck:
+
+| Button | What it does | Confirmation |
+|---|---|---|
+| **Describe people** | Lists who the robot can see, what each wears and where they are. Does not move the robot. | no |
+| **Tag person** | Remembers where a described person is (a last-seen position). | no |
+| **Go to person** | Walks up to the person and stops about half a metre away. | yes |
+| **Follow person** | Follows the person with the planner, re-planning as they move. | yes |
+| **Stop following** | Stops following and cancels the goal. | no |
+
+- Type the description the way the vision model words it ("light gray long-sleeve
+  shirt"). **Describe people** first shows that wording.
+- **Go to person** and **Follow person** need navigation to be ready. On the
+  persistent stack that means the map alignment is approved, as for every other
+  navigation.
+- **Stop navigation** and taking over with the keyboard also end a follow. Without
+  that, a follow would keep sending goals as the person moves.
+- Progress (found them, lost them, turning to look, gave up) appears in the chat's
+  tool view, and the agent can do the same through chat.
+- **Settings → Person following** sets the follow distance, how far the person must
+  move before the robot re-plans, and the turn step used when searching for a lost
+  person. The follow distance defaults to **3 m**: the robot's low camera only sees
+  a person's legs from closer, and it tells people apart by what they wear.
+- **Live person follow distance**, the slider at the bottom right beside the live
+  navigation speed limit and the nearby stop distance, changes the gap while the
+  robot runs. It takes effect at the robot's next re-plan (about every 1.5 s). The
+  robot closes in to a smaller distance but does **not** back away when you raise
+  it. It is session-only; the saved default is in Settings.
+- In simulation the same two people walk their loops as in the demos. On a real
+  robot, supervise in person: the robot walks toward and behind a real person.
+
+> **Status.** The simulation side of these stacks, through the console, has not yet
+> been confirmed by hand on a display. The real robot has not been tried.
 
 ## The module
 

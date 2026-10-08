@@ -60,6 +60,15 @@ class GoalUpdatePolicy:
         self._last_target = None
         self._last_sent = None
 
+    @property
+    def follow_distance_m(self) -> float:
+        return self._follow_distance_m
+
+    def set_follow_distance(self, follow_distance_m: float) -> None:
+        """Change the stopping distance; the next target sends a goal at the new one."""
+        self._follow_distance_m = follow_distance_m
+        self.reset()
+
     def next_goal(self, target: Vector3, robot: Vector3, now: float) -> PoseStamped | None:
         """Return a goal for ``target``, or None if the current goal is still good.
 
@@ -164,6 +173,26 @@ class GoalTracker(Module):
         if self._planner is not None:
             self._planner.cancel_goal()
         return True
+
+    @rpc
+    def follow_distance_status(self) -> dict[str, float]:
+        """The distance the goal stops short of the target, in metres."""
+        with self._lock:
+            return {"distance_m": self._policy.follow_distance_m}
+
+    @rpc
+    def set_follow_distance(self, distance_m: float) -> dict[str, float]:
+        """Change how far short of the target goals stop, while tracking.
+
+        Applies at the next target update. The robot closes in to this distance; it does
+        not back away when the distance is increased.
+        """
+        if not math.isfinite(distance_m) or distance_m < 0.0:
+            raise ValueError("Follow distance must be a finite, non-negative number of metres")
+        with self._lock:
+            self._policy.set_follow_distance(float(distance_m))
+            self.config.follow_distance_m = float(distance_m)
+        return self.follow_distance_status()
 
     @rpc
     def update_target(self, x: float, y: float) -> bool:

@@ -378,6 +378,75 @@ OPERATIONS: dict[str, Operation] = {
         module="PersistentGo2Planner",
         description="Check planner state; starting a goal is not arrival.",
     ),
+    # ---- People (stacks that have the person skills) ----
+    "describe_visible_people": Operation(
+        "describe_visible_people",
+        "Describe people",
+        "mcp",
+        "People",
+        description="List the people the robot can see, what each wears, and where they are.",
+    ),
+    "tag_person": Operation(
+        "tag_person",
+        "Tag person",
+        "mcp",
+        "People",
+        description="Remember where a visible person is. A person moves, so the tag is a last-seen position.",
+        schema={
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "What they wear, as the vision model would say it, e.g. light gray long-sleeve shirt",
+                },
+            },
+            "required": ["description"],
+        },
+    ),
+    "navigate_to_person": Operation(
+        "navigate_to_person",
+        "Go to person",
+        "mcp",
+        "People",
+        human_only=True,
+        description="Walk up to a person and stop about half a metre away. Starts navigation; it is not arrival.",
+        schema={
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "What they wear, e.g. light gray long-sleeve shirt",
+                },
+            },
+            "required": ["description"],
+        },
+    ),
+    "follow_person_with_planner": Operation(
+        "follow_person_with_planner",
+        "Follow person",
+        "mcp",
+        "People",
+        human_only=True,
+        primary=True,
+        description="Follow a person with the planner, re-planning as they move. Supervise in person; Stop ends it.",
+        schema={
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "What they wear, e.g. light gray long-sleeve shirt",
+                },
+            },
+            "required": ["description"],
+        },
+    ),
+    "stop_following_person": Operation(
+        "stop_following_person",
+        "Stop following",
+        "mcp",
+        "People",
+        description="Stop following the person and cancel the current goal.",
+    ),
 }
 
 
@@ -787,6 +856,9 @@ class RobotConsoleModule(Module):
                     )
                     await socket.close(code=1011)
                     return
+                if self._profile().has_people:
+                    # The keyboard takes over; a follow would keep sending goals against it.
+                    await self._stop_following()
                 await asyncio.to_thread(transport.start)
                 started = True
                 await socket.send_json({"ready": True})
@@ -876,6 +948,8 @@ class RobotConsoleModule(Module):
         async def api_navigation_distance(request: Request) -> dict[str, Any]:
             if self.runtime is not None and not self.runtime.ready:
                 return {"ok": False, "error": "Robot stack is not ready"}
+            if not self._profile().has_map:
+                return {"ok": False, "error": "This stack has no persistent planner"}
             args = {}
             method = "nearby_navigation_status"
             if request.method == "POST":
@@ -898,6 +972,8 @@ class RobotConsoleModule(Module):
         async def api_navigation_speed(request: Request) -> dict[str, Any]:
             if self.runtime is not None and not self.runtime.ready:
                 return {"ok": False, "error": "Robot stack is not ready"}
+            if not self._profile().has_map:
+                return {"ok": False, "error": "This stack has no persistent planner"}
             args = {}
             method = "navigation_speed_status"
             if request.method == "POST":
@@ -915,10 +991,35 @@ class RobotConsoleModule(Module):
                 Operation(method, "", "rpc", "", module="PersistentGo2Planner"), args
             )
 
+        @app.api_route("/api/follow-distance", methods=["GET", "POST"])
+        async def api_follow_distance(request: Request) -> dict[str, Any]:
+            if self.runtime is not None and not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            if not self._profile().has_people:
+                return {"ok": False, "error": "This stack cannot follow people"}
+            args = {}
+            method = "follow_distance_status"
+            if request.method == "POST":
+                payload = await request.json()
+                distance = payload.get("distance_m") if isinstance(payload, dict) else None
+                if (
+                    not isinstance(distance, (int, float))
+                    or isinstance(distance, bool)
+                    or not math.isfinite(distance)
+                    or not 0.5 <= distance <= 8.0
+                ):
+                    return {"ok": False, "error": "Distance must be between 0.5 and 8 meters"}
+                method, args = "set_follow_distance", {"distance_m": float(distance)}
+            return await self._call_rpc(
+                Operation(method, "", "rpc", "", module="GoalTracker"), args
+            )
+
         @app.api_route("/api/visual-arrival", methods=["GET", "POST"])
         async def api_visual_arrival(request: Request) -> dict[str, Any]:
             if self.runtime is not None and not self.runtime.ready:
                 return {"ok": False, "error": "Robot stack is not ready"}
+            if not self._profile().has_map:
+                return {"ok": False, "error": "This stack has no persistent planner"}
             method, args = "visual_arrival_status", {}
             if request.method == "POST":
                 payload = await request.json()
@@ -1006,15 +1107,15 @@ class RobotConsoleModule(Module):
             args = payload.get("args") or {}
             if not isinstance(key, str) or key not in OPERATIONS:
                 return {"ok": False, "error": f"unknown operation: {key!r}"}
+            if self.runtime is not None and not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            if OPERATIONS[key].human_only and payload.get("confirmed") is not True:
+                return {"ok": False, "error": "Human confirmation is required"}
             if not self._profile().allows(key):
                 return {
                     "ok": False,
                     "error": f"{OPERATIONS[key].label or key} is not available in this stack",
                 }
-            if self.runtime is not None and not self.runtime.ready:
-                return {"ok": False, "error": "Robot stack is not ready"}
-            if OPERATIONS[key].human_only and payload.get("confirmed") is not True:
-                return {"ok": False, "error": "Human confirmation is required"}
             if key in {"confirm_alignment", "reject_alignment"}:
                 candidate_id = payload.get("candidate_id")
                 if not isinstance(candidate_id, str) or not candidate_id:
@@ -1125,11 +1226,19 @@ class RobotConsoleModule(Module):
                 return {"ok": False, "error": f"Unsupported argument type for {name}"}
             if "enum" in spec and value not in spec["enum"]:
                 return {"ok": False, "error": f"Invalid {name}"}
+        if key == "stop_navigation" and self._profile().has_people:
+            # A follow keeps sending goals as the person moves, so stopping must end it too.
+            await self._stop_following()
         if op.kind == "rpc":
             return await self._call_rpc(op, args)
         if op.kind == "mcp":
             return await self._call_mcp(op, args)
         return {"ok": False, "error": f"unknown kind for {key}"}
+
+    async def _stop_following(self) -> None:
+        result = await self._call_mcp(OPERATIONS["stop_following_person"], {})
+        if result.get("ok") is False:
+            logger.warning("console: could not stop following", error=result.get("error"))
 
     async def _call_rpc(self, op: Operation, args: dict[str, Any]) -> dict[str, Any]:
         module = self.config.map_module if op.module == DEFAULT_MAP_MODULE else op.module

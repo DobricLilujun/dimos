@@ -197,3 +197,50 @@ def test_update_target_rpc_feeds_the_same_path(tracker) -> None:  # type: ignore
 
     assert len(goals) == 1
     assert (goals[0].x, goals[0].y) == pytest.approx((2.7, 3.6))
+
+
+def test_changing_the_follow_distance_applies_at_the_next_target_even_without_movement():
+    policy = _policy(threshold=0.5, interval=5.0, follow_distance=0.5)
+    first = policy.next_goal(Vector3(4.0, 0.0, 0.0), ROBOT, now=0.0)
+    assert first is not None and first.x == pytest.approx(3.5)
+    # Same target, well inside the rate limit: nothing to send ...
+    assert policy.next_goal(Vector3(4.0, 0.0, 0.0), ROBOT, now=0.1) is None
+
+    policy.set_follow_distance(2.0)
+    changed = policy.next_goal(Vector3(4.0, 0.0, 0.0), ROBOT, now=0.2)
+
+    # ... until the distance changes, which sends a goal at the new distance at once.
+    assert changed is not None and changed.x == pytest.approx(2.0)
+    assert policy.follow_distance_m == 2.0
+
+
+def test_the_follow_distance_can_be_changed_live_through_the_module(tracker):
+    module, goals = tracker
+    module._on_odom(_pose(0.0, 0.0))
+    module._on_target(_pose(4.0, 0.0))
+
+    result = module.set_follow_distance(1.5)
+    module._on_target(_pose(4.0, 0.0))
+
+    assert result == {"distance_m": 1.5}
+    assert module.follow_distance_status() == {"distance_m": 1.5}
+    assert module.config.follow_distance_m == 1.5
+    assert [round(goal.x, 2) for goal in goals] == [3.5, 2.5]
+
+
+def test_the_follow_distance_status_starts_at_the_configured_distance():
+    module = GoalTracker(follow_distance_m=2.5)
+    try:
+        assert module.follow_distance_status() == {"distance_m": 2.5}
+    finally:
+        module._close_module()
+
+
+@pytest.mark.parametrize("bad", [math.nan, math.inf, -0.1])
+def test_an_invalid_live_follow_distance_is_refused_and_changes_nothing(tracker, bad):
+    module, _ = tracker
+
+    with pytest.raises(ValueError, match="finite, non-negative"):
+        module.set_follow_distance(bad)
+
+    assert module.follow_distance_status() == {"distance_m": 0.5}

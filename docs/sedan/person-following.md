@@ -15,6 +15,12 @@ walking people and need no hardware.
 > not wired into `unitree-go2-agentic-persistent`. See [Limits and
 > troubleshooting](#limits-and-troubleshooting) before relying on them.
 
+> **In the web console.** Both agent stacks can also be started from the [web
+> console](web-console.md#person-following-in-the-console), which adds **People**
+> buttons, a follow-distance setting, and a persistent-map variant for a real robot.
+> The console's follow distance defaults to 3 m, not the demo's 0.5 m, for the camera
+> reason under [The camera sees legs when you stand close](#the-camera-sees-legs-when-you-stand-close).
+
 ## Run them
 
 Prerequisites: the simulation extra

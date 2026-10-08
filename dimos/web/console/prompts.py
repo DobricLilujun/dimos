@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dimos.agents.skills.person_navigation import PERSON_NAVIGATION_PROMPT
 from dimos.agents.system_prompt import SYSTEM_PROMPT
 
 CONSOLE_AGENT_PROMPT = (
@@ -36,3 +37,6 @@ The console Go2 speaker automatically reads your final replies on the robot.
 Do not call the host-computer speak tool for ordinary conversational replies.
 """
 )
+
+# For stacks that also have the person skills.
+CONSOLE_PEOPLE_AGENT_PROMPT = CONSOLE_AGENT_PROMPT + PERSON_NAVIGATION_PROMPT
