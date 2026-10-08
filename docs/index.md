@@ -23,10 +23,13 @@ the new dimOS features documented here.
 | **Exploration** | `WavefrontFrontierExplorer` | `DemoExplorer` — frontier + efficient (Dijkstra) strategies, gain-aware stopping, bounded startup scan |
 | **Perception** | Object detection / tracking; object memory | `VlmCaptionProvider` (OpenAI-compatible VLM), object segmentation, `SceneGraphServerModule` |
 | **People** | — | `NamedPersonRecognizerSkillContainer` — ReID / LBPH face recognition |
-| **Agent skills** | `move`, `speak`, `navigate`, … | + `navigate_to_memory_tag`, `navigate_near_memory_tag`, `tag_object`, `tag_location`, `query_*`, `navigate_with_text` |
+| **Person following** | `follow_person` — visual servoing straight to `cmd_vel`, no obstacle avoidance | `PersonNavigationSkillContainer` — tag, walk to and follow a person picked out by what they wear, planned around obstacles, with a turn-on-the-spot search when they are lost |
+| **Dynamic goals** | The planner takes one goal at a time; nothing retargets it | `GoalTracker` — re-sends the goal when a moving target has moved far enough, stopping a set distance short |
+| **Simulation** | MuJoCo office with one person and a 3 m lidar | Opt-in second person (`--mujoco-second-person`) and a longer lidar (`--mujoco-lidar-max-range`) |
+| **Agent skills** | `move`, `speak`, `navigate`, … | + `navigate_to_memory_tag`, `navigate_near_memory_tag`, `tag_object`, `tag_location`, `query_*`, `navigate_with_text`, `tag_person`, `navigate_to_person`, `follow_person_with_planner`, `stop_following_person`, `describe_visible_people` |
 | **Console / UI** | CLI (`dimos`), `dimos shell`, MCP server | `RobotConsoleModule` — web console (`:8090`), control deck + ChatGPT-style chat, SSE |
 | **Speech** | `SpeakSkill` (TTS) | + Go2 speaker TTS, "Puppy" ambient commentary, microphone conversation |
-| **CLI / blueprints** | `unitree-go2-agentic`, … | + `unitree-go2-agentic-persistent[-console]`, `unitree-go2-agentic-persistent-demo` |
+| **CLI / blueprints** | `unitree-go2-agentic`, … | + `unitree-go2-agentic-persistent[-console]`, `unitree-go2-agentic-persistent-demo`, `demo-unitree-go2-dynamic-goal`, `demo-unitree-go2-agentic-person-following` |
 | **Configuration** | `GlobalConfig` | + opt-in flags: `--gallery-dir`, `--scene-graph-server.port`, `--fusion-motion-gate.*`, … |
 
 ## What's new (and where to read it)
@@ -37,6 +40,7 @@ the new dimOS features documented here.
 - [Demo exploration](sedan/demo-exploration.md) — `DemoExplorer`: frontier + efficient (Dijkstra) strategies and gain-aware stopping.
 - [Nearby & visual arrival, speech, and "Puppy"](sedan/movement-and-arrival.md) — navigate to a memory tag by proximity, visual arrival, and the Go2 speaker.
 - [Person recognition](sedan/person-recognition.md) — recognize people from a gallery by ReID or LBPH.
+- [Person tagging, navigation & following](sedan/person-following.md) — tag, walk to and follow a person by what they wear, with goal tracking and a lost-person search, in two MuJoCo demos.
 - [Scene graph server](sedan/scene-graph.md) — expose a queryable scene graph over HTTP.
 - [Perception: VLM captioning & object segmentation](sedan/perception-vlm.md) — an OpenAI-compatible VLM and object segmentation for tagging.
 - [Testing & verification](sedan/testing.md) — what is verified offline and what requires real hardware.
