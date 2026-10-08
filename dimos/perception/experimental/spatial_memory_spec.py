@@ -30,3 +30,24 @@ class SpatialMemorySpec(Spec, Protocol):
     def query_by_text(self, text: str, limit: int = 5) -> list[dict]: ...  # type: ignore[type-arg]
     def get_robot_locations(self) -> list[RobotLocation]: ...
     def get_stats(self) -> dict[str, int]: ...
+
+
+class PersonMemorySpec(Spec, Protocol):
+    """What the person skills need from SpatialMemory: locate, tag and refresh people."""
+
+    def capture_object_observation(self) -> tuple[Image, dict[str, Any]]: ...
+    def locate_in_observation(
+        self, name: str, bbox: list[int], image: Image, context: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
+    def add_named_location(
+        self,
+        name: str,
+        position: list[float] | None = None,
+        rotation: list[float] | None = None,
+        description: str | None = None,
+        kind: str = "location",
+        observation: dict[str, Any] | None = None,
+        reference_image: Any = None,
+    ) -> bool: ...
+    def update_robot_location(self, location_id: str, position: list[float]) -> bool: ...
+    def get_robot_locations(self) -> list[RobotLocation]: ...

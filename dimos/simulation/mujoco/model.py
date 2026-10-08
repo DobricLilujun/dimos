@@ -27,15 +27,19 @@ from dimos.core.global_config import GlobalConfig
 from dimos.mapping.occupancy.extrude_occupancy import generate_mujoco_scene
 from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
 from dimos.simulation.mujoco.input_controller import InputController
+from dimos.simulation.mujoco.person_texture import recolor_person_texture
 from dimos.simulation.mujoco.policy import G1OnnxController, Go1OnnxController, OnnxController
 from dimos.utils.data import get_data
+
+PERSON_TEXTURE = "material_0.png"
+SECOND_PERSON_TEXTURE = "material_1.png"
 
 
 def _get_data_dir() -> epath.Path:
     return epath.Path(str(get_data("mujoco_sim")))
 
 
-def get_assets() -> dict[str, bytes]:
+def get_assets(second_person: bool = False) -> dict[str, bytes]:
     data_dir = _get_data_dir()
     assets: dict[str, bytes] = {}
 
@@ -52,16 +56,19 @@ def get_assets() -> dict[str, bytes]:
     mjx_env.update_assets(assets, person_dir, "*.obj")
     mjx_env.update_assets(assets, person_dir, "*.png")
 
+    if second_person:
+        assets[SECOND_PERSON_TEXTURE] = recolor_person_texture(assets[PERSON_TEXTURE])
+
     return assets
 
 
 def load_model(
-    input_device: InputController, robot: str, scene_xml: str
+    input_device: InputController, robot: str, scene_xml: str, second_person: bool = False
 ) -> tuple[mujoco.MjModel, mujoco.MjData]:
     mujoco.set_mjcb_control(None)
 
-    xml_string = get_model_xml(robot, scene_xml)
-    model = mujoco.MjModel.from_xml_string(xml_string, assets=get_assets())
+    xml_string = get_model_xml(robot, scene_xml, second_person=second_person)
+    model = mujoco.MjModel.from_xml_string(xml_string, assets=get_assets(second_person))
     data = mujoco.MjData(model)
 
     mujoco.mj_resetDataKeyframe(model, data, 0)
@@ -98,7 +105,7 @@ def load_model(
     return model, data
 
 
-def get_model_xml(robot: str, scene_xml: str) -> str:
+def get_model_xml(robot: str, scene_xml: str, second_person: bool = False) -> str:
     root = ET.fromstring(scene_xml)
     root.set("model", f"{robot}_scene")
     root.insert(0, ET.Element("include", file=f"{robot}.xml"))
@@ -114,33 +121,39 @@ def get_model_xml(robot: str, scene_xml: str) -> str:
     map_elem.set("zfar", "10000")
 
     _add_person_object(root)
+    if second_person:
+        _add_person_object(root, name="person2", texture_file=SECOND_PERSON_TEXTURE)
 
     return ET.tostring(root, encoding="unicode")
 
 
-def _add_person_object(root: ET.Element) -> None:
+def _add_person_object(
+    root: ET.Element, name: str = "person", texture_file: str = PERSON_TEXTURE
+) -> None:
     asset = root.find("asset")
 
     if asset is None:
         asset = ET.SubElement(root, "asset")
 
-    ET.SubElement(asset, "mesh", name="person_mesh", file="jeong_seun_34.obj")
-    ET.SubElement(asset, "texture", name="person_texture", file="material_0.png", type="2d")
-    ET.SubElement(asset, "material", name="person_material", texture="person_texture")
+    # All people share the one mesh; only the texture differs.
+    if name == "person":
+        ET.SubElement(asset, "mesh", name="person_mesh", file="jeong_seun_34.obj")
+    ET.SubElement(asset, "texture", name=f"{name}_texture", file=texture_file, type="2d")
+    ET.SubElement(asset, "material", name=f"{name}_material", texture=f"{name}_texture")
 
     worldbody = root.find("worldbody")
 
     if worldbody is None:
         worldbody = ET.SubElement(root, "worldbody")
 
-    person_body = ET.SubElement(worldbody, "body", name="person", pos="0 0 0", mocap="true")
+    person_body = ET.SubElement(worldbody, "body", name=name, pos="0 0 0", mocap="true")
 
     ET.SubElement(
         person_body,
         "geom",
         type="mesh",
         mesh="person_mesh",
-        material="person_material",
+        material=f"{name}_material",
         euler="1.5708 0 0",
     )
 

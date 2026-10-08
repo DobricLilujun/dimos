@@ -82,7 +82,11 @@ def test_default_track_is_a_valid_loop() -> None:
 
 @pytest.fixture
 def person_target(mocker):  # type: ignore[no-untyped-def]
-    mocker.patch("dimos.simulation.mujoco.person_target.make_transport")
+    transports: dict[str, object] = {}
+    mocker.patch(
+        "dimos.simulation.mujoco.person_target.make_transport",
+        side_effect=lambda topic, _type: transports.setdefault(topic, mocker.Mock()),
+    )
     modules: list[MujocoPersonTarget] = []
 
     def make(**config):  # type: ignore[no-untyped-def]
@@ -133,3 +137,33 @@ def test_target_is_withheld_during_the_start_delay(person_target, mocker) -> Non
 
     assert targets == []
     assert module._person_pose.broadcast.call_count >= 1
+
+
+def test_publish_target_can_be_turned_off_while_the_person_still_walks(
+    person_target, mocker
+) -> None:  # type: ignore[no-untyped-def]
+    module = person_target(start_delay_s=0.0, publish_target=False)
+
+    targets = _run_ticks(module, 3, mocker)
+
+    assert targets == []
+    assert module._person_pose.broadcast.call_count >= 3
+
+
+def test_second_person_walks_on_its_own_topic_and_is_never_the_target(
+    person_target, mocker
+) -> None:  # type: ignore[no-untyped-def]
+    track = [(10.0, 10.0), (12.0, 10.0), (12.0, 12.0)]
+    module = person_target(start_delay_s=0.0, second_person_track=track)
+
+    targets = _run_ticks(module, 3, mocker)
+
+    assert module._second_person_pose is not module._person_pose
+    assert module._second_person_pose.broadcast.call_count >= 3
+    assert all(target.x < 5 for target in targets)
+    poses = [call.args[1].position for call in module._second_person_pose.broadcast.call_args_list]
+    assert all(pose.x >= 10.0 for pose in poses)
+
+
+def test_there_is_no_second_transport_without_a_second_track(person_target) -> None:  # type: ignore[no-untyped-def]
+    assert person_target()._second_person_pose is None

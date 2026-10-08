@@ -497,3 +497,69 @@ def test_manual_and_automatic_object_tag_share_map_limit(memory, geometry, bound
     assert automatic == [1.7, 0, 1]
     assert manual["position"] == automatic
     assert add.call_args.args[1] == automatic
+
+
+def test_locate_in_observation_returns_the_lidar_position_without_storing_a_tag(
+    memory, geometry, mocker
+):
+    mocker.patch.object(memory, "get_robot_locations", return_value=[])
+    add = mocker.patch.object(memory, "add_named_location")
+    tag = mocker.patch.object(memory, "_tag_object_location")
+    image = Image.from_numpy(np.zeros((100, 100, 3), dtype=np.uint8))
+
+    result = memory.locate_in_observation("person white t-shirt", [40, 40, 60, 60], image, geometry)
+
+    assert result == {"position": [14, 20, 1], "method": "pointcloud_bbox", "point_count": 3}
+    add.assert_not_called()
+    tag.assert_not_called()
+
+
+def test_locate_in_observation_without_lidar_hit_is_none_not_a_default_distance(memory, geometry):
+    geometry["world_points"] = np.empty((0, 3))
+    image = Image.from_numpy(np.zeros((100, 100, 3), dtype=np.uint8))
+
+    assert memory.locate_in_observation("person", [40, 40, 60, 60], image, geometry) is None
+
+
+def test_update_robot_location_moves_the_tag_and_restamps_it(memory, tag_store):
+    tag = RobotLocation(
+        "person: white t-shirt",
+        (1, 2, 0.9),
+        (0, 0, 0),
+        location_id="person-1",
+        timestamp=100.0,
+        metadata={"kind": "person", "description": "Person seen wearing: white t-shirt"},
+    )
+    tag_store.location_collection.get.return_value = {"metadatas": [tag.to_vector_metadata()]}
+
+    assert memory.update_robot_location("person-1", [5.0, 6.0, 0.9])
+
+    (call,) = tag_store.location_collection.update.call_args_list
+    assert call.kwargs["ids"] == ["person-1"]
+    (metadata,) = call.kwargs["metadatas"]
+    assert (metadata["pos_x"], metadata["pos_y"], metadata["pos_z"]) == (5.0, 6.0, 0.9)
+    assert metadata["timestamp"] > 100.0
+    # Everything else about the tag is kept.
+    assert metadata["kind"] == "person"
+    assert metadata["location_name"] == "person: white t-shirt"
+
+
+def test_update_robot_location_of_an_unknown_tag_is_false(memory, tag_store):
+    tag_store.location_collection.get.return_value = {"metadatas": []}
+
+    assert not memory.update_robot_location("missing", [1.0, 2.0, 0.0])
+    tag_store.location_collection.update.assert_not_called()
+
+
+@pytest.mark.parametrize("position", [[1.0, 2.0], [1.0, float("nan"), 0.0]])
+def test_update_robot_location_rejects_bad_positions(memory, position):
+    with pytest.raises(ValueError, match="three finite numbers"):
+        memory.update_robot_location("person-1", position)
+
+
+def test_update_robot_location_is_refused_during_a_pgo_session(memory, tag_store, mocker):
+    mocker.patch.object(memory, "_ensure_pgo_ready")
+    memory._pgo_session = "session"
+
+    assert not memory.update_robot_location("person-1", [1.0, 2.0, 0.0])
+    tag_store.location_collection.update.assert_not_called()

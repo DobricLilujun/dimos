@@ -111,7 +111,12 @@ def _run_simulation(config: GlobalConfig, shm: ShmReader) -> None:
         robot_name = "unitree_go1"
 
     controller = MockController(shm)
-    model, data = load_model(controller, robot=robot_name, scene_xml=load_scene_xml(config))
+    model, data = load_model(
+        controller,
+        robot=robot_name,
+        scene_xml=load_scene_xml(config),
+        second_person=config.mujoco_second_person,
+    )
 
     if model is None or data is None:
         raise ValueError("Failed to load MuJoCo model: model or data is None")
@@ -133,7 +138,11 @@ def _run_simulation(config: GlobalConfig, shm: ShmReader) -> None:
     camera_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "head_camera")
     lidar_camera_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "lidar_front_camera")
 
-    person_position_controller = PersonPositionController(model)
+    person_position_controllers = [PersonPositionController(model)]
+    if config.mujoco_second_person:
+        person_position_controllers.append(
+            PersonPositionController(model, body_name="person2", topic="/person2_pose")
+        )
 
     if config.mujoco_shadows == "off" or (
         config.mujoco_shadows == "auto" and _shadow_render_is_slow(model, data)
@@ -185,7 +194,8 @@ def _run_simulation(config: GlobalConfig, shm: ShmReader) -> None:
             for _ in range(config.mujoco_steps_per_frame):
                 mujoco.mj_step(model, data)
 
-            person_position_controller.tick(data)
+            for person_position_controller in person_position_controllers:
+                person_position_controller.tick(data)
 
             m_viewer.sync()
 
@@ -268,7 +278,8 @@ def _run_simulation(config: GlobalConfig, shm: ShmReader) -> None:
             if time_until_next_step > 0:
                 time.sleep(time_until_next_step)
 
-        person_position_controller.stop()
+        for person_position_controller in person_position_controllers:
+            person_position_controller.stop()
 
 
 if __name__ == "__main__":

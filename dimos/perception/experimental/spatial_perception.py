@@ -19,6 +19,7 @@ Spatial Memory module for creating a semantic map of the environment.
 from collections.abc import Mapping
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -926,6 +927,51 @@ class SpatialMemory(Module):
         ):
             raise RuntimeError(f"Failed to save object tag '{name}'")
         return json.dumps({"name": name, "frame": "world", **estimate}, ensure_ascii=False)
+
+    @rpc
+    def locate_in_observation(
+        self, name: str, bbox: list[int], image: Image, context: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Estimate a box's lidar-derived world position without storing a tag.
+
+        Returns ``None`` when the region has no valid lidar depth, so callers
+        never fall back to the robot's position or a fixed distance.
+        """
+        estimate = self._estimate_target(bbox, name, image.to_opencv(), context, require_depth=True)
+        if estimate is None:
+            return None
+        return {
+            "position": [float(value) for value in estimate["position"]],
+            "method": estimate["method"],
+            "point_count": int(estimate["point_count"]),
+        }
+
+    @rpc
+    def update_robot_location(self, location_id: str, position: list[float]) -> bool:
+        """Move an existing tag to a new world position and stamp it with the current time.
+
+        Used for tags of things that move, such as people. Refused while a PGO
+        session is active, because corrected tag poses are managed there.
+        """
+        if len(position) != 3 or not all(math.isfinite(value) for value in position):
+            raise ValueError("position must be three finite numbers")
+        with self._tagging_lock:
+            self._ensure_pgo_ready()
+            if self._pgo_session is not None:
+                logger.warning("Tag refresh refused during a PGO session", location_id=location_id)
+                return False
+            location = next(
+                (item for item in self.get_robot_locations() if item.location_id == location_id),
+                None,
+            )
+            if location is None:
+                return False
+            location.position = (float(position[0]), float(position[1]), float(position[2]))
+            location.timestamp = time.time()
+            self.vector_db.location_collection.update(
+                ids=[location_id], metadatas=[location.to_vector_metadata()]
+            )
+        return True
 
     def _capture_projection_context(
         self, frame: np.ndarray, timestamp: float

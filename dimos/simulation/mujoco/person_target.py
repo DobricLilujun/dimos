@@ -49,6 +49,17 @@ DEFAULT_TRACK: list[tuple[float, float]] = [
 ]
 
 
+# A rectangle in the open area north of the first person's path, clear of furniture
+# by at least 0.3 m, at least 0.9 m from the first path, and inside the head
+# camera's horizontal field of view from the robot's start at (-6.18, 0.96).
+DEFAULT_SECOND_TRACK: list[tuple[float, float]] = [
+    (-3.0, 2.2),
+    (-0.6, 2.2),
+    (-0.6, 3.2),
+    (-3.0, 3.2),
+]
+
+
 class TrackWalker:
     """Walks a closed polyline at constant speed."""
 
@@ -108,6 +119,13 @@ class MujocoPersonTargetConfig(ModuleConfig):
     # The person stands at the first waypoint this long, so the robot can map
     # its surroundings before the first goal.
     start_delay_s: float = Field(default=10.0, ge=0.0, allow_inf_nan=False)
+    # Publish the first person's true position as tracked_target. Turn this off when
+    # the target should come from perception instead of the simulator.
+    publish_target: bool = True
+    # A second person (needs mujoco_second_person) walking its own closed loop on
+    # /person2_pose. It never publishes a target.
+    second_person_track: list[tuple[float, float]] | None = None
+    second_person_speed_mps: float = Field(default=0.2, gt=0.0, le=0.5, allow_inf_nan=False)
 
 
 class MujocoPersonTarget(Module):
@@ -120,6 +138,9 @@ class MujocoPersonTarget(Module):
         self._stop_event = Event()
         self._thread: Thread | None = None
         self._person_pose: PubSubTransport[Pose] = make_transport("/person_pose", Pose)
+        self._second_person_pose: PubSubTransport[Pose] | None = (
+            make_transport("/person2_pose", Pose) if self.config.second_person_track else None
+        )
 
     @rpc
     def start(self) -> None:
@@ -135,10 +156,25 @@ class MujocoPersonTarget(Module):
             self._thread.join(DEFAULT_THREAD_JOIN_TIMEOUT)
             self._thread = None
         self._person_pose.stop()
+        if self._second_person_pose is not None:
+            self._second_person_pose.stop()
         super().stop()
 
     def _run(self) -> None:
-        walker = TrackWalker(self.config.track, self.config.speed_mps)
+        # (walker, where its pose goes, whether its position is also the target)
+        people = [
+            (
+                TrackWalker(self.config.track, self.config.speed_mps),
+                self._person_pose,
+                self.config.publish_target,
+            )
+        ]
+        if self.config.second_person_track and self._second_person_pose is not None:
+            walker = TrackWalker(
+                self.config.second_person_track, self.config.second_person_speed_mps
+            )
+            people.append((walker, self._second_person_pose, False))
+
         period = 1.0 / self.config.rate_hz
         walking_from = time.monotonic() + self.config.start_delay_s
         last_tick = walking_from
@@ -146,29 +182,34 @@ class MujocoPersonTarget(Module):
         while not self._stop_event.is_set():
             now = time.monotonic()
             walking = now >= walking_from
-            if walking:
-                walker.advance(now - max(last_tick, walking_from))
+            elapsed = now - max(last_tick, walking_from)
             last_tick = now
 
-            x, y = walker.position
-            self._publish_person_pose(x, y, walker.heading)
-            if walking:
-                self.tracked_target.publish(
-                    PoseStamped(
-                        ts=time.time(),
-                        frame_id="world",
-                        position=Vector3(x, y, 0.0),
-                        orientation=Quaternion.from_euler(Vector3(0.0, 0.0, walker.heading)),
+            for walker, transport, publish_target in people:
+                if walking:
+                    walker.advance(elapsed)
+                x, y = walker.position
+                self._publish_person_pose(transport, x, y, walker.heading)
+                if walking and publish_target:
+                    self.tracked_target.publish(
+                        PoseStamped(
+                            ts=time.time(),
+                            frame_id="world",
+                            position=Vector3(x, y, 0.0),
+                            orientation=Quaternion.from_euler(Vector3(0.0, 0.0, walker.heading)),
+                        )
                     )
-                )
 
             self._stop_event.wait(period)
 
-    def _publish_person_pose(self, x: float, y: float, heading: float) -> None:
+    @staticmethod
+    def _publish_person_pose(
+        transport: PubSubTransport[Pose], x: float, y: float, heading: float
+    ) -> None:
         # The mesh faces backwards, hence the half turn (as in PersonTrackPublisher).
         yaw = heading + math.pi
         pose = Pose(
             position=[x, y, 0.0],
             orientation=[0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2)],
         )
-        self._person_pose.broadcast(None, pose)
+        transport.broadcast(None, pose)

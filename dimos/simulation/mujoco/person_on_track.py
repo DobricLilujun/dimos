@@ -26,11 +26,13 @@ from dimos.msgs.geometry_msgs.Pose import Pose
 class PersonPositionController:
     """Controls the person position in MuJoCo by subscribing to LCM pose updates."""
 
-    def __init__(self, model: mujoco.MjModel) -> None:
-        person_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "person")
+    def __init__(
+        self, model: mujoco.MjModel, body_name: str = "person", topic: str = "/person_pose"
+    ) -> None:
+        person_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
         self._person_mocap_id = model.body_mocapid[person_body_id]
         self._latest_pose: Pose | None = None
-        self._transport: PubSubTransport[Pose] = make_transport("/person_pose", Pose)
+        self._transport: PubSubTransport[Pose] = make_transport(topic, Pose)
         self._transport.subscribe(self._on_pose)
 
     def _on_pose(self, pose: Pose) -> None:
