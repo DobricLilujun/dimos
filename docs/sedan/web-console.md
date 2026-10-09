@@ -99,8 +99,11 @@ following](person-following.md)) add a **People** group to the control deck:
 - In simulation the same two people walk their loops as in the demos. On a real
   robot, supervise in person: the robot walks toward and behind a real person.
 
-> **Status.** The simulation side of these stacks, through the console, has not yet
-> been confirmed by hand on a display. The real robot has not been tried.
+> **Status.** The two stacks were run through the console in MuJoCo and checked by
+> hand: the People buttons, Stop and the keyboard ending a follow, the Settings
+> values, and the persistent stack building a new map. The **live follow distance**
+> slider is covered by tests and was exercised through the console on replay data.
+> The real robot has not been tried; supervise the first runs.
 
 ## The module
 

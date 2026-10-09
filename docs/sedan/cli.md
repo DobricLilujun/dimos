@@ -11,6 +11,10 @@ the original `unitree-go2-agentic` blueprint is unchanged.
 |---|---|
 | `unitree-go2-agentic-persistent` | `PersistentGo2Map` + `PersistentGo2Planner` + fusion gate + VLM/segmentation + `ReplySpeaker`. No web UI. |
 | `unitree-go2-agentic-persistent-console` | The persistent stack **plus** the embedded `RobotConsoleModule` (control deck + chat, original Rerun viewer preserved). |
+| `unitree-go2-agentic-persistent-person-following` | The persistent demo stack plus the person skills (`GoalTracker`, `PersonNavigationSkillContainer`); the stock `follow_person` is disabled. See [person following](person-following.md). |
+| `demo-unitree-go2-agentic-persistent-person-following` | That stack in MuJoCo, with two walking people, a second simulated person and an 8 m lidar. |
+| `demo-unitree-go2-agentic-person-following` | `unitree-go2-agentic` plus the person skills and two walking people, for MuJoCo (no persistent map). |
+| `demo-unitree-go2-dynamic-goal` | `unitree-go2` plus `GoalTracker` following a person walking a loop, for MuJoCo (no agent). |
 | `unitree-go2-agentic-persistent-demo` | The persistent stack with `DemoExplorer` (frontier + efficient strategies) in place of the Wavefront explorer. |
 
 Standalone console (independent of the robot stack; it manages its own stack):
@@ -89,6 +93,21 @@ dimos run unitree-go2-agentic-persistent \
 | `vlm-enable-object-tagging` | `false` | Automatic object tagging |
 | `vlm-distance-m` | `1.0` | Travel-distance trigger for tagging (not "every second") |
 | `object-segmenter` | — | `yolo` for instance segmentation; otherwise the VLM box is the mask |
+
+## Person following and simulation flags
+
+The web console's person-following stacks pass these for you
+(**Settings → Person following**); they are listed in full on the
+[person following page](person-following.md#configuration).
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--goaltracker.follow-distance-m` | `0.5` (console: `3.0`) | Stop this far short of the person |
+| `--goaltracker.update-threshold-m` | `0.5` | Re-plan once the person moved this far |
+| `--personnavigationskillcontainer.search-step-deg` | `60` | Turn step when searching for a lost person; `0` turns it off |
+| `--personnavigationskillcontainer.vlm-model` | `gpt-5.6-luna` | Vision model used to find the person |
+| `--mujoco-second-person` | `false` | Add a second, differently dressed person to the MuJoCo scene |
+| `--mujoco-lidar-max-range` | `3 m` | Simulated lidar range in metres |
 
 ## Other opt-in features
 

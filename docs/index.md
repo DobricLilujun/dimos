@@ -27,15 +27,15 @@ the new dimOS features documented here.
 | **Dynamic goals** | The planner takes one goal at a time; nothing retargets it | `GoalTracker` — re-sends the goal when a moving target has moved far enough, stopping a set distance short |
 | **Simulation** | MuJoCo office with one person and a 3 m lidar | Opt-in second person (`--mujoco-second-person`) and a longer lidar (`--mujoco-lidar-max-range`) |
 | **Agent skills** | `move`, `speak`, `navigate`, … | + `navigate_to_memory_tag`, `navigate_near_memory_tag`, `tag_object`, `tag_location`, `query_*`, `navigate_with_text`, `tag_person`, `navigate_to_person`, `follow_person_with_planner`, `stop_following_person`, `describe_visible_people` |
-| **Console / UI** | CLI (`dimos`), `dimos shell`, MCP server | `RobotConsoleModule` — web console (`:8090`), control deck + ChatGPT-style chat, SSE |
+| **Console / UI** | CLI (`dimos`), `dimos shell`, MCP server | `RobotConsoleModule` — web console (`:8090`), control deck + ChatGPT-style chat, SSE; blueprint and connection (robot / replay / MuJoCo) selectors, a People group and a live person follow distance |
 | **Speech** | `SpeakSkill` (TTS) | + Go2 speaker TTS, "Puppy" ambient commentary, microphone conversation |
-| **CLI / blueprints** | `unitree-go2-agentic`, … | + `unitree-go2-agentic-persistent[-console]`, `unitree-go2-agentic-persistent-demo`, `demo-unitree-go2-dynamic-goal`, `demo-unitree-go2-agentic-person-following` |
+| **CLI / blueprints** | `unitree-go2-agentic`, … | + `unitree-go2-agentic-persistent[-console]`, `unitree-go2-agentic-persistent-demo`, `demo-unitree-go2-dynamic-goal`, `demo-unitree-go2-agentic-person-following`, `unitree-go2-agentic-persistent-person-following` (and its `demo-` MuJoCo variant) |
 | **Configuration** | `GlobalConfig` | + opt-in flags: `--gallery-dir`, `--scene-graph-server.port`, `--fusion-motion-gate.*`, … |
 
 ## What's new (and where to read it)
 
 - [Quick start: the persistent workflow](sedan/quickstart.md) — create a map, restore it, align, query, navigate, and tag in a single session.
-- [The web console](sedan/web-console.md) — `RobotConsoleModule`: a control deck and a ChatGPT-style chat, embedded or standalone.
+- [The web console](sedan/web-console.md) — `RobotConsoleModule`: a control deck and a ChatGPT-style chat, embedded or standalone; pick a blueprint and a real robot, replay or MuJoCo connection.
 - [Persistent maps & relocalization](sedan/persistent-maps.md) — save/restore maps, alignment, the fusion gate, and PGO loop closure.
 - [Demo exploration](sedan/demo-exploration.md) — `DemoExplorer`: frontier + efficient (Dijkstra) strategies and gain-aware stopping.
 - [Nearby & visual arrival, speech, and "Puppy"](sedan/movement-and-arrival.md) — navigate to a memory tag by proximity, visual arrival, and the Go2 speaker.

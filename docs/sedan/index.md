@@ -40,6 +40,8 @@ table on the home page](../index.md).
 | **Person recognition** | `NamedPersonRecognizerSkillContainer` | Recognize named people in the live camera (embedding or OpenCV LBPH) and speak / report their name. |
 | **Scene graph server** | `SceneGraphServerModule` | A queryable graph of objects, places, and their relations for the agent. |
 | **Fusion gate** | `FusionMotionGate` | Auto-pause permanent-map growth while the robot is stationary (low-speed odometry), so maps don't thicken or drift at rest. |
+| **Person following** | `PersonNavigationSkillContainer`, `GoalTracker` | Tag, walk to and follow a person picked out by what they wear, planned around obstacles, with a turn-on-the-spot search when they are lost. See [person following](person-following.md). |
+| **Console stacks & simulation** | `ConsoleSettings`, `StackProfile` | Start other blueprints (and a MuJoCo simulation) from the web console, with a People group and a live follow distance. See [the web console](web-console.md#choosing-a-stack-and-a-connection). |
 | **PGO loop closure** | `PGOMap` | Optional pose-graph optimization that corrects the *current* run's map, tags, and pose together. |
 | **Speech & "Puppy"** | `ReplySpeaker`, `GO2Connection` | Speak the agent's replies through the Go2's own audio; optional ambient commentary and half-duplex microphone conversation. |
 

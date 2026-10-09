@@ -183,6 +183,10 @@ position is **not** predicted.
 - Targets must be in the same frame as odometry; the planner ignores `frame_id`.
 - RPCs: `start_tracking`, `stop_tracking` (also cancels the planner goal) and
   `update_target(x, y)`, so you can drive it by hand from `dimos shell`.
+- `set_follow_distance(metres)` and `follow_distance_status()` change the stopping
+  distance while it runs (the web console's live slider uses them). The next target
+  sends a goal at the new distance. The robot closes in to a smaller distance; it
+  does not back away when the distance is raised.
 
 The dynamic-goal demo turns it on and feeds it the scripted person's true
 position. The agentic demo leaves it off until the follow skill starts it and
@@ -313,6 +317,9 @@ comes from the renders above and **has not been tried in the simulator**.
 | Unit tests for the tracker, the skills (including the search with a simulated turning robot), the second person, the texture recolour and the new `SpatialMemory` RPCs | pass |
 | Headless run of the agentic blueprint on recorded data, with the agent calling the real vision model | tools are exposed; describe, tag, navigate and follow-start all worked |
 | Identifying and following the right person in the MuJoCo demo | confirmed by running it |
+| The same skills through the web console (stacks, People buttons, settings, Stop) in MuJoCo | confirmed by running it |
+| The live follow distance (tracker, console route and slider) | unit tests, and through the console on replay data; not yet seen in the MuJoCo window |
+| On a real robot | not tried |
 | The lost-person search in the MuJoCo demo | **not yet confirmed** |
 
 ## Related

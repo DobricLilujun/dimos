@@ -47,6 +47,21 @@ These are run as part of the pytest suite. **They cannot** prove
 real-hardware navigation or vision — that requires a hardware acceptance run
 (§3).
 
+### Person following and the console stacks
+
+Also offline (no robot, no simulator, no cloud calls): the stack profiles, every launch
+command checked against its real blueprint, readiness, the simulated scene folders,
+which operations each stack shows and the server refuses, Stop and keyboard takeover
+ending a follow, and the live follow-distance route and its validation. Run with
+`pytest dimos/web/console dimos/agents/skills/test_person_navigation.py
+dimos/simulation/mujoco dimos/navigation/go2/replanning_a_star`.
+
+The browser tests (`test_console_browser.py`, the `web_browser` marker) need Playwright
+and are not part of the default run. The page's JavaScript can only be syntax-checked
+without a browser, so check the selectors, the People buttons and the sliders by hand
+(see [the web console](web-console.md#choosing-a-stack-and-a-connection)). Starting
+MuJoCo needs a display; the person skills need a vision-model key and cost API calls.
+
 ## 3. Real-hardware acceptance (needs a Go2)
 
 Because the offline tests deliberately avoid the robot and the cloud, these
