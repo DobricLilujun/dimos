@@ -51,7 +51,7 @@ theme:
     text: Inter
     code: JetBrains Mono
   features:
-    - navigation.instant
+    # - navigation.instant  # stripped progress bar body content
     - navigation.tracking
     - navigation.sections
     - navigation.top
@@ -113,6 +113,6 @@ plugins:
       auto_caption: false
       skip_classes: [no-lightbox]
   - minify:
-      minify_html: true
+      minify_html: false
 
 # (deploy re-run @ 2026-10-06T08:32:16Z)
