@@ -548,7 +548,7 @@ function buildDeck() {
   for (const op of CONFIG.operations) {
     (byGroup[op.group] = byGroup[op.group] || []).push(op);
   }
-  const order = ["Alignment", "Map", "Tagging", "People", "Memory", "Navigation", "Exploration"];
+  const order = ["Alignment", "Map", "Tagging", "People", "Memory", "Navigation", "Exploration", "Posture"];
   for (const group of order) {
     const ops = byGroup[group]; if (!ops) continue;
     const g = el("div", "group");

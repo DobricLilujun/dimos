@@ -1,16 +1,21 @@
 title: DimOS Agents Additions
 nav:
-  - index.md
-  - quickstart.md
-  - web-console.md
-  - persistent-maps.md
-  - demo-exploration.md
-  - movement-and-arrival.md
-  - voice-and-tagging.md
-  - person-recognition.md
-  - person-following.md
-  - scene-graph.md
-  - perception-vlm.md
-  - testing.md
-  - cli.md
-  - logging.md
+  - Getting Started:
+      - index.md
+      - quickstart.md
+  - Robot Behavior:
+      - demo-exploration.md
+      - movement-and-arrival.md
+      - sit-and-look-up.md
+      - voice-and-tagging.md
+      - person-recognition.md
+      - person-following.md
+  - Perception & Memory:
+      - persistent-maps.md
+      - scene-graph.md
+      - perception-vlm.md
+  - Interfaces & Ops:
+      - web-console.md
+      - testing.md
+      - cli.md
+      - logging.md

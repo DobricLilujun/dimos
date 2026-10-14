@@ -231,6 +231,30 @@ OPERATIONS: dict[str, Operation] = {
         human_only=True,
         description="Navigate to this run's starting location after alignment.",
     ),
+    # ---- Posture (sit / look up) ----
+    "sit_to_observe": Operation(
+        "sit_to_observe",
+        "Sit to look up",
+        "mcp",
+        "Posture",
+        human_only=True,
+        description=(
+            "Sit the robot to raise the camera and lidar view, then rise back on its own. "
+            "Use before tagging a tall object or inspecting an elevated frontier. Supervise the robot."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "seconds": {
+                    "type": "number",
+                    "default": 3,
+                    "minimum": 0.5,
+                    "maximum": 30,
+                    "description": "How long to stay seated (seconds).",
+                },
+            },
+        },
+    ),
     # ---- Alignment (reconnect state alignment) ----
     "alignment_status": Operation(
         "alignment_status",

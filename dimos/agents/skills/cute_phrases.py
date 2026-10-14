@@ -87,6 +87,19 @@ MODE_PHRASES: dict[str, tuple[str, str]] = {
         "Tagged this spot, woof!",
         "",
     ),
+    # Sit / look-up actions
+    "sit": (
+        "Whoa — sitting up to look around, woof!",
+        "",
+    ),
+    "sit_to_observe": (
+        "Whoa — sitting up to look around, woof!",
+        "All done — standing back up!",
+    ),
+    "rise_sit": (
+        "",
+        "All done — standing back up!",
+    ),
 }
 
 # A neutral fallback so any mode the agent picks still gets a friendly line.

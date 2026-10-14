@@ -420,6 +420,31 @@ class UnitreeWebRTCConnection(Resource):
             self.publish_request(RTC_TOPIC["SPORT_MOD"], {"api_id": SPORT_CMD["StandDown"]})
         )
 
+    def sit(self) -> bool:
+        """Command the robot to sit down (crouch on its haunches).
+
+        Sitting lowers the body so the top-mounted camera and lidar pitch more
+        upward and see higher / overhead objects — useful to inspect a tall
+        object or an elevated frontier before tagging or navigating.
+        """
+        return bool(self.publish_request(RTC_TOPIC["SPORT_MOD"], {"api_id": SPORT_CMD["Sit"]}))
+
+    def rise_sit(self) -> bool:
+        """Rise back to a standing posture from a sitting position."""
+        return bool(
+            self.publish_request(RTC_TOPIC["SPORT_MOD"], {"api_id": SPORT_CMD["RiseSit"]})
+        )
+
+    def recovery_stand(self) -> bool:
+        """Recover to a stance ready for more commands.
+
+        Should run after dynamic commands like ``sit``/``jump`` so the robot
+        is back in a walking-ready posture before motion resumes.
+        """
+        return bool(
+            self.publish_request(RTC_TOPIC["SPORT_MOD"], {"api_id": SPORT_CMD["RecoveryStand"]})
+        )
+
     async def handstand(self):  # type: ignore[no-untyped-def]
         return self.publish_request(
             RTC_TOPIC["SPORT_MOD"],
