@@ -1022,6 +1022,32 @@ class RobotConsoleModule(Module):
                 Operation(method, "", "rpc", "", module="PersistentGo2Planner"), args
             )
 
+        @app.api_route("/api/planner-width", methods=["GET", "POST"])
+        async def api_planner_width(request: Request) -> dict[str, Any]:
+            if self.runtime is not None and not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            if not self._profile().has_map:
+                return {"ok": False, "error": "This stack has no persistent planner"}
+            args = {}
+            method = "planner_width_status"
+            if request.method == "POST":
+                payload = await request.json()
+                width = payload.get("width_m") if isinstance(payload, dict) else None
+                if (
+                    not isinstance(width, (int, float))
+                    or isinstance(width, bool)
+                    or not math.isfinite(width)
+                    or not 0.1 <= width <= 1.0
+                ):
+                    return {
+                        "ok": False,
+                        "error": "Planner width must be between 0.1 and 1.0 meters",
+                    }
+                method, args = "set_planner_width", {"width_m": float(width)}
+            return await self._call_rpc(
+                Operation(method, "", "rpc", "", module="PersistentGo2Planner"), args
+            )
+
         @app.api_route("/api/follow-distance", methods=["GET", "POST"])
         async def api_follow_distance(request: Request) -> dict[str, Any]:
             if self.runtime is not None and not self.runtime.ready:

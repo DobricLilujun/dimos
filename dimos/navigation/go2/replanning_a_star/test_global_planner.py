@@ -47,6 +47,28 @@ def test_cancel_while_path_is_computed_does_not_start_stale_navigation(planner, 
     start.assert_not_called()
 
 
+def test_set_robot_width_updates_planner_without_replanning_when_idle(planner, mocker):
+    plan_path = mocker.patch.object(planner, "_plan_path")
+
+    planner.set_robot_width(0.6)
+
+    assert planner.robot_width() == 0.6
+    plan_path.assert_not_called()
+
+
+def test_set_robot_width_replans_active_goal(planner, mocker):
+    planner.handle_odom(PoseStamped(position=[0, 0, 0]))
+    planner._current_goal = PoseStamped(position=[2, 0, 0])
+    reset = mocker.patch.object(planner._replan_limiter, "reset")
+    plan_path = mocker.patch.object(planner, "_plan_path")
+
+    planner.set_robot_width(0.7)
+
+    assert planner.robot_width() == 0.7
+    reset.assert_called_once_with()
+    plan_path.assert_called_once_with()
+
+
 def test_find_wide_path_with_start_inside_inflation() -> None:
     """A wall observed at the last moment can be so close that its inflation
     covers the robot's own cell (the robot drove there before the costmap

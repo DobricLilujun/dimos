@@ -174,13 +174,13 @@ def test_demo_uses_new_explorer_but_original_blueprint_keeps_legacy():
     assert parsed.module_kwargs("go2connection")["puppy_enabled"] is True
 
 
-@pytest.mark.parametrize("width", [0.049, 1.01, float("nan"), float("inf")])
+@pytest.mark.parametrize("width", [0.099, 1.01, float("nan"), float("inf")])
 def test_demo_planner_width_rejects_invalid_values(width):
     with pytest.raises(ValidationError):
         ConsoleSettings(planner_robot_width=width)
 
 
-@pytest.mark.parametrize("width", [0.05, 0.3, 0.4, 1.0])
+@pytest.mark.parametrize("width", [0.1, 0.3, 0.4, 1.0])
 def test_demo_planner_width_persists_and_overrides_only_planner(runtime, width):
     runtime.save(SettingsUpdate(settings=ConsoleSettings(planner_robot_width=width)))
     restored = ConsoleRuntime(runtime.project_dir, runtime.settings_path)
@@ -614,9 +614,7 @@ def test_exit_shutdown_removes_real_owned_process_tree(runtime, owned_process_tr
     assert runtime.status()["state"] == "stopped"
 
 
-def test_setup_console_logging_creates_log_dir_and_enables_debug(
-    tmp_path, monkeypatch, mocker
-):
+def test_setup_console_logging_creates_log_dir_and_enables_debug(tmp_path, monkeypatch, mocker):
     monkeypatch.setenv("DIMOS_LOG_DIR", str(tmp_path))
     monkeypatch.delenv("DIMOS_LOG_LEVEL", raising=False)
     mocker.patch("dimos.web.console.logging_setup.set_run_log_dir")

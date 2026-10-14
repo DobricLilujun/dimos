@@ -794,7 +794,9 @@ async def test_the_follow_distance_needs_a_running_stack(module, tmp_path, mocke
     rpc.assert_not_called()
 
 
-@pytest.mark.parametrize("route", ["navigation-distance", "navigation-speed", "visual-arrival"])
+@pytest.mark.parametrize(
+    "route", ["navigation-distance", "navigation-speed", "planner-width", "visual-arrival"]
+)
 @pytest.mark.parametrize("key", ["go2", "person-following"])
 async def test_persistent_planner_controls_answer_at_once_on_stacks_without_the_planner(
     module, tmp_path, mocker, route, key
@@ -809,7 +811,9 @@ async def test_persistent_planner_controls_answer_at_once_on_stacks_without_the_
     rpc.assert_not_called()
 
 
-@pytest.mark.parametrize("route", ["navigation-distance", "navigation-speed", "visual-arrival"])
+@pytest.mark.parametrize(
+    "route", ["navigation-distance", "navigation-speed", "planner-width", "visual-arrival"]
+)
 async def test_persistent_planner_controls_still_reach_the_planner_on_the_persistent_stack(
     module, tmp_path, mocker, route
 ):

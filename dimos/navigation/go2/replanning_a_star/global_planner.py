@@ -146,6 +146,18 @@ class GlobalPlanner(Resource):
     def reset_safe_goal_clearance(self) -> None:
         self._reset_safe_goal_clearance()
 
+    def robot_width(self) -> float:
+        with self._lock:
+            return self._global_config.robot_width
+
+    def set_robot_width(self, width_m: float) -> None:
+        with self._lock:
+            self._global_config.robot_width = width_m
+            should_replan = self._current_goal is not None and self._current_odom is not None
+        if should_replan:
+            self._replan_limiter.reset()
+            self._plan_path()
+
     def cancel_goal(self, *, but_will_try_again: bool = False, arrived: bool = False) -> None:
         # return silently so we don't flood the logs.
         with self._lock:

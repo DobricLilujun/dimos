@@ -346,6 +346,25 @@ async def test_navigation_speed_api_passes_live_limit_and_rejects_invalid_values
     assert call.call_count == 2
 
 
+async def test_planner_width_api_passes_live_width_and_rejects_invalid_values(
+    client, module, mocker
+):
+    call = mocker.patch.object(
+        module, "_call_rpc", return_value={"ok": True, "result": {"width_m": 0.6}}
+    )
+    response = await client.get("/api/planner-width")
+    assert response.json()["result"] == {"width_m": 0.6}
+    assert call.call_args.args[0].method == "planner_width_status"
+    response = await client.post("/api/planner-width", json={"width_m": 0.6})
+    assert response.json()["result"] == {"width_m": 0.6}
+    assert call.call_args.args[0].method == "set_planner_width"
+    assert call.call_args.args[1] == {"width_m": 0.6}
+    for value in (True, "0.6", 0.09, 1.01, None):
+        response = await client.post("/api/planner-width", json={"width_m": value})
+        assert response.json()["ok"] is False
+    assert call.call_count == 2
+
+
 async def test_visual_search_api_requires_rotation_consent_and_passes_switch(
     client, module, mocker
 ):

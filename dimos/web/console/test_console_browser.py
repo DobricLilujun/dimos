@@ -70,6 +70,8 @@ def console_server(tmp_path, mocker):
             return {"ok": True, "result": dict(live_speed)}
         if op.key == "nearby_navigation_status":
             return {"ok": True, "result": {"distance_m": 1.0}}
+        if op.key == "planner_width_status":
+            return {"ok": True, "result": {"width_m": 0.3}}
         if op.key == "visual_arrival_status":
             return {"ok": True, "result": {"enabled": False, "searching": False}}
         if op.key == "reply_speaker_status":
@@ -84,6 +86,8 @@ def console_server(tmp_path, mocker):
             }
         calls.append((op.key, args))
         if op.key == "set_nearby_arrival_distance":
+            return {"ok": True, "result": args}
+        if op.key == "set_planner_width":
             return {"ok": True, "result": args}
         if op.key == "configure_visual_arrival":
             return {"ok": True, "result": {**args, "searching": False}}
@@ -249,8 +253,8 @@ def test_settings_save_all_workflow_parameters_without_exposing_keys(page, conso
     assert page.locator("#setting-auto_pause_fusion").is_checked()
     page.locator("#setting-fusion_resume_speed").fill("0.05")
     assert page.locator("#setting-planner_robot_width").input_value() == "0.3"
-    assert page.locator("#setting-planner_robot_width").get_attribute("min") == "0.05"
-    page.locator("#setting-planner_robot_width").fill("0.05")
+    assert page.locator("#setting-planner_robot_width").get_attribute("min") == "0.10"
+    page.locator("#setting-planner_robot_width").fill("0.10")
     page.locator("#setting-navigation_speed_limit").fill("0.35")
     page.locator("#setting-vlm_distance_m").fill("2.5")
     page.locator("#setting-rerun_grpc_port").fill("9887")
@@ -265,7 +269,7 @@ def test_settings_save_all_workflow_parameters_without_exposing_keys(page, conso
     assert runtime.settings.pgo_enabled is True
     assert runtime.settings.auto_pause_fusion is True
     assert runtime.settings.fusion_resume_speed == 0.05
-    assert runtime.settings.planner_robot_width == 0.05
+    assert runtime.settings.planner_robot_width == 0.1
     assert runtime.settings.navigation_speed_limit == 0.35
     assert runtime.settings.replay is True
     assert runtime.settings.rerun_grpc_port == 9887
@@ -563,6 +567,18 @@ def test_nearby_distance_slider_updates_next_trip_threshold(page, console_server
     assert ("set_nearby_arrival_distance", {"distance_m": 1.7}) in console_server[3]
 
 
+def test_planner_width_slider_updates_live_clearance(page, console_server):
+    start_stack(page)
+    slider = page.get_by_role("slider", name="Planner width", exact=True)
+    assert slider.get_attribute("min") == "0.1"
+    slider.fill("0.6")
+    with page.expect_response("**/api/planner-width") as response:
+        slider.dispatch_event("change")
+    assert response.value.json() == {"ok": True, "result": {"width_m": 0.6}}
+    assert page.locator("#planner-width-value").inner_text() == "0.60 m"
+    assert ("set_planner_width", {"width_m": 0.6}) in console_server[3]
+
+
 def test_visual_arrival_toggle_requires_rotation_consent(page, console_server):
     start_stack(page)
     page.locator("#visual-arrival-toggle").click()
@@ -581,6 +597,8 @@ def test_murmur_has_separate_toggle_and_shows_camera_error(page, console_server,
     async def rpc(op, args):
         if op.key == "nearby_navigation_status":
             return {"ok": True, "result": {"distance_m": 1.0}}
+        if op.key == "planner_width_status":
+            return {"ok": True, "result": {"width_m": 0.3}}
         if op.key == "visual_arrival_status":
             return {"ok": True, "result": {"enabled": False, "searching": False}}
         if op.key == "configure_puppy_murmur":
@@ -620,6 +638,8 @@ def test_old_stack_cannot_claim_murmur_is_running(page, console_server, mocker):
     async def rpc(op, args):
         if op.key == "nearby_navigation_status":
             return {"ok": True, "result": {"distance_m": 1.0}}
+        if op.key == "planner_width_status":
+            return {"ok": True, "result": {"width_m": 0.3}}
         if op.key == "visual_arrival_status":
             return {"ok": True, "result": {"enabled": False, "searching": False}}
         return {"ok": True, "result": {"enabled": True, "generation": 3}}
@@ -704,6 +724,8 @@ def test_go2_speaker_requires_max_volume_confirmation_and_can_be_disabled(
     async def rpc(op, args):
         if op.key == "nearby_navigation_status":
             return {"ok": True, "result": {"distance_m": 1.0}}
+        if op.key == "planner_width_status":
+            return {"ok": True, "result": {"width_m": 0.3}}
         if op.key == "visual_arrival_status":
             return {"ok": True, "result": {"enabled": False, "searching": False}}
         if op.key == "configure_reply_speaker":

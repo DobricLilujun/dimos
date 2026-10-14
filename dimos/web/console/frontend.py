@@ -428,6 +428,12 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
         <button type="button" class="chip link" id="murmur-toggle" disabled>Murmur: Off</button>
         <span id="puppy-status" role="status">Enable Go2 speaker to start Puppy.</span>
       </label>
+      <label class="hint" for="planner-width">Planner width:
+        <output id="planner-width-value">0.30 m</output>
+        <input id="planner-width" type="range" min="0.1" max="1" step="0.05" value="0.3"
+          aria-label="Planner width" style="width:100%" disabled>
+        <span>Larger values keep planned paths farther from obstacles. Values below the robot's actual footprint risk collisions. Applies immediately and may re-plan the active route; this session only.</span>
+      </label>
       </div>
       <div class="in">
         <div class="row">
@@ -903,6 +909,7 @@ function updateControls() {
   if($("#tagging-toggle"))$("#tagging-toggle").disabled=!ready;
   $("#speaker-toggle").disabled=!ready || !CONFIG.standalone;
   $("#navigation-distance").disabled=!ready;
+  $("#planner-width").disabled=!ready || $("#planner-width").dataset.saving==="true";
   $("#follow-distance").disabled=!ready || !state.people || $("#follow-distance").dataset.saving==="true";
   $("#navigation-speed").disabled=!ready || !state.speedEnabled || $("#navigation-speed").dataset.saving==="true";
   $("#visual-arrival-toggle").disabled=!ready;
@@ -1007,6 +1014,21 @@ async function boot() {
   $("#navigation-speed").oninput = () => {
     $("#navigation-speed-value").textContent=Number($("#navigation-speed").value).toFixed(2)+" m/s";
   };
+  $("#planner-width").oninput = () => {
+    $("#planner-width-value").textContent=Number($("#planner-width").value).toFixed(2)+" m";
+  };
+  $("#planner-width").onchange = async () => {
+    const slider=$("#planner-width");slider.disabled=true;slider.dataset.saving="true";
+    try {
+      const result=(await api("/api/planner-width",{width_m:Number(slider.value)})).result;
+      slider.dataset.confirmed=result.width_m;slider.value=result.width_m;
+      $("#planner-width-value").textContent=Number(result.width_m).toFixed(2)+" m";
+      log("ok","navigation","Planner width: "+result.width_m+" m");
+    }catch(e){
+      addSystem(e.message);slider.value=slider.dataset.confirmed || "0.3";
+      $("#planner-width-value").textContent=Number(slider.value).toFixed(2)+" m";
+    }finally{delete slider.dataset.saving;updateControls();}
+  };
   $("#navigation-speed").onchange = async () => {
     const slider=$("#navigation-speed");slider.disabled=true;slider.dataset.saving="true";
     try {
@@ -1095,6 +1117,13 @@ async function refreshStatus() {
       if(!result || !Number.isFinite(result.distance_m))throw new Error("Invalid nearby distance status");
       slider.value=result.distance_m;slider.dataset.confirmed=result.distance_m;
       $("#navigation-distance-value").textContent=Number(result.distance_m).toFixed(1)+" m";
+      const widthSlider=$("#planner-width");
+      if(document.activeElement!==widthSlider && !widthSlider.dataset.saving) {
+        const width=(await api("/api/planner-width")).result;
+        if(!width || !Number.isFinite(width.width_m))throw new Error("Invalid planner width status");
+        widthSlider.value=width.width_m;widthSlider.dataset.confirmed=width.width_m;
+        $("#planner-width-value").textContent=Number(width.width_m).toFixed(2)+" m";
+      }
     }
     if(!CONFIG.standalone || state.stack==="running") {
       if(state.map) {
@@ -1147,7 +1176,7 @@ const settingFields = [
     ["fusion_resume_rotation_deg","Resume rotation threshold (deg/s; > stationary)","number"],
     ["pgo_enabled","PGO loop correction (fixed world; applies on restart)","checkbox"],
     ["nearby_arrival_distance","Nearby stop distance (m; 0.3-3.0; restart default)","number"],
-    ["planner_robot_width","Demo planner width (m; 0.05-1.00; restart; below actual footprint risks collisions)","number"],
+    ["planner_robot_width","Demo planner width (m; 0.10-1.00; restart default; below actual footprint risks collisions)","number"],
     ["navigation_speed_limit","Navigation speed limit (m/s; 0.10-0.55; restart default; live slider is session-only)","number"],
     ["scene_map_dir","Scene directory (maps and tags)","text"],
     ["capture_mode","Restore capture mode","select",["manual","rotation"]],
@@ -1183,7 +1212,7 @@ async function openSettings() {
         if(type==="password"){input.readOnly=true;input.value=data.secrets[key.toUpperCase()]?"********":"";input.placeholder=data.secrets[key.toUpperCase()]?"Configured in .env":"Not configured in .env";input.required=false;}
         else if(type!=="checkbox")input.required=true;
         if(type==="number")input.step=key.endsWith("port")?"1":"any";
-        if(key==="planner_robot_width"){input.min="0.05";input.max="1.00";input.step="0.01";}
+        if(key==="planner_robot_width"){input.min="0.10";input.max="1.00";input.step="0.01";}
         if(key==="navigation_speed_limit"){input.min="0.10";input.max="0.55";input.step="0.05";}
         if(key==="follow_distance_m"){input.min="0.5";input.max="8";input.step="0.1";}
         if(key==="follow_update_threshold_m"){input.min="0.1";input.max="3";input.step="0.1";}

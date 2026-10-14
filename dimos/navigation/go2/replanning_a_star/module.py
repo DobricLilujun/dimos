@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import os
 from typing import Any
 
@@ -170,3 +171,19 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
     @rpc
     def reset_safe_goal_clearance(self) -> None:
         self._planner.reset_safe_goal_clearance()
+
+    @rpc
+    def planner_width_status(self) -> dict[str, float]:
+        return {"width_m": self._planner.robot_width()}
+
+    @rpc
+    def set_planner_width(self, width_m: float) -> dict[str, float]:
+        if (
+            isinstance(width_m, bool)
+            or not isinstance(width_m, (int, float))
+            or not math.isfinite(width_m)
+            or not 0.1 <= width_m <= 1.0
+        ):
+            raise ValueError("Planner width must be between 0.1 and 1.0 meters")
+        self._planner.set_robot_width(float(width_m))
+        return self.planner_width_status()
