@@ -265,6 +265,14 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
 .inventory table { width:100%; border-collapse:collapse; }
 .inventory td, .inventory th { padding:7px 4px; border-bottom:1px solid var(--line); text-align:left; overflow-wrap:anywhere; }
 .inventory .btn { padding:5px; font-size:11px; }
+/* Glowing tag points (Resident-Evil style) over the map: hover for a tooltip,
+   click to navigate. The cloud is a 2D projection of world x/y. */
+.tag-cloud { position:relative; height:180px; margin:8px 0; border:1px solid var(--line); border-radius:8px; background:radial-gradient(circle at 50% 50%, rgba(24,52,38,.55), #05090f); overflow:hidden; }
+.tag-point { position:absolute; width:14px; height:14px; margin:-7px; border-radius:50%; background:var(--accent); box-shadow:0 0 8px 2px rgba(46,220,150,.75), 0 0 16px 4px rgba(46,220,150,.35); cursor:pointer; transition:transform .12s; }
+.tag-point:hover { transform:scale(1.5); }
+.tag-tip { position:absolute; z-index:5; pointer-events:none; background:rgba(10,17,25,.92); border:1px solid var(--line); border-radius:6px; padding:5px 8px; font-size:11px; color:var(--text); white-space:nowrap; transform:translate(-50%,-140%); }
+.tag-tip b { display:block; color:var(--accent); font-size:11px; }
+.tag-tip .pos { color:var(--muted); font-size:10px; }
 @media(max-width:1100px) { main { grid-template-columns:260px minmax(0,1fr) 320px; } .title { display:none; } }
 @media(max-width:800px) { .app { height:auto; min-height:100vh; grid-template-rows:auto 1fr auto; } header { flex-wrap:wrap; padding:10px; gap:8px; } main { grid-template-columns:1fr; } aside.deck { max-height:45vh; } center.viz { height:50vh; } aside.chat { height:65vh; } footer { flex-wrap:wrap; padding:10px; gap:8px; } .form-grid { grid-template-columns:1fr; } }
 
@@ -677,12 +685,50 @@ function renderInventory(result) {
   if (!result || !Array.isArray(result.tags)) return;
   const wrap = $("#inventory"); wrap.replaceChildren();
   const summary = el("p"); summary.textContent = `${result.matching_tag_count} matching / ${result.total_stored_tags} saved · world`; wrap.appendChild(summary);
+  wrap.appendChild(renderTagCloud(result.tags));
   const table = el("table"); const head = el("tr"); for (const title of ["Name / ID","Position","Go"]) {const th=el("th");th.textContent=title;head.appendChild(th);}table.appendChild(head);
   for (const tag of result.tags) {
     const tr = el("tr"); for (const value of [tag.name + "\n" + tag.id, pretty(tag.position)]) {const td=el("td");td.textContent=value;tr.appendChild(td);}
     const td = el("td"); const btn=el("button","btn");btn.textContent="Navigate nearby";btn.dataset.help="Navigate near this saved tag using the configured arrival distance. Supervise robot movement.";btn.dataset.navigation="true";btn.disabled=!state.nav;btn.onclick=()=>runOp(CONFIG.operations.find(op=>op.key==="navigate_near_memory_tag"),btn,{location_id:tag.id});td.appendChild(btn);tr.appendChild(td);table.appendChild(tr);
   }
   wrap.appendChild(table);
+}
+
+// Glowing tag points over a 2D projection of world x/y. Hover shows a tooltip
+// (name / kind / position); click navigates near the tag (Resident-Evil style).
+function renderTagCloud(tags) {
+  const cloud = el("div", "tag-cloud");
+  const tip = el("div", "tag-tip"); tip.hidden = true; cloud.appendChild(tip);
+  const showTip = (point, tag) => {
+    tip.innerHTML = "";
+    const name = el("b"); name.textContent = tag.name || "tag"; tip.appendChild(name);
+    const kind = el("div"); kind.textContent = tag.kind || "object"; tip.appendChild(kind);
+    const pos = el("div", "pos"); pos.textContent = pretty(tag.position); tip.appendChild(pos);
+    const r = point.getBoundingClientRect(), c = cloud.getBoundingClientRect();
+    tip.style.left = (r.left + r.width / 2 - c.left) + "px";
+    tip.style.top = (r.top - c.top) + "px";
+    tip.hidden = false;
+  };
+  const finite = tags.filter(t => Array.isArray(t.position) && t.position.length >= 2 && isFinite(t.position[0]) && isFinite(t.position[1]));
+  if (!finite.length) { const none = el("p", "note"); none.style.cssText = "padding:8px;color:var(--muted)"; none.textContent = "No object tags to show"; cloud.appendChild(none); return cloud; }
+  const xs = finite.map(t => t.position[0]), ys = finite.map(t => t.position[1]);
+  const xMin = Math.min(...xs), xMax = Math.max(...xs), yMin = Math.min(...ys), yMax = Math.max(...ys);
+  const spanX = Math.max(xMax - xMin, 1e-6), spanY = Math.max(yMax - yMin, 1e-6);
+  const pad = 10;
+  for (const tag of finite) {
+    const x = pad + ((tag.position[0] - xMin) / spanX) * (100 - 2 * pad);
+    // Invert y so north (larger y) is up in the view.
+    const y = pad + (1 - (tag.position[1] - yMin) / spanY) * (100 - 2 * pad);
+    const point = el("button", "tag-point");
+    point.style.left = x + "%"; point.style.top = y + "%";
+    point.disabled = !state.nav;
+    point.title = ""; // we render our own tooltip for a richer hover
+    point.onclick = () => runOp(CONFIG.operations.find(op => op.key === "navigate_near_memory_tag"), point, { location_id: tag.id });
+    point.addEventListener("pointerenter", () => showTip(point, tag));
+    point.addEventListener("pointerleave", () => { tip.hidden = true; });
+    cloud.appendChild(point);
+  }
+  return cloud;
 }
 
 // ---------- chat ----------

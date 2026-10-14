@@ -45,6 +45,7 @@ from dimos.web.console.module import (
     _content_to_text,
     _normalize_message,
     _status_probe,
+    build_tag_viz_payload,
     serialize_message,
 )
 from dimos.web.console.settings import ConsoleRuntime
@@ -794,3 +795,33 @@ def test_message_serialization_preserves_tool_call_ids_and_args():
     )
     assert result["tool_call_id"] == "call-1"
     assert result["content"] == "found"
+
+
+def test_tag_viz_payload_includes_name_kind_position_for_objects():
+    from dimos.types.robot_location import RobotLocation
+
+    fire = RobotLocation(
+        "fire extinguisher",
+        (1, 2, 0.3),
+        (0, 0, 0),
+        location_id="fire-1",
+        metadata={"kind": "object", "description": "Near door"},
+    )
+    room = RobotLocation(
+        "living room", (5, 6, 0), (0, 0, 0), location_id="room-1", metadata={"kind": "place"}
+    )
+    payload = build_tag_viz_payload([fire, room])
+    # Only object tags glow; the place is skipped.
+    assert payload == [
+        {
+            "name": "fire extinguisher",
+            "kind": "object",
+            "position": [1.0, 2.0, 0.3],
+            "location_id": "fire-1",
+        }
+    ]
+
+
+def test_tag_viz_payload_handles_no_locations():
+    assert build_tag_viz_payload([]) == []
+    assert build_tag_viz_payload(None) == []

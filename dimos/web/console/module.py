@@ -139,6 +139,37 @@ class Operation:
         }
 
 
+def build_tag_viz_payload(locations: Any) -> list[dict[str, Any]]:
+    """Build the glowing-point tag payload for the 3D view from stored tags.
+
+    Each entry carries the fields the front-end needs to render a glowing
+    point and to navigate to it on click: ``name``, ``kind``, ``position``
+    (world x/y/z), and ``location_id`` (the exact id ``navigate_near_memory_tag``
+    takes). Non-object tags (rooms, people, places) are skipped so only the
+    taggable objects glow.
+    """
+    payload: list[dict[str, Any]] = []
+    for location in locations or []:
+        kind = "object"
+        metadata = getattr(location, "metadata", None)
+        if isinstance(metadata, dict):
+            kind = str(metadata.get("kind", "object"))
+        if kind != "object":
+            continue
+        position = getattr(location, "position", None)
+        if position is None:
+            continue
+        payload.append(
+            {
+                "name": str(getattr(location, "name", "")),
+                "kind": kind,
+                "position": [float(position[0]), float(position[1]), float(position[2])],
+                "location_id": str(getattr(location, "location_id", "") or ""),
+            }
+        )
+    return payload
+
+
 # Order matters: it is the control-deck layout.
 OPERATIONS: dict[str, Operation] = {
     "begin_demo_exploration": Operation(
