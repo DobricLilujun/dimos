@@ -142,9 +142,66 @@ def test_object_tag_merges_only_nearby_same_name(memory, mocker, distance, expec
     assert add.call_count == expected_adds
 
 
+def test_fuzzy_name_within_cluster_is_a_duplicate(memory, mocker):
+    # A near-duplicate name a few metres away is not re-tagged.
+    existing = RobotLocation("fire extinguisher", (0, 0, 0), (0, 0, 0))
+    mocker.patch.object(memory, "get_robot_locations", return_value=[existing])
+    add = mocker.patch.object(memory, "add_named_location", return_value=True)
+    assert memory._tag_object_location(
+        "red fire extinguisher", [1.5, 0, 0], [0, 0, 0], "Seen near door"
+    )
+    add.assert_not_called()
+
+
+def test_distant_similar_name_is_not_a_duplicate(memory, mocker):
+    existing = RobotLocation("fire extinguisher", (0, 0, 0), (0, 0, 0))
+    mocker.patch.object(memory, "get_robot_locations", return_value=[existing])
+    add = mocker.patch.object(memory, "add_named_location", return_value=True)
+    assert memory._tag_object_location(
+        "red fire extinguisher", [5.0, 0, 0], [0, 0, 0], "A second one"
+    )
+    add.assert_called_once_with(
+        "red fire extinguisher", [5.0, 0, 0], [0, 0, 0], "A second one", kind="object", reference_image=None
+    )
+
+
+def test_ground_level_tag_wins_over_elevated_duplicate(memory, mocker):
+    # A new ground-level tag near an elevated same-named tag is a different
+    # instance (the ground one wins), so it is stored, not dropped.
+    existing = RobotLocation("fire extinguisher", (0, 0, 0.7), (0, 0, 0))
+    mocker.patch.object(memory, "get_robot_locations", return_value=[existing])
+    add = mocker.patch.object(memory, "add_named_location", return_value=True)
+    assert memory._tag_object_location(
+        "fire extinguisher", [0.5, 0, 0.5], [0, 0, 0], "On the floor"
+    )
+    add.assert_called_once_with(
+        "fire extinguisher", [0.5, 0, 0.5], [0, 0, 0], "On the floor", kind="object", reference_image=None
+    )
+
+
+def test_elevated_tag_is_dropped_as_ground_duplicate(memory, mocker):
+    # A new elevated tag near a ground-level same-named tag is dropped as a
+    # duplicate so the robot keeps the floor-level one.
+    existing = RobotLocation("fire extinguisher", (0, 0, 0.5), (0, 0, 0))
+    mocker.patch.object(memory, "get_robot_locations", return_value=[existing])
+    add = mocker.patch.object(memory, "add_named_location", return_value=True)
+    assert memory._tag_object_location(
+        "fire extinguisher", [0.5, 0, 0.7], [0, 0, 0], "A shelf copy"
+    )
+    add.assert_not_called()
+
+
+def test_name_similarity_helper_normalises_punctuation(memory):
+    assert memory._name_similarity("Fire-Extinguisher!", "fire extinguisher") == 1.0
+    assert 0.7 < memory._name_similarity("extinguisher", "fire extinguisher") < 1.0
+    assert memory._name_similarity("chair", "table") < 0.82
+
+
 def test_memory_inventory_reads_saved_database_not_session_list(memory, tag_store):
     stored = RobotLocation("fire extinguisher", (1, 2, 3), (0, 0, 0))
     tag_store.location_collection.get.return_value = {"metadatas": [stored.to_vector_metadata()]}
+    assert memory.get_robot_locations()[0].location_id == stored.location_id
+    assert memory.find_robot_location("Fire Extinguisher").position == (1, 2, 3)
     assert memory.get_robot_locations()[0].location_id == stored.location_id
     assert memory.find_robot_location("Fire Extinguisher").position == (1, 2, 3)
 

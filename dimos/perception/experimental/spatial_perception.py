@@ -16,13 +16,15 @@
 Spatial Memory module for creating a semantic map of the environment.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
+from difflib import SequenceMatcher
 import json
 import math
 import os
 from pathlib import Path
 import queue
+import re
 import threading
 import time
 from typing import Any
@@ -122,6 +124,20 @@ class SpatialConfig(ModuleConfig):
     object_max_distance_m: float = 10.0  # Ignore lidar hits beyond this
     object_sensor_time_tolerance_s: float = 1.0
     object_segmenter: str = "auto"  # "auto" | "vlm" | "yolo"
+
+    # --- Object-tag dedup + ground emphasis ---------------------------------
+    # A re-seen object is dropped instead of creating a duplicate tag when its
+    # name is similar to an existing tag *and* its position falls inside the
+    # cluster radius, so the same fire extinguisher is not tagged twice a few
+    # metres or a few pixels apart. Exact-name match uses a tighter radius so
+    # genuinely different objects are still kept.
+    tag_exact_name_distance_m: float = 1.0
+    tag_dedup_distance_m: float = 1.6  # cluster radius for fuzzy name match
+    tag_dedup_name_similarity: float = 0.82  # 0.0-1.0 string similarity
+    # Objects whose world z is above this (metres above the floor) are treated
+    # as elevated; a ground-level tag near an elevated one wins dedup so the
+    # robot prefers tagging things on the floor.
+    tag_ground_level_z_m: float = 0.6
 
 
 def _vlm_worker(
@@ -1527,6 +1543,70 @@ class SpatialMemory(Module):
             logger.error(f"Error adding robot location: {e}")
             return False
 
+    def _is_ground_level(self, position: Sequence[float]) -> bool:
+        """True if the object sits roughly on the floor (low world z)."""
+        return float(position[2]) <= self.config.tag_ground_level_z_m
+
+    def _name_similarity(self, a: str, b: str) -> float:
+        """String similarity 0.0-1.0, tolerant of case/whitespace/punctuation."""
+        def norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]+", " ", s.casefold()).strip()
+
+        na, nb = norm(a), norm(b)
+        if not na or not nb:
+            return 0.0
+        if na == nb:
+            return 1.0
+        return SequenceMatcher(None, na, nb).ratio()
+
+    def _is_duplicate_tag(
+        self,
+        name: str,
+        position: Sequence[float],
+        *,
+        kind: str = "object",
+    ) -> RobotLocation | None:
+        """Return the existing location a new tag duplicates, or None.
+
+        A new tag is a duplicate when it matches a stored object tag by:
+
+        * exact name (case-folded) within ``tag_exact_name_distance_m``, or
+        * name similarity >= ``tag_dedup_name_similarity`` within the wider
+          ``tag_dedup_distance_m`` cluster, so the same object a few metres or
+          a few pixels away is not tagged again.
+
+        When the new tag is ground-level and the candidate is elevated (same
+        name/cluster), the elevated candidate is skipped so a floor object
+        wins the dedup and the robot prefers tagging things on the ground.
+        """
+        pos = np.asarray(position, dtype=float)
+        for existing in self.get_robot_locations():
+            same_name = existing.name.casefold() == name.casefold()
+            if not same_name:
+                if self._name_similarity(existing.name, name) < (
+                    self.config.tag_dedup_name_similarity
+                ):
+                    continue
+            # Exact-name matches use the tight radius; a fuzzy (similar but not
+            # identical) name match uses the wider cluster radius.
+            radius = (
+                self.config.tag_exact_name_distance_m
+                if same_name
+                else self.config.tag_dedup_distance_m
+            )
+            if np.linalg.norm(np.asarray(existing.position) - pos) > radius:
+                continue
+            # A new ground-level tag near an elevated same-ish tag is a different
+            # instance (the ground one wins), so skip this candidate; a new
+            # elevated tag near a ground one is dropped as its duplicate.
+            if (
+                self._is_ground_level(position)
+                and not self._is_ground_level(existing.position)
+            ):
+                continue
+            return existing
+        return None
+
     def _tag_object_location(
         self,
         name: str,
@@ -1537,19 +1617,17 @@ class SpatialMemory(Module):
         pgo_metadata: dict[str, Any] | None = None,
         reference_image: np.ndarray | None = None,
     ) -> bool:
-        for existing in self.get_robot_locations():
-            if (
-                existing.name.casefold() == name.casefold()
-                and np.linalg.norm(np.asarray(existing.position) - position) <= 1.0
-            ):
-                if reference_image is not None and existing.frame_id is None:
-                    with self._tagging_lock:
-                        self._ensure_pgo_ready()
-                        self._attach_tag_image(existing, reference_image)
-                        self.vector_db.location_collection.update(
-                            ids=[existing.location_id], metadatas=[existing.to_vector_metadata()]
-                        )
-                return True
+        duplicate = self._is_duplicate_tag(name, position)
+        if duplicate is not None:
+            if reference_image is not None and duplicate.frame_id is None:
+                with self._tagging_lock:
+                    self._ensure_pgo_ready()
+                    self._attach_tag_image(duplicate, reference_image)
+                    self.vector_db.location_collection.update(
+                        ids=[duplicate.location_id],
+                        metadatas=[duplicate.to_vector_metadata()],
+                    )
+            return True
         if pgo_metadata is not None:
             location = RobotLocation.from_vector_metadata(
                 {
