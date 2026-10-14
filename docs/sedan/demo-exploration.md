@@ -94,17 +94,39 @@ reasons distinguish non-free start cell, reachable frontier count, post-exclusio
 count, too-small frontier clusters, un-extendable short goals, and cooled-goal
 count.
 
-## Stopping
+## Stopping and recovery
 
 - If there is no ≥ 15 cm translation progress within 15 s, the current goal is
-  cancelled and it picks another.
+  cancelled and it **tries to recover** before giving up on that goal: it turns
+  in place and, if that makes no progress, backs up, then re-checks the goal.
+  Only after several failed recovery attempts is the goal cooled and another
+  picked.
 - If odometry is stale for > 5 s, it stops and reports.
 - The map must exist; while fusion is paused it may continue with a static map.
-- Ten consecutive attempts without a qualifying goal end it and show the reason.
+- The run does **not** stop early on a low-gain plateau: it keeps waiting for a
+  frontier and only ends when the reachable free space has been swept (coverage)
+  or no frontier remains. This is the never-stop / edge-traversal completion —
+  a low gain on one frontier does not end the run.
 - A larger restored map may trigger low gain quickly — lower `gain_percent` or
   raise `min_goals` / `no_gain_attempts`.
 - **Stop exploration** cancels exploration. A PGO failure or a remote stop
   signal also ends it and does **not** auto-resume, to avoid accidental motion.
+
+### Greedy goal selection
+
+By default the run picks the **closest reachable frontier** (shortest
+traversable path) rather than a distant detour, so it does not circle over
+already-covered ground to reach a far frontier. Set `greedy` off to fall back to
+the original frontier / efficient scoring.
+
+### Coverage completion
+
+Completion is based on how much of the reachable free space has been swept, not
+on a fixed number of goals. As the robot visits frontiers, the visited radius
+around each covered frontier marks the surrounding free cells as explored; when
+that fraction reaches `coverage_threshold` (default 0.9) — or no frontier
+remains — the run reports `completed`. A `blocked` (not `completed`) status still
+means it could not safely finish.
 
 ## Demo planner width & speed
 
