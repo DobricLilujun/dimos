@@ -140,6 +140,9 @@ def test_startup_prefers_nearby_path_before_original_scoring(explorer, mocker):
     assert math_distance(goal, pose) <= 0.8
     rank.assert_not_called()
     explorer._startup_displacement = 2.0
+    # With greedy off, the frontier strategy falls through to the original
+    # comprehensive scoring; the nearby path still wins over a distant detour.
+    explorer.options = ExploreOptions(greedy=False)
     explorer.select_goal(pose, costmap)
     rank.assert_called_once()
 
@@ -289,13 +292,15 @@ def test_failure_retries_another_goal_without_recording_success(explorer, mocker
     assert explorer.explored_goals == []
 
 
-def test_no_frontiers_has_bounded_explicit_completion(explorer, mocker):
+def test_no_frontiers_completes_when_coverage_is_swept(explorer, mocker):
+    # Never stops early: the loop keeps waiting for a frontier, and only ends
+    # when coverage of the reachable free space is swept.
+    mocker.patch.object(explorer, "_sensors_fresh", return_value=True)
     mocker.patch.object(explorer, "select_goal", return_value=None)
-    mocker.patch.object(explorer.stop_event, "wait", return_value=False)
+    mocker.patch.object(explorer, "_is_exploration_complete", return_value=True)
     explorer._run_exploration_loop()
-    assert explorer.exploration_status()["reason"].startswith(
-        "No eligible reachable frontiers after 10 checks."
-    )
+    assert explorer.exploration_status()["phase"] == "completed"
+    assert "swept" in explorer.exploration_status()["reason"]
     assert explorer.exploration_active is False
 
 
@@ -558,3 +563,96 @@ def test_start_stop_owns_worker_and_releases_skill_hold(explorer, mocker):
     explorer.end_demo_exploration()
     assert not explorer.exploration_thread.is_alive()
     explorer.stop_tool.assert_any_call("begin_demo_exploration")
+
+
+def test_greedy_takes_closest_reachable_frontier_not_distant_detour(explorer):
+    explorer.options = ExploreOptions(greedy=True)
+    # Two frontiers, one nearby (x<4) and one far; greedy picks the closest.
+    values = np.zeros((7, 20), dtype=np.int8)
+    values[:, 0] = -1
+    values[:, 19] = -1
+    goal = explorer.select_goal(Vector3(4, 3, 0), grid(values))
+    assert goal is not None
+    assert goal.x < 4  # nearest frontier is to the left, not the far right
+
+
+def test_greedy_off_uses_frontier_scoring(explorer, mocker):
+    values = np.zeros((20, 35), dtype=np.int8)
+    values[:, 0] = -1
+    values[:, 34] = -1
+    rank = mocker.spy(explorer, "_rank_frontiers")
+    explorer.options = ExploreOptions(greedy=False)
+    explorer._startup_displacement = 2.0  # leave startup mode so scoring runs
+    explorer.select_goal(Vector3(0.5, 1, 0), grid(values, resolution=0.1))
+    rank.assert_called_once()
+
+
+def test_coverage_fraction_rises_as_frontiers_are_visited(explorer):
+    costmap = grid(np.zeros((10, 10), dtype=np.int8))
+    pose = Vector3(1, 1, 0)
+    before = explorer._coverage_fraction(costmap, pose)
+    assert 0.0 <= before <= 1.0
+    # Visiting a frontier near the pose covers the surrounding free cells.
+    explorer.mark_explored_goal(pose)
+    after = explorer._coverage_fraction(costmap, pose)
+    assert after > before
+
+
+def test_coverage_completion_breaks_loop_when_free_space_swept(explorer, mocker):
+    mocker.patch.object(explorer, "_sensors_fresh", return_value=True)
+    mocker.patch.object(explorer, "select_goal", return_value=None)
+    mocker.patch.object(explorer, "_is_exploration_complete", return_value=True)
+    explorer._run_exploration_loop()
+    assert explorer.exploration_status()["phase"] == "completed"
+    assert explorer.exploration_active is False
+
+
+def test_stall_recovery_turns_then_makes_progress(explorer, mocker):
+    # A stuck robot that turns and then moves should recover and keep the target.
+    clock = {"t": 100.0}
+
+    def mono() -> float:
+        clock["t"] += 0.6
+        return clock["t"]
+
+    mocker.patch.object(demo_explorer.time, "monotonic", side_effect=mono)
+    mocker.patch.object(explorer.stop_event, "wait", return_value=False)
+    mocker.patch.object(explorer, "_moved_since", return_value=True)
+    explorer._map_session.navigation_ready.return_value = True
+    assert explorer._recover_stuck() is True
+    commands = [call.args[0] for call in explorer.nav_cmd_vel.publish.call_args_list]
+    assert any(command.angular.z != 0 for command in commands)  # a turn
+    assert commands[-1] == Twist()  # stop after recovery
+
+
+def test_stall_recovery_backs_up_when_turn_fails_to_move(explorer, mocker):
+    # Turn makes no progress, so the recovery must back up instead of quitting.
+    clock = {"t": 100.0}
+
+    def mono() -> float:
+        clock["t"] += 0.6
+        return clock["t"]
+
+    mocker.patch.object(demo_explorer.time, "monotonic", side_effect=mono)
+    mocker.patch.object(explorer.stop_event, "wait", return_value=False)
+    explorer._moved_since = lambda _start: False  # type: ignore[assignment]
+    explorer._map_session.navigation_ready.return_value = True
+    explorer._recover_stuck()
+    commands = [call.args[0] for call in explorer.nav_cmd_vel.publish.call_args_list]
+    assert any(command.linear.x < 0 for command in commands)  # back-up
+
+
+def test_begin_demo_exploration_accepts_greedy_and_coverage(explorer):
+    result = explorer.begin_demo_exploration(greedy=True, coverage_threshold=0.85, stall_recovery_attempts=2)
+    assert "greedy" not in result or result  # smoke: skill runs
+    assert explorer.options.greedy is True
+    assert explorer.options.coverage_threshold == 0.85
+    assert explorer.options.stall_recovery_attempts == 2
+    explorer.end_demo_exploration()
+
+
+def test_invalid_new_options_are_rejected(explorer):
+    with pytest.raises(ValidationError):
+        explorer.begin_demo_exploration(coverage_threshold=1.5)
+    explorer._navigation.set_goal.assert_not_called()
+    explorer.start_tool.assert_not_called()
