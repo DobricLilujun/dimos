@@ -46,6 +46,8 @@ class AudioNormalizer(AbstractAudioTransform):
         max_gain: float = 10.0,
         decay_factor: float = 0.999,
         adapt_speed: float = 0.05,
+        noise_gate_threshold: float = 0.03,
+        noise_gate_floor: float = 0.02,
         volume_func: Callable[[np.ndarray], float] = calculate_peak_volume,
     ) -> None:
         """
@@ -57,6 +59,11 @@ class AudioNormalizer(AbstractAudioTransform):
             max_gain: Maximum allowed gain to prevent excessive amplification
             decay_factor: Decay factor for max volume (0.0-1.0, higher = slower decay)
             adapt_speed: How quickly to adapt to new volume levels (0.0-1.0)
+            noise_gate_threshold: Volumes at or below this are treated as noise
+                (fan, hum) and gated down instead of amplified, so a constant
+                fan does not pull the AGC up and drown out speech.
+            noise_gate_floor: Gain floor applied to noise-level audio; keeps a
+                tiny bit of signal so short bursts are not clipped off.
             volume_func: Function to calculate volume (default: peak volume)
         """
         self.target_level = target_level
@@ -64,6 +71,8 @@ class AudioNormalizer(AbstractAudioTransform):
         self.max_gain = max_gain
         self.decay_factor = decay_factor
         self.adapt_speed = adapt_speed
+        self.noise_gate_threshold = noise_gate_threshold
+        self.noise_gate_floor = noise_gate_floor
         self.volume_func = volume_func
 
         # Internal state
@@ -99,6 +108,13 @@ class AudioNormalizer(AbstractAudioTransform):
 
         # Limit gain to max_gain
         ideal_gain = min(ideal_gain, self.max_gain)
+
+        # Noise gate: at or below the noise threshold the clip is fan/hum, not
+        # speech, so gate it down to a low floor instead of boosting it. This
+        # stops a constant fan from pulling the AGC up and drowning out the
+        # next utterance, and keeps STT from transcribing pure noise.
+        if current_volume <= self.noise_gate_threshold:
+            ideal_gain = self.noise_gate_floor
 
         # Smoothly adapt current gain towards ideal gain
         self.current_gain = (

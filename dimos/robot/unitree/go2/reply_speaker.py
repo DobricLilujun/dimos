@@ -54,6 +54,23 @@ class Go2ReplySpeaker:
     def is_speaking(self) -> bool:
         return self._speaking.is_set()
 
+    def interrupt(self) -> dict[str, Any]:
+        """Cancel an in-flight reply immediately and pause the audio hub.
+
+        A fresh utterance should cut off whatever is speaking now so the robot
+        does not talk over the user. This is the same cancel path as
+        ``configure(False)`` but does not require the caller to re-enable.
+        """
+        with self._lock:
+            if self._disabled.is_set():
+                return self.status()
+            self._disabled.set()
+            try:
+                self._request(RTC_TOPIC["AUDIO_HUB_REQ"], AUDIO_API["PAUSE"], {})
+            except Exception:
+                logger.exception("Go2 reply interrupt failed")
+            return self.status()
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {"enabled": not self._disabled.is_set(), "generation": self._generation}

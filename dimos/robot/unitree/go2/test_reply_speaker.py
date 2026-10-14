@@ -132,3 +132,22 @@ def test_missing_uploaded_audio_id_never_falls_back_to_filename(speaker, mocker)
     assert AUDIO_API["SELECT_START_PLAY"] not in [
         call.args[1]["api_id"] for call in publish.call_args_list
     ]
+
+
+def test_interrupt_cancels_in_flight_reply(speaker):
+    device, publish, client = speaker
+    generation = device.configure(True)["generation"]
+    assert device.is_speaking is False
+    create = client.return_value.__enter__.return_value.audio.speech.create
+    response = create.return_value
+
+    # The reply is playing when a fresh utterance interrupts it.
+    def generate(**kwargs):
+        assert device.is_speaking
+        device.interrupt()
+        return response
+
+    create.side_effect = generate
+    assert device.speak("Hello", generation) == "Reply speech cancelled."
+    assert device.status()["enabled"] is False
+    assert AUDIO_API["PAUSE"] in [call.args[1]["api_id"] for call in publish.call_args_list]

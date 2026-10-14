@@ -37,14 +37,22 @@ def whisper_pipeline() -> "tuple[rx.subject.Subject[AudioEvent], Observable[str]
 
     Loads the Whisper model (blocking); call from a module's start(), not
     its constructor.
+
+    Chain: mic -> VAD (drop fan/noise) -> AGC normalizer (boost speech only)
+    -> local Whisper. The voice-activity gate sits in front of the normalizer
+    so a constant fan never pulls the AGC up, and the STT only sees real
+    speech, which keeps latency and false transcripts down.
     """
     # Here to prevent unwanted imports in the file: whisper backends belong
     # to the optional [agents] extra and load a model at construction.
+    from dimos.stream.audio.node_vad import VoiceActivityGate
     from dimos.stream.audio.stt.node_whisper import WhisperNode
 
     audio_subject: rx.subject.Subject[AudioEvent] = rx.subject.Subject()
+    vad = VoiceActivityGate()
     normalizer = AudioNormalizer()
     stt_node = WhisperNode()
-    normalizer.consume_audio(audio_subject.pipe(ops.share()))
+    vad.consume_audio(audio_subject.pipe(ops.share()))
+    normalizer.consume_audio(vad.emit_audio())
     stt_node.consume_audio(normalizer.emit_audio())
     return audio_subject, stt_node.emit_text()
