@@ -190,17 +190,44 @@ def start_stack(page):
     page.locator("#b-stack").get_by_text("running", exact=True).wait_for()
 
 
+def test_control_deck_sections_collapse_and_expand_to_top(page):
+    sections = page.locator("#deck-groups > .deck-section")
+    assert sections.count() >= 2
+    navigation = page.locator("#deck-groups > .deck-section").filter(
+        has=page.locator(".deck-section-toggle[aria-label='Navigation']")
+    )
+    toggle = navigation.locator(".deck-section-toggle")
+    assert toggle.get_attribute("aria-expanded") == "true"
+    assert navigation.locator(".deck-section-content").is_visible()
+
+    toggle.click()
+    assert not navigation.get_attribute("class").endswith("open")
+    assert toggle.get_attribute("aria-expanded") == "false"
+    assert navigation.locator(".deck-section-content").is_hidden()
+
+    toggle.click()
+    assert navigation.get_attribute("class").endswith("open")
+    assert toggle.get_attribute("aria-expanded") == "true"
+    assert navigation.locator(".deck-section-content").is_visible()
+    assert sections.first.get_attribute("class").endswith("open")
+
+    toggle.click()
+    assert navigation.locator(".deck-section-content").is_hidden()
+
+
 def test_deck_button_help_appears_only_after_one_second_and_keeps_confirmation(page):
     start_stack(page)
+    page.locator(".title").hover()
     page.clock.install()
     button = page.locator('[data-operation="begin_demo_exploration"]')
     assert button.locator("small").count() == 0
     button.scroll_into_view_if_needed()
+    page.locator(".title").hover()
     page.clock.run_for(100)
     button.hover()
-    page.clock.run_for(999)
+    page.clock.run_for(900)
     assert page.locator("#deck-tooltip").is_hidden()
-    page.clock.run_for(1)
+    page.clock.run_for(100)
     assert page.locator("#deck-tooltip").is_visible()
     assert "Supervise robot movement" in page.locator("#deck-tooltip").inner_text()
     assert button.get_attribute("aria-describedby") == "deck-tooltip"
@@ -425,7 +452,7 @@ def test_parameter_forms_submit_actual_skill_arguments(page, console_server, key
     assert console_server[3] == [(key, {parameter: value})]
     if key == "query_memory_tags":
         assert page.locator("#inventory").inner_text().find("loc_office") >= 0
-        page.locator("#inventory button").click()
+        page.locator("#inventory").get_by_role("button", name="Navigate nearby", exact=True).click()
         assert (
             page.locator('#operation-fields input[name="location_id"]').input_value()
             == "loc_office"
@@ -565,6 +592,30 @@ def test_nearby_distance_slider_updates_next_trip_threshold(page, console_server
     assert response.value.json() == {"ok": True, "result": {"distance_m": 1.7}}
     assert page.locator("#navigation-distance-value").inner_text() == "1.7 m"
     assert ("set_nearby_arrival_distance", {"distance_m": 1.7}) in console_server[3]
+
+
+def test_slider_help_is_hoverable_and_each_control_has_its_own_color(page):
+    start_stack(page)
+    controls = [
+        ("navigation-speed", "Applies immediately to active navigation"),
+        ("navigation-distance", "Applies to the next trip"),
+        ("planner-width", "Larger values keep planned paths farther"),
+    ]
+    colors = []
+    for slider_id, help_text in controls:
+        control = page.locator(f".slider-control:has(#{slider_id})")
+        tooltip = control.locator(".slider-tooltip")
+        assert tooltip.is_hidden()
+        colors.append(
+            control.evaluate(
+                "(node) => getComputedStyle(node).getPropertyValue('--slider-color').trim()"
+            )
+        )
+        control.locator(".slider-heading").hover()
+        tooltip.wait_for(state="visible")
+        assert help_text in tooltip.inner_text()
+        page.locator(".title").hover()
+    assert len(set(colors)) == 3
 
 
 def test_planner_width_slider_updates_live_clearance(page, console_server):

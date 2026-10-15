@@ -607,6 +607,20 @@ def test_coverage_completion_breaks_loop_when_free_space_swept(explorer, mocker)
     assert explorer.exploration_active is False
 
 
+def test_filtered_frontiers_do_not_count_as_map_completion(explorer, mocker):
+    values = np.zeros((9, 12), dtype=np.int8)
+    values[:, 9:] = -1
+    costmap = grid(values)
+    pose = PoseStamped(position=[1, 4, 0])
+    explorer.options = ExploreOptions(min_goals=1, coverage_threshold=0.9)
+    explorer.explored_goals.append(Vector3(1, 4, 0))
+    mocker.patch.object(explorer, "_sensors_fresh", return_value=True)
+    mocker.patch.object(explorer, "select_goal", return_value=None)
+    mocker.patch.object(explorer, "_coverage_fraction", return_value=0.0)
+
+    assert explorer._is_exploration_complete(costmap, pose) is False
+
+
 def test_stall_recovery_turns_then_makes_progress(explorer, mocker):
     # A stuck robot that turns and then moves should recover and keep the target.
     clock = {"t": 100.0}
@@ -643,7 +657,9 @@ def test_stall_recovery_backs_up_when_turn_fails_to_move(explorer, mocker):
 
 
 def test_begin_demo_exploration_accepts_greedy_and_coverage(explorer):
-    result = explorer.begin_demo_exploration(greedy=True, coverage_threshold=0.85, stall_recovery_attempts=2)
+    result = explorer.begin_demo_exploration(
+        greedy=True, coverage_threshold=0.85, stall_recovery_attempts=2
+    )
     assert "greedy" not in result or result  # smoke: skill runs
     assert explorer.options.greedy is True
     assert explorer.options.coverage_threshold == 0.85

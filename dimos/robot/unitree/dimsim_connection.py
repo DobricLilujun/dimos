@@ -113,6 +113,15 @@ class DimSimConnection:
     def switch_joystick(self, enable: bool = True) -> bool:
         return True
 
+    def sit(self) -> bool:
+        return True
+
+    def rise_sit(self) -> bool:
+        return True
+
+    def recovery_stand(self) -> bool:
+        return True
+
     def publish_request(self, topic: str, data: dict[str, Any]) -> dict[Any, Any]:
         return {}
 

@@ -303,6 +303,15 @@ class MujocoConnection:
     def switch_joystick(self, enable: bool = True) -> bool:
         return True
 
+    def sit(self) -> bool:
+        return True
+
+    def rise_sit(self) -> bool:
+        return True
+
+    def recovery_stand(self) -> bool:
+        return True
+
     def get_video_frame(self) -> NDArray[Any] | None:
         if self.shm_data is None:
             return None

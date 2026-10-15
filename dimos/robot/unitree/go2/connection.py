@@ -113,6 +113,9 @@ class Go2ConnectionProtocol(Protocol):
     def set_light(self, level: int) -> bool: ...
     def switch_joystick(self, enable: bool = True) -> bool: ...
     def publish_request(self, topic: str, data: dict) -> dict: ...  # type: ignore[type-arg]
+    def sit(self) -> bool: ...
+    def rise_sit(self) -> bool: ...
+    def recovery_stand(self) -> bool: ...
 
 
 _FRONT_CAMERA_720_YAML = resources.files("dimos.robot.unitree.go2").joinpath(
@@ -239,6 +242,15 @@ class ReplayConnection(CompositeResource):
         return True
 
     def switch_joystick(self, enable: bool = True) -> bool:
+        return True
+
+    def sit(self) -> bool:
+        return True
+
+    def rise_sit(self) -> bool:
+        return True
+
+    def recovery_stand(self) -> bool:
         return True
 
     def _stream_name(self, *names: str) -> str:
@@ -564,6 +576,21 @@ class GO2Connection(Module, Camera, Pointcloud):
     def switch_joystick(self, enable: bool = True) -> bool:
         """Firmware joystick listening on/off (WASD stick emulation needs it on)."""
         return self.connection.switch_joystick(enable)
+
+    @rpc
+    def sit(self) -> bool:
+        """Sit the robot down."""
+        return self.connection.sit()
+
+    @rpc
+    def rise_sit(self) -> bool:
+        """Rise back to a standing posture from sitting."""
+        return self.connection.rise_sit()
+
+    @rpc
+    def recovery_stand(self) -> bool:
+        """Recover to a stance ready for more commands."""
+        return self.connection.recovery_stand()
 
     @rpc
     def stop_movement(self) -> None:

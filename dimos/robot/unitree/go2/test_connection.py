@@ -33,6 +33,8 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.robot.unitree.go2 import connection as go2_conn
 from dimos.robot.unitree.go2.connection import ConnectionConfig, GO2Connection
+from dimos.robot.unitree.go2.connection_spec import GO2ConnectionSpec
+from dimos.spec.utils import spec_annotation_compliance
 
 
 @pytest.fixture
@@ -53,6 +55,10 @@ def test_make_connection_webrtc_forwards_aes_128_key(stub_webrtc: MagicMock) -> 
         aes_128_key="cafe" * 8,
         velocity_api=False,
     )
+
+
+def test_go2_connection_satisfies_skill_connection_spec() -> None:
+    assert spec_annotation_compliance(GO2Connection, GO2ConnectionSpec)
 
 
 def test_make_connection_replay_forwards_exit_on_complete() -> None:

@@ -395,11 +395,20 @@ class DemoExplorer(WavefrontFrontierExplorer):
             visited |= (xx - cell.x) ** 2 + (yy - cell.y) ** 2 <= radius**2
         return float(np.count_nonzero(free & visited)) / total
 
+    def _has_reachable_frontier(self, grid: OccupancyGrid, pose: Vector3) -> bool:
+        distances = reachable_distances(grid, pose)
+        frontier = np.isfinite(distances) & binary_dilation(
+            grid.grid == CostValues.UNKNOWN, structure=np.ones((3, 3), dtype=bool)
+        )
+        return bool(np.any(frontier))
+
     def _is_exploration_complete(self, grid: OccupancyGrid, pose: Vector3) -> bool:
         """Only end when reachable free space is swept or no frontier remains."""
         if not self._sensors_fresh():
             return False
-        no_frontier = self.select_goal(pose.position, simple_inflate(grid, self.config.frontier_inflation)) is None
+        no_frontier = not self._has_reachable_frontier(
+            simple_inflate(grid, self.config.frontier_inflation), pose.position
+        )
         if no_frontier and len(self.explored_goals) >= self.options.min_goals:
             return True
         coverage = self._coverage_fraction(grid, pose.position)
@@ -573,9 +582,9 @@ class DemoExplorer(WavefrontFrontierExplorer):
         now = self.latest_odometry
         if now is None:
             return False
-        return math.hypot(
-            now.position.x - start.position.x, now.position.y - start.position.y
-        ) >= 0.1
+        return (
+            math.hypot(now.position.x - start.position.x, now.position.y - start.position.y) >= 0.1
+        )
 
     def _run_exploration_loop(self) -> None:
         empty_attempts = 0

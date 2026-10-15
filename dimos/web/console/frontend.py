@@ -120,6 +120,22 @@ header {
 /* ---- control deck ---- */
 .deck h2 { font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); margin: 14px 16px 8px; }
 .group { margin: 0 12px 6px; }
+.deck-section { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.deck-section-toggle {
+  display:flex; align-items:center; width:100%; gap:10px; padding:11px 12px;
+  border:0; background:var(--panel-2); color:var(--text); cursor:pointer;
+  font:inherit; font-size:11px; font-weight:700; letter-spacing:.12em; text-align:left;
+  text-transform:uppercase;
+}
+.deck-section-toggle:hover { background:#16263a; color:var(--accent); }
+.deck-section-toggle:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.deck-section-toggle .section-title { flex:1; }
+.deck-section-toggle .section-count { color:var(--muted); font:500 10px var(--mono); letter-spacing:0; }
+.deck-section-toggle .section-chevron { color:var(--accent); transition:transform .15s; }
+.deck-section.open .section-chevron { transform:rotate(90deg); }
+.deck-section-content { padding:3px 10px 8px; border-top:1px solid var(--line); }
+.deck-section-content[hidden] { display:none; }
+.deck-section-content .btn { margin:6px 0; }
 .btn {
   display: flex; align-items: center; gap: 10px; width: 100%;
   padding: 11px 13px; margin: 6px 0; border-radius: 10px; cursor: pointer;
@@ -178,6 +194,40 @@ header {
 .chat .msgs { flex: 1; min-height:0; overflow:auto; overflow-wrap:anywhere; padding: 14px 14px 6px; display: flex; flex-direction: column; gap: 12px; }
 .chat .msgs > * { flex-shrink:0; }
 .chat .head, .chat .in { flex-shrink:0; }
+.slider-control {
+  --slider-color: var(--accent);
+  --slider-tint: rgba(33,212,200,.07);
+  position:relative; display:block; margin:6px 12px; padding:9px 11px 8px;
+  border:1px solid var(--line); border-left:2px solid var(--slider-color);
+  border-radius:9px; background:linear-gradient(110deg,var(--slider-tint),rgba(10,17,25,.65));
+}
+.slider-speed { --slider-color:#32d9c8; --slider-tint:rgba(50,217,200,.08); }
+.slider-distance { --slider-color:#53aaff; --slider-tint:rgba(83,170,255,.09); }
+.slider-width { --slider-color:#b68cff; --slider-tint:rgba(182,140,255,.09); }
+.slider-follow { --slider-color:#ffbd66; --slider-tint:rgba(255,189,102,.08); }
+.slider-heading { display:flex; align-items:center; gap:6px; min-width:0; }
+.slider-heading label { flex:1; min-width:0; color:var(--text); font-size:11px; font-weight:600; }
+.slider-heading output { color:var(--slider-color); font:600 11px var(--mono); white-space:nowrap; }
+.slider-info {
+  flex:none; width:18px; height:18px; padding:0; border:1px solid var(--slider-color);
+  border-radius:50%; background:transparent; color:var(--slider-color);
+  font:700 11px var(--sans); line-height:16px; text-align:center; cursor:help;
+}
+.slider-info:focus-visible { outline:2px solid var(--slider-color); outline-offset:2px; }
+.slider-tooltip {
+  position:absolute; z-index:12; right:8px; bottom:calc(100% + 7px); width:min(280px,calc(100% - 16px));
+  padding:9px 11px; border:1px solid var(--slider-color); border-radius:8px;
+  background:#101c2a; color:var(--text); box-shadow:0 8px 24px rgba(0,0,0,.5);
+  font-size:11px; line-height:1.45; pointer-events:none;
+  opacity:0; visibility:hidden; transform:translateY(3px); transition:.12s;
+}
+.slider-heading:hover .slider-tooltip,
+.slider-info:focus-visible + .slider-tooltip { opacity:1; visibility:visible; transform:translateY(0); }
+.slider-control input[type=range] {
+  display:block; width:100%; margin:7px 0 0; accent-color:var(--slider-color); cursor:pointer;
+}
+.slider-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:4px 12px; }
+.slider-actions #puppy-status { flex-basis:100%; color:var(--muted); font-size:10.5px; }
 .stream-view { position:absolute; inset:0; background:#05090f; }
 .stream-view img { width:100%; height:100%; object-fit:contain; }
 .stream-view.pip { inset:54px 14px auto auto; width:30%; height:30%; min-width:120px; z-index:4; border:1px solid var(--accent); border-radius:10px; overflow:hidden; box-shadow:var(--shadow); }
@@ -405,35 +455,49 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
       </div>
       <div class="msgs" id="msgs" role="log" aria-label="Conversation"></div>
       <div id="people-controls" hidden>
-      <label class="hint" for="follow-distance">Live person follow distance:
-        <output id="follow-distance-value">3.0 m</output>
+      <div class="slider-control slider-follow">
+        <div class="slider-heading"><label for="follow-distance">Live person follow distance</label>
+          <output id="follow-distance-value">3.0 m</output>
+          <button class="slider-info" type="button" aria-label="About live person follow distance">i</button>
+          <span class="slider-tooltip" role="tooltip">How far behind the person the robot stops. Takes effect at its next re-plan; it closes in to this distance but does not back away. Closer than about 3 m the camera sees only legs. This session only; the saved default is in Settings.</span>
+        </div>
         <input id="follow-distance" type="range" min="0.5" max="8" step="0.1" value="3"
-          aria-label="Live person follow distance" style="width:100%" disabled>
-        <span>How far behind the person the robot stops. Takes effect at its next re-plan; it closes in to this distance but does not back away. Closer than about 3 m the camera sees only legs. This session only; the saved default is in Settings.</span>
-      </label>
+          aria-label="Live person follow distance" disabled>
+      </div>
       </div>
       <div id="persistent-controls">
-      <label class="hint" for="navigation-speed">Live navigation speed limit:
-        <output id="navigation-speed-value">0.55 m/s</output>
+      <div class="slider-control slider-speed">
+        <div class="slider-heading"><label for="navigation-speed">Live navigation speed limit</label>
+          <output id="navigation-speed-value">0.55 m/s</output>
+          <button class="slider-info" type="button" aria-label="About live navigation speed limit">i</button>
+          <span class="slider-tooltip" role="tooltip">Applies immediately to active navigation, including exploration. Actual speed may be lower; teleop and rotation are unchanged.</span>
+        </div>
         <input id="navigation-speed" type="range" min="0.1" max="0.55" step="0.05" value="0.55"
-          aria-label="Live navigation speed limit" style="width:100%" disabled>
-        <span>Applies immediately to active navigation, including exploration. Actual speed may be lower; teleop and rotation are unchanged.</span>
-      </label>
-      <label class="hint" for="navigation-distance">Nearby stop distance:
-        <output id="navigation-distance-value">1.0 m</output>
+          aria-label="Live navigation speed limit" disabled>
+      </div>
+      <div class="slider-control slider-distance">
+        <div class="slider-heading"><label for="navigation-distance">Nearby stop distance</label>
+          <output id="navigation-distance-value">1.0 m</output>
+          <button class="slider-info" type="button" aria-label="About nearby stop distance">i</button>
+          <span class="slider-tooltip" role="tooltip">Applies to the next trip; precise navigation is unchanged.</span>
+        </div>
         <input id="navigation-distance" type="range" min="0.3" max="3" step="0.1" value="1"
-          aria-label="Nearby stop distance" style="width:100%">
-        <span>Applies to the next trip; precise navigation is unchanged.</span>
+          aria-label="Nearby stop distance">
+      </div>
+      <div class="slider-actions">
         <button type="button" class="chip link" id="visual-arrival-toggle">Visual arrival: Off</button>
         <button type="button" class="chip link" id="murmur-toggle" disabled>Murmur: Off</button>
         <span id="puppy-status" role="status">Enable Go2 speaker to start Puppy.</span>
-      </label>
-      <label class="hint" for="planner-width">Planner width:
-        <output id="planner-width-value">0.30 m</output>
+      </div>
+      <div class="slider-control slider-width">
+        <div class="slider-heading"><label for="planner-width">Planner width</label>
+          <output id="planner-width-value">0.30 m</output>
+          <button class="slider-info" type="button" aria-label="About planner width">i</button>
+          <span class="slider-tooltip" role="tooltip">Larger values keep planned paths farther from obstacles. Values below the robot's actual footprint risk collisions. Applies immediately and may re-plan the active route; this session only.</span>
+        </div>
         <input id="planner-width" type="range" min="0.1" max="1" step="0.05" value="0.3"
-          aria-label="Planner width" style="width:100%" disabled>
-        <span>Larger values keep planned paths farther from obstacles. Values below the robot's actual footprint risk collisions. Applies immediately and may re-plan the active route; this session only.</span>
-      </label>
+          aria-label="Planner width" disabled>
+      </div>
       </div>
       <div class="in">
         <div class="row">
@@ -551,8 +615,32 @@ function buildDeck() {
   const order = ["Alignment", "Map", "Tagging", "People", "Memory", "Navigation", "Exploration", "Posture"];
   for (const group of order) {
     const ops = byGroup[group]; if (!ops) continue;
-    const g = el("div", "group");
-    g.innerHTML = `<h2>${esc(group)}</h2>`;
+    const g = el("section", "group deck-section");
+    const toggle = el("button", "deck-section-toggle");
+    const content = el("div", "deck-section-content");
+    const contentId = "deck-section-" + group.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    toggle.type = "button";
+    toggle.setAttribute("aria-label", group);
+    toggle.setAttribute("aria-expanded", "true");
+    toggle.setAttribute("aria-controls", contentId);
+    const title = el("span", "section-title");
+    title.textContent = group;
+    const count = el("span", "section-count");
+    count.textContent = String(ops.length);
+    const chevron = el("span", "section-chevron");
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.textContent = ">";
+    toggle.append(title, count, chevron);
+    content.id = contentId;
+    g.classList.add("open");
+    toggle.onclick = () => {
+      const expanded = toggle.getAttribute("aria-expanded") === "true";
+      if (!expanded) wrap.prepend(g);
+      toggle.setAttribute("aria-expanded", String(!expanded));
+      content.hidden = expanded;
+      g.classList.toggle("open", !expanded);
+    };
+    g.append(toggle, content);
     for (const op of ops) {
       const btn = el("button", "btn" + (op.primary ? " primary" : "") + (op.human_only ? " human" : ""));
       btn.innerHTML = `
@@ -562,21 +650,21 @@ function buildDeck() {
       btn.onclick = () => runOp(op, btn);
       btn.dataset.operation = op.key;
       btn.dataset.help=op.description || "";
-      g.appendChild(btn);
+      content.appendChild(btn);
     }
     if(group==="Tagging") {
       const toggle=el("button","btn");
       toggle.id="tagging-toggle";toggle.textContent="Automatic tagging: Check status";
       toggle.dataset.help="Enable or pause automatic room and object tagging. Tagging may upload camera images to your model service.";
-      toggle.onclick=toggleTagging;g.appendChild(toggle);
+      toggle.onclick=toggleTagging;content.appendChild(toggle);
     }
     if(group==="Map") {
       const detail=el("p","note");detail.id="fusion-detail";
-      detail.textContent="Map fusion status unavailable";g.appendChild(detail);
+      detail.textContent="Map fusion status unavailable";content.appendChild(detail);
     }
     if(group==="Exploration") {
       const detail=el("p","note");detail.id="exploration-detail";
-      detail.textContent="Exploration not started";g.appendChild(detail);
+      detail.textContent="Exploration not started";content.appendChild(detail);
     }
     wrap.appendChild(g);
   }
