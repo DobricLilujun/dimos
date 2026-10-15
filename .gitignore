@@ -108,3 +108,6 @@ assets/scene_maps/
 
 # MuJoCo writes this log into the working directory
 MUJOCO_LOG.TXT
+
+# Playwright CLI local artifacts (logs + page snapshots)
+.playwright-cli/
