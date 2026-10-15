@@ -72,6 +72,7 @@ class SkillInfo:
     args_schema: str
     uses: tuple[str, ...] = ()
     lifecycle: str = "instant"
+    completion: str | None = None
 
 
 class PeekNotFound:
@@ -481,6 +482,7 @@ class ModuleBase(Configurable, CompositeResource):
                         args_schema=schema,
                         uses=uses,
                         lifecycle=lifecycle,
+                        completion=getattr(attr, "__skill_completion__", None),
                     )
                 )
         return skills

@@ -207,6 +207,12 @@ class McpClient(Module):
     def _mcp_tool_to_langchain(self, mcp_tool: dict[str, Any]) -> StructuredTool:
         name = mcp_tool["name"]
         description = mcp_tool.get("description", "")
+        completion = (mcp_tool.get("_meta") or {}).get("dimos/completion")
+        if completion:
+            description += (
+                f"\nDurable task sequence completion contract: {completion}. "
+                "Use this value in a start_task_sequence step; started is not completed."
+            )
         input_schema = mcp_tool.get("inputSchema", {"type": "object", "properties": {}})
 
         def call_tool(**kwargs: Any) -> str:

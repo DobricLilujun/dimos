@@ -32,7 +32,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-09-26T10:31:40.734806Z"
+exclude-newer = "2026-10-08T12:08:11.726740572Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -1729,6 +1729,7 @@ dependencies = [
     { name = "ipython", version = "8.38.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "ipython", version = "9.10.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "jsonlines" },
+    { name = "jsonschema" },
     { name = "keyring" },
     { name = "lazy-loader" },
     { name = "llvmlite" },
@@ -2193,6 +2194,7 @@ lint = [
     { name = "torchvision", version = "0.22.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'win32'" },
     { name = "transformers", extra = ["torch"] },
     { name = "trimesh" },
+    { name = "types-jsonschema" },
     { name = "types-pyaudio" },
     { name = "types-pyyaml" },
     { name = "types-reportlab" },
@@ -2385,6 +2387,7 @@ requires-dist = [
     { name = "ipython" },
     { name = "jinja2", marker = "extra == 'web'", specifier = ">=3.1.6" },
     { name = "jsonlines", specifier = ">=4,<5" },
+    { name = "jsonschema", specifier = ">=4.23" },
     { name = "keyring", specifier = ">=25,<26" },
     { name = "langchain", marker = "extra == 'agents'", specifier = ">=1.2.3,<2" },
     { name = "langchain-core", marker = "extra == 'agents'", specifier = ">=1.2.22,<2" },
@@ -2525,6 +2528,7 @@ lint = [
     { name = "torchvision", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'win32'", specifier = ">=0.16,<0.23", index = "https://download.pytorch.org/whl/cu128" },
     { name = "transformers", extras = ["torch"], specifier = "==4.53.3" },
     { name = "trimesh", specifier = ">=4.12" },
+    { name = "types-jsonschema", specifier = ">=4.23" },
     { name = "types-pyaudio" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20250915,<7" },
     { name = "types-reportlab", specifier = ">=4.5.0" },
@@ -10362,6 +10366,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/fd/07/b822e1b307d40e263e8253d2384cf98c51aa2368cc7ba9a07e523a1d964b/typer-0.23.1.tar.gz", hash = "sha256:2070374e4d31c83e7b61362fd859aa683576432fd5b026b060ad6b4cd3b86134", size = 120047, upload-time = "2026-02-13T10:04:30.984Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d5/91/9b286ab899c008c2cb05e8be99814807e7fbbd33f0c0c960470826e5ac82/typer-0.23.1-py3-none-any.whl", hash = "sha256:3291ad0d3c701cbf522012faccfbb29352ff16ad262db2139e6b01f15781f14e", size = 56813, upload-time = "2026-02-13T10:04:32.008Z" },
+]
+
+[[package]]
+name = "types-jsonschema"
+version = "4.26.0.20261006"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "referencing" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/29/d2/1f742605f5a6d39f993134885b8de41c98af606871d3ebddaf3e776bd1eb/types_jsonschema-4.26.0.20261006.tar.gz", hash = "sha256:3eb7db61b6819d40addfdaac7173e749071a7d4a9a4394f0c844598ec84b2500", size = 16843, upload-time = "2026-10-06T08:16:07.318Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/a0/4f2e3c0dc3d5cad958006f2e0307065cc8fe4fbf0393ff0b69d55ee9bbe5/types_jsonschema-4.26.0.20261006-py3-none-any.whl", hash = "sha256:29301f4e65e3928540cdf5e23ad716e38bb0c0b416a48dada213edd3d70206ec", size = 16113, upload-time = "2026-10-06T08:16:06.355Z" },
 ]
 
 [[package]]

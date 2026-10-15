@@ -656,6 +656,84 @@ def visual_planner(pgo_planner, mocker):
     planner.cancel_goal()
 
 
+def test_sequence_navigation_start_is_not_arrival_and_old_ids_do_not_complete_new_goal(
+    pgo_planner,
+):
+    planner = pgo_planner
+    goal = PoseStamped(position=[3, 4, 0], frame_id="world")
+    assert planner.start_sequence_navigation("first", "ext-1", goal)
+    assert planner.sequence_navigation_status("first") == {
+        "operation_id": "first",
+        "status": "running",
+    }
+    assert planner.start_sequence_navigation("second", "ext-1", goal)
+    assert planner.sequence_navigation_status("first")["status"] == "preempted"
+    planner._on_goal_finished(Bool(True))  # No proximity evidence for this new goal.
+    assert planner.sequence_navigation_status("second")["status"] == "failed"
+
+
+def test_sequence_navigation_only_completes_at_selected_tag_threshold(pgo_planner):
+    planner = pgo_planner
+    goal = PoseStamped(position=[3, 4, 0], frame_id="world")
+    assert planner.start_sequence_navigation("arrival", "ext-1", goal)
+    planner._handle_odom(PoseStamped(position=[0, 0, 0], frame_id="world"))
+    assert planner.sequence_navigation_status("arrival")["status"] == "running"
+    planner._handle_odom(PoseStamped(position=[2, 4, 0], frame_id="world"))
+    assert planner.sequence_navigation_status("arrival")["status"] == "completed"
+    planner._on_goal_finished(Bool(False))
+    assert planner.sequence_navigation_status("arrival")["status"] == "completed"
+
+
+def test_sequence_visual_arrival_waits_for_matching_view(pgo_planner, mocker):
+    planner = pgo_planner
+    mocker.patch.object(persistent, "Thread")
+    planner.configure_visual_arrival(True)
+    assert planner.start_sequence_navigation(
+        "visual", "ext-1", PoseStamped(position=[3, 4, 0], frame_id="world")
+    )
+    planner._handle_odom(PoseStamped(position=[2, 4, 0], frame_id="world"))
+    assert planner.visual_arrival_status()["searching"] is True
+    assert planner.sequence_navigation_status("visual")["status"] == "running"
+    planner._finish_visual_search(True, "Arrived: tag image matched")
+    assert planner.sequence_navigation_status("visual")["status"] == "completed"
+
+
+def test_sequence_cancellation_tombstone_prevents_late_start_and_replay(pgo_planner):
+    planner = pgo_planner
+    goal = PoseStamped(position=[3, 4, 0], frame_id="world")
+    assert planner.cancel_sequence_navigation("cancel-before-start")
+    assert not planner.start_sequence_navigation("cancel-before-start", "ext-1", goal)
+    assert planner.sequence_navigation_status("cancel-before-start")["status"] == "cancelled"
+    planner._planner.handle_goal_request.assert_not_called()
+    assert planner.start_sequence_navigation("active", "ext-1", goal)
+    assert planner.cancel_sequence_navigation("active")
+    planner._handle_odom(PoseStamped(position=[2, 4, 0], frame_id="world"))
+    assert planner.sequence_navigation_status("active")["status"] == "cancelled"
+    assert not planner.start_sequence_navigation("active", "ext-1", goal)
+
+
+def test_manual_goal_and_stop_preempt_sequence_operation(pgo_planner):
+    planner = pgo_planner
+    goal = PoseStamped(position=[3, 4, 0], frame_id="world")
+    assert planner.start_sequence_navigation("manual", "ext-1", goal)
+    planner.set_nearby_tagged_goal("ext-2", goal)
+    assert planner.sequence_navigation_status("manual")["status"] == "preempted"
+    assert planner.start_sequence_navigation("stop", "ext-1", goal)
+    planner._on_stop_movement(Bool(True))
+    assert planner.sequence_navigation_status("stop")["status"] == "cancelled"
+
+
+def test_rejected_sequence_navigation_stops_and_cannot_report_success(pgo_planner):
+    planner = pgo_planner
+    planner._map_session.navigation_ready.return_value = False
+    assert not planner.start_sequence_navigation(
+        "refused", "ext-1", PoseStamped(position=[3, 4, 0], frame_id="world")
+    )
+    assert planner.sequence_navigation_status("refused")["status"] == "refused"
+    assert planner._active_goal is None
+    planner._planner.cancel_goal.assert_called_once()
+
+
 @pytest.fixture
 def speed_planner(mocker):
     planner = PersistentGo2Planner(navigation_speed_limit=0.55)

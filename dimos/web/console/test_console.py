@@ -33,11 +33,14 @@ from dimos_lcm.std_msgs import String
 from fastapi.testclient import TestClient
 import httpx
 from langchain_core.messages import AIMessage, ToolMessage
+import numpy as np
 import pytest
 from starlette.websockets import WebSocketDisconnect
 import uvicorn
 
 from dimos.agents.skills.navigation import NavigationSkillContainer
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.web.console.frontend import INDEX_HTML
 from dimos.web.console.module import (
     OPERATIONS,
@@ -162,7 +165,14 @@ def keyboard_client(module, tmp_path, mocker):
     module.runtime = ConsoleRuntime(tmp_path, tmp_path / "settings.json")
     module.runtime._state = "running"
     transport = mocker.patch("dimos.web.console.module.make_transport").return_value
-    mocker.patch.object(module, "_call_rpc", return_value={"ok": True, "result": True})
+
+    async def rpc(op, args):
+        return {
+            "ok": True,
+            "result": {"status": "idle"} if op.key == "preempt_task_sequence" else True,
+        }
+
+    mocker.patch.object(module, "_call_rpc", side_effect=rpc)
     with TestClient(module._build_app()) as client:
         yield client, module, transport
 
@@ -249,6 +259,85 @@ def test_keyboard_prepares_go2_joystick_and_refuses_failed_preparation(keyboard_
     transport.publish.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "result",
+    [{"status": "paused", "quiescent": False}, True],
+)
+def test_keyboard_refuses_unstopped_or_unverified_task_operation(keyboard_client, mocker, result):
+    client, module, transport = keyboard_client
+    rpc = mocker.patch.object(module, "_call_rpc", return_value={"ok": True, "result": result})
+    with client.websocket_connect(
+        f"/api/teleop?token={module._csrf_token}", headers={"Origin": "http://testserver"}
+    ) as socket:
+        assert "error" in socket.receive_json()
+    assert rpc.call_args.args[0].key == "preempt_task_sequence"
+    transport.start.assert_not_called()
+    transport.publish.assert_not_called()
+
+
+async def test_task_sequence_status_and_confirmed_resume_rpc(client, module, mocker):
+    status = {"id": "sequence-1", "status": "paused", "steps": []}
+    rpc = mocker.patch.object(module, "_call_rpc", return_value={"ok": True, "result": status})
+    assert (await client.get("/api/task-sequence")).json()["result"] == status
+    assert rpc.call_args.args[0].module == "McpServer"
+    assert rpc.call_args.args[0].key == "get_task_sequence_status"
+    for action in ("resume", "retry"):
+        before = rpc.call_count
+        denied = await client.post(
+            "/api/task-sequence", json={"action": action, "sequence_id": "sequence-1"}
+        )
+        assert denied.json() == {"ok": False, "error": "Human confirmation is required"}
+        assert rpc.call_count == before
+        accepted = await client.post(
+            "/api/task-sequence",
+            json={
+                "action": action,
+                "sequence_id": "sequence-1",
+                "confirmed": True,
+            },
+        )
+        assert accepted.json()["ok"]
+        assert rpc.call_args.args[0].key == "resume_task_sequence"
+        assert rpc.call_args.args[1] == {
+            "sequence_id": "sequence-1",
+            "retry_failed": action == "retry",
+        }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [[], {"action": "unknown"}, {"action": "resume", "confirmed": True}],
+)
+async def test_task_sequence_rejects_invalid_actions_without_dispatch(
+    client, module, mocker, payload
+):
+    rpc = mocker.patch.object(module, "_call_rpc")
+    assert (await client.post("/api/task-sequence", json=payload)).json()["ok"] is False
+    rpc.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("action", "method"), [("pause", "preempt_task_sequence"), ("cancel", "cancel_task_sequence")]
+)
+async def test_task_sequence_pause_and_cancel_are_explicit(client, module, mocker, action, method):
+    rpc = mocker.patch.object(
+        module, "_call_rpc", return_value={"ok": True, "result": {"status": "paused"}}
+    )
+    assert (await client.post("/api/task-sequence", json={"action": action})).json()["ok"]
+    assert rpc.call_args.args[0].key == method
+    assert rpc.call_args.args[0].module == "McpServer"
+
+
+async def test_task_sequence_requires_ready_stack(module, tmp_path, mocker):
+    module.runtime = ConsoleRuntime(tmp_path, tmp_path / "console.json")
+    rpc = mocker.patch.object(module, "_call_rpc")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=module._build_app()), base_url="http://testserver"
+    ) as client:
+        assert (await client.get("/api/task-sequence")).json()["ok"] is False
+    rpc.assert_not_called()
+
+
 async def test_tagging_api_passes_boolean_and_rejects_invalid_toggle(client, module, mocker):
     call = mocker.patch.object(
         module, "_call_rpc", return_value={"ok": True, "result": {"enabled": False}}
@@ -260,6 +349,122 @@ async def test_tagging_api_passes_boolean_and_rejects_invalid_toggle(client, mod
     response = await client.post("/api/tagging", json={"enabled": "false"})
     assert response.json()["ok"] is False
     assert call.call_count == 1
+
+
+def test_tagging_announcements_respect_speaker_and_speech_generation(module):
+    event = {"type": "automatic_tagging", "enabled": True}
+    module._announce_tagging_event(event)
+    assert module._speech_queue.empty()
+    module._speaker_enabled = True
+    module._speaker_generation = 4
+    module._announce_tagging_event({"type": "automatic_tagging", "enabled": False})
+    assert module._speech_queue.empty()
+    module._announce_tagging_event(event)
+    text, generation = module._speech_queue.get_nowait()
+    assert "Automatic tagging is on" in text
+    assert generation == 4
+    module._speaker_generation = 5
+    module._announce_tagging_event(event, generation=4)
+    assert module._speech_queue.empty()
+
+
+def test_new_object_speech_is_rate_limited_and_duplicates_are_silent(module, mocker):
+    module._speaker_enabled = True
+    clock = mocker.patch("dimos.web.console.module.time.monotonic", return_value=100)
+    module._announce_tagging_event({"type": "object_created", "id": "a", "name": "bottle"})
+    assert "bottle" in module._speech_queue.get_nowait()[0]
+    module._announce_tagging_event({"type": "object_created", "id": "b", "name": "shoe"})
+    assert module._speech_queue.empty()
+    clock.return_value = 111
+    module._announce_tagging_event({"type": "object_created", "id": "a", "name": "bottle"})
+    assert module._speech_queue.empty()
+    module._announce_tagging_event({"type": "object_created", "id": "c", "name": "box"})
+    assert "box" in module._speech_queue.get_nowait()[0]
+
+
+async def test_object_map_loads_all_objects_without_search_and_keeps_world_xyz(
+    client, module, mocker
+):
+    query = mocker.patch.object(
+        module,
+        "_call_mcp",
+        return_value={
+            "ok": True,
+            "result": {
+                "tags": [
+                    {
+                        "id": "fire",
+                        "name": "fire extinguisher",
+                        "kind": "object",
+                        "position": [1, 2, 3],
+                    },
+                    {"id": "room", "name": "room", "kind": "location", "position": [0, 0, 0]},
+                ]
+            },
+        },
+    )
+    module._on_map(
+        PointCloud2.from_numpy(np.array([[1, 2, 3]], dtype=np.float32), frame_id="world")
+    )
+    module._on_map_pose(PoseStamped(position=[1, 2, 0], frame_id="world"))
+    result = (await client.get("/api/object-map")).json()
+    assert result["points"] == [[1, 2, 3]]
+    assert result["frame"] == "world"
+    assert result["stale"] is False
+    assert [tag["id"] for tag in result["tags"]] == ["fire"]
+    assert result["pose"] == {"x": 1, "y": 2, "z": 0, "yaw": 0}
+    assert query.call_args.args == (OPERATIONS["query_memory_tags"], {})
+
+
+async def test_starting_stack_keeps_its_initial_static_map_and_new_pid_invalidates_it(
+    module, tmp_path, mocker
+):
+    runtime = ConsoleRuntime(tmp_path, tmp_path / "console.json")
+    module.runtime = runtime
+    runtime._state = "starting"
+    child = mocker.Mock(pid=12345)
+    child.poll.return_value = None
+    runtime._process = child
+    cloud = PointCloud2.from_numpy(np.array([[1, 2, 0], [2, 3, 0]], dtype=np.float32))
+    pose = PoseStamped(position=[1, 2, 0], frame_id="world")
+    module._on_map(cloud)
+    module._on_map_pose(pose)
+    await module._refresh_status()
+    assert module._map_points == [[1, 2, 0], [2, 3, 0]]
+    assert module._map_pose["x"] == 1
+    child.pid = 54321
+    module._on_map_pose(pose)
+    assert module._map_points == []
+    module._on_map(cloud)
+    await module._refresh_status()
+    assert module._map_points == [[1, 2, 0], [2, 3, 0]]
+    child.poll.return_value = 0
+    await module._refresh_status()
+    assert module._map_points == []
+    assert module._map_pose is None
+
+
+async def test_object_map_surfaces_inventory_errors(client, module, mocker):
+    mocker.patch.object(module, "_call_mcp", return_value={"ok": False, "error": "Memory offline"})
+    assert (await client.get("/api/object-map")).json() == {"ok": False, "error": "Memory offline"}
+
+
+async def test_object_map_bundle_is_served_locally(client):
+    response = await client.get("/assets/object-map.js")
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
+    assert "mountObjectMap" in response.text
+
+
+async def test_static_fusion_map_remains_available_with_fresh_world_pose(client, module, mocker):
+    mocker.patch.object(module, "_call_mcp", return_value={"ok": True, "result": {"tags": []}})
+    clock = mocker.patch("dimos.web.console.module.time.monotonic", return_value=100)
+    module._on_map(PointCloud2.from_numpy(np.array([[1, 2, 3]], dtype=np.float32)))
+    clock.return_value = 120
+    module._on_map_pose(PoseStamped(position=[1, 2, 0], frame_id="world"))
+    assert (await client.get("/api/object-map")).json()["stale"] is False
+    clock.return_value = 126
+    assert (await client.get("/api/object-map")).json()["stale"] is True
 
 
 async def test_auto_speech_queues_only_final_unique_agent_replies(module):
@@ -502,7 +707,10 @@ async def test_console_retries_stop_timeout_without_repeating_final_save(module,
         second = await c.post("/api/stack/stop", json={"confirmed": True})
     assert first.json() == {"ok": False, "error": "Graceful stop timed out"}
     assert second.json()["map_save"]["state"] == "saved"
-    assert rpc.call_count == 1
+    assert [call.args[0].key for call in rpc.call_args_list] == [
+        "preempt_task_sequence",
+        "prepare_map_shutdown",
+    ]
     assert stop.call_count == 2
 
 

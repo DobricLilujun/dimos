@@ -1,11 +1,12 @@
 // The three.js half of the map3d panel, imported lazily by the sink so pages
 // without a map3d panel never download it. Rendering is event-driven: the
 // sink renders on new data, on resizes and on orbit changes. There is no
-// animation loop, so an idle panel costs no GPU.
+// animation loop here; the Console can explicitly pulse its object overlay.
 
 import {
   BufferAttribute,
   BufferGeometry,
+  CanvasTexture,
   ConeGeometry,
   GridHelper,
   type Material,
@@ -14,7 +15,11 @@ import {
   PerspectiveCamera,
   Points,
   PointsMaterial,
+  Raycaster,
   Scene,
+  Sprite,
+  SpriteMaterial,
+  Vector2,
   WebGLRenderer,
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -28,9 +33,10 @@ import {
   NEAR_MIN,
   pointSize,
   type Pose3d,
+  type ObjectMapTag,
+  type TaggedVoxelScene,
   unionBounds,
   type View,
-  type VoxelScene,
 } from "./voxelView.ts";
 
 const FOV = 50;
@@ -60,7 +66,7 @@ for (let i = 0; i < 256; i++) {
 }
 
 /** Throws when WebGL is unavailable (the sink reports it). */
-export function createVoxelScene(canvas: HTMLCanvasElement): VoxelScene {
+export function createVoxelScene(canvas: HTMLCanvasElement): TaggedVoxelScene {
   const renderer = new WebGLRenderer({ canvas, antialias: false });
   renderer.setClearColor(BACKGROUND);
   const scene = new Scene();
@@ -83,11 +89,34 @@ export function createVoxelScene(canvas: HTMLCanvasElement): VoxelScene {
   marker.visible = false;
   scene.add(marker);
   let bounds: Bounds | null = null;
+  let tagBounds: Bounds | null = null;
+  let tags: ObjectMapTag[] = [];
+  let sprites: Sprite[] = [];
+  // Shared radial texture; changing opacity does not move the picking targets.
+  const glowCanvas = canvas.ownerDocument.createElement("canvas");
+  glowCanvas.width = glowCanvas.height = 64;
+  const context = glowCanvas.getContext("2d")!;
+  const glow = context.createRadialGradient(32, 32, 0, 32, 32, 32);
+  glow.addColorStop(0, "rgba(235,255,250,1)");
+  glow.addColorStop(0.16, "rgba(75,255,200,1)");
+  glow.addColorStop(0.4, "rgba(33,212,150,0.45)");
+  glow.addColorStop(1, "rgba(33,212,150,0)");
+  context.fillStyle = glow;
+  context.fillRect(0, 0, 64, 64);
+  const glowTexture = new CanvasTexture(glowCanvas);
+  const tagMaterial = new SpriteMaterial({
+    map: glowTexture, transparent: true, depthTest: false, depthWrite: false,
+  });
+  const raycaster = new Raycaster();
+  const pointer = new Vector2();
+  const drawnBounds = (): Bounds | null =>
+    bounds && tagBounds ? unionBounds(bounds, tagBounds) : bounds ?? tagBounds;
 
   // The clip planes follow the drawn box and the camera, so neither a map
   // fitted from kilometres away nor one zoomed or panned to is clipped.
   const updateClipping = (): void => {
-    const box = bounds === null ? GRID_BOUNDS : unionBounds(bounds, GRID_BOUNDS);
+    const drawn = drawnBounds();
+    const box = drawn === null ? GRID_BOUNDS : unionBounds(drawn, GRID_BOUNDS);
     const { x, y, z } = camera.position;
     const { near, far } = clipPlanes(box, [x, y, z]);
     camera.near = near;
@@ -122,6 +151,35 @@ export function createVoxelScene(canvas: HTMLCanvasElement): VoxelScene {
   };
 
   return {
+    pulseTags(timeMs) {
+      tagMaterial.opacity = 0.55 + 0.45 * (1 + Math.cos(timeMs * Math.PI / 1000)) / 2;
+    },
+    setTags(next) {
+      for (const sprite of sprites) scene.remove(sprite);
+      tags = next;
+      sprites = tags.map((tag) => {
+        const sprite = new Sprite(tagMaterial);
+        sprite.position.set(...tag.position);
+        sprite.scale.setScalar(0.45);
+        sprite.renderOrder = 10;
+        scene.add(sprite);
+        return sprite;
+      });
+      tagBounds = boundsOf(new Float32Array(tags.flatMap((tag) => tag.position)));
+      updateClipping();
+    },
+    pickTags(clientX, clientY) {
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return [];
+      pointer.set(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      camera.updateMatrixWorld();
+      scene.updateMatrixWorld(true);
+      raycaster.setFromCamera(pointer, camera);
+      return raycaster.intersectObjects(sprites).map((hit) => tags[sprites.indexOf(hit.object as Sprite)]);
+    },
     setVoxels(next, colors, res) {
       bounds = boundsOf(next);
       for (let i = 0; i < colors.length; i++) colors[i] = SRGB_TO_LINEAR[colors[i]];
@@ -143,8 +201,9 @@ export function createVoxelScene(canvas: HTMLCanvasElement): VoxelScene {
       if (following) follow(pose);
     },
     fit() {
-      if (bounds === null) return;
-      applyView(fitView(bounds, FOV, camera.aspect));
+      const drawn = drawnBounds();
+      if (drawn === null) return;
+      applyView(fitView(drawn, FOV, camera.aspect));
     },
     setFollow(on) {
       following = on;
@@ -166,6 +225,11 @@ export function createVoxelScene(canvas: HTMLCanvasElement): VoxelScene {
       (marker.material as Material).dispose();
       grid.geometry.dispose();
       (grid.material as Material).dispose();
+      for (const sprite of sprites) scene.remove(sprite);
+      sprites = [];
+      tags = [];
+      tagMaterial.dispose();
+      glowTexture.dispose();
       renderer.dispose();
     },
   };

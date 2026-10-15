@@ -305,6 +305,44 @@ def test_nearby_tool_fails_explicitly_without_persistent_planner(memory_skills):
     navigator.set_goal.assert_not_called()
 
 
+def test_sequence_navigation_uses_correlated_planner_rpc_not_legacy_start(memory_skills, mocker):
+    container, _, navigator = memory_skills
+    nearby = mocker.patch.object(container, "_nearby_navigation")
+    tracked = mocker.patch.object(container, "_sequence_navigation")
+    tracked.start_sequence_navigation.return_value = True
+    result = container.navigate_near_memory_tag(
+        "ext-1", _mcp_context={"sequence_operation_id": "operation-1"}
+    )
+    assert "not confirmation of arrival" in result
+    assert tracked.start_sequence_navigation.call_args.args[:2] == ("operation-1", "ext-1")
+    nearby.set_nearby_tagged_goal.assert_not_called()
+    navigator.set_goal.assert_not_called()
+
+
+def test_sequence_navigation_without_completion_adapter_never_moves(memory_skills, mocker):
+    container, _, navigator = memory_skills
+    nearby = mocker.patch.object(container, "_nearby_navigation")
+    assert container.sequence_navigation_available() is False
+    with pytest.raises(RuntimeError, match="Correlated navigation completion"):
+        container.navigate_near_memory_tag(
+            "ext-1", _mcp_context={"sequence_operation_id": "operation-1"}
+        )
+    nearby.set_nearby_tagged_goal.assert_not_called()
+    navigator.set_goal.assert_not_called()
+
+
+def test_sequence_inventory_returns_authoritative_result_without_changing_legacy_api(memory_skills):
+    container, _, navigator = memory_skills
+    result = container.query_memory_tags_result("fire extinguisher")
+    assert result.success is True
+    assert result.metadata == json.loads(container.query_memory_tags("fire extinguisher"))
+    skills = {info.func_name: info for info in container.get_skills()}
+    assert skills["query_memory_tags_result"].completion == "result"
+    assert skills["navigate_near_memory_tag"].completion == "navigation"
+    assert skills["query_memory_tags"].completion is None
+    navigator.set_goal.assert_not_called()
+
+
 def test_memory_tools_are_exposed_with_typed_mcp_schemas(memory_skills):
     container, _, _ = memory_skills
     skills = {entry.func_name: entry for entry in container.get_skills()}

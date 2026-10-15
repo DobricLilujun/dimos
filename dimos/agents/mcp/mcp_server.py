@@ -16,8 +16,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable
 import concurrent.futures
+from dataclasses import replace
 import json
 import os
+from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Any
 import uuid
@@ -32,6 +34,8 @@ import uvicorn
 from dimos.agents.annotation import skill
 from dimos.agents.capabilities import CapabilityRegistry
 from dimos.agents.mcp import tool_stream
+from dimos.agents.mcp.task_sequence import TaskSequenceExecutor
+from dimos.agents.skill_result import SkillResult
 from dimos.core.core import rpc
 from dimos.core.module import Module
 from dimos.core.rpc_client import RpcCall, RPCClient
@@ -66,6 +70,9 @@ app.state.sse_queues = []
 app.state.event_loop = None
 app.state.cap_registry = CapabilityRegistry()
 app.state.cap_acquire_timeout = DEFAULT_CAP_ACQUIRE_TIMEOUT
+app.state.task_sequence = None
+app.state.sequence_navigation_status = None
+app.state.sequence_navigation_cancel = None
 
 
 def _jsonrpc_result(req_id: Any, result: Any) -> dict[str, Any]:
@@ -77,6 +84,17 @@ def _jsonrpc_result_text(req_id: Any, text: str, *, is_error: bool = False) -> d
     if is_error:
         result["isError"] = True
     return _jsonrpc_result(req_id, result)
+
+
+def _jsonrpc_skill_result(req_id: Any, result: SkillResult) -> dict[str, Any]:
+    return _jsonrpc_result(
+        req_id,
+        {
+            "content": result.agent_encode(),
+            "structuredContent": json.loads(result.agent_encode()[0]["text"]),
+            **({"isError": True} if not result.success else {}),
+        },
+    )
 
 
 def _jsonrpc_error(req_id: Any, code: int, message: str) -> dict[str, Any]:
@@ -104,10 +122,11 @@ def _handle_tools_list(req_id: Any, skills: list[SkillInfo]) -> dict[str, Any]:
         tool: dict[str, Any] = {"name": s.func_name, "inputSchema": schema}
         if description:
             tool["description"] = description
-        if s.uses or s.lifecycle != "instant":
+        if s.uses or s.lifecycle != "instant" or s.completion is not None:
             tool["_meta"] = {
                 "dimos/uses": list(s.uses),
                 "dimos/lifecycle": s.lifecycle,
+                "dimos/completion": s.completion,
             }
         tools.append(tool)
 
@@ -115,7 +134,11 @@ def _handle_tools_list(req_id: Any, skills: list[SkillInfo]) -> dict[str, Any]:
 
 
 async def _handle_tools_call(
-    req_id: Any, params: dict[str, Any], rpc_calls: dict[str, Any]
+    req_id: Any,
+    params: dict[str, Any],
+    rpc_calls: dict[str, Any],
+    *,
+    sequence_operation_id: str | None = None,
 ) -> dict[str, Any]:
     name = params.get("name", "")
     args: dict[str, Any] = params.get("arguments") or {}
@@ -125,12 +148,37 @@ async def _handle_tools_call(
     rpc_call = rpc_calls.get(name)
     if rpc_call is None:
         logger.warning("MCP tool not found", tool=name)
+        if sequence_operation_id is not None:
+            return _jsonrpc_skill_result(
+                req_id, SkillResult.fail("INVALID_INPUT", f"Tool not found: {name}")
+            )
         return _jsonrpc_result_text(req_id, f"Tool not found: {name}", is_error=True)
 
     skill_info = app.state.skills_by_name.get(name)
+    if sequence_operation_id is not None and (
+        skill_info is None
+        or skill_info.completion not in ("result", "navigation")
+        or skill_info.lifecycle != "instant"
+    ):
+        return _jsonrpc_skill_result(
+            req_id,
+            SkillResult.fail(
+                "INVALID_INPUT", f"Tool has no supported bounded completion contract: {name}"
+            ),
+        )
     uses: list[str] = list(skill_info.uses) if skill_info is not None else []
     lifecycle = skill_info.lifecycle if skill_info is not None else "instant"
     cap_registry: CapabilityRegistry = app.state.cap_registry
+    sequence: TaskSequenceExecutor | None = app.state.task_sequence
+    if (
+        sequence_operation_id is None
+        and sequence is not None
+        and ("movement" in uses or name.startswith(("stop_", "end_", "cancel_")))
+        and name != "cancel_task_sequence"
+    ):
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: sequence.pause(f"Preempted by tool '{name}'")
+        )
 
     # A per-invocation token scopes the capability hold, so a stale invocation's
     # teardown can't release a hold that a newer same-tool invocation took over.
@@ -173,11 +221,10 @@ async def _handle_tools_call(
                 advice = "Call the appropriate stop tool first, then retry."
             else:
                 advice = "It is taking longer than expected; wait a moment and then retry."
-            return _jsonrpc_result_text(
-                req_id,
-                f"Cannot start '{name}': capability '{cap}' is held by '{holder}'. {advice}",
-                is_error=True,
-            )
+            message = f"Cannot start '{name}': capability '{cap}' is held by '{holder}'. {advice}"
+            if sequence_operation_id is not None:
+                return _jsonrpc_skill_result(req_id, SkillResult.fail("INVALID_STATE", message))
+            return _jsonrpc_result_text(req_id, message, is_error=True)
 
     logger.info("MCP tool call", tool=name, args=args, progress_token=progress_token)
     t0 = time.monotonic()
@@ -191,6 +238,8 @@ async def _handle_tools_call(
         mcp_context["progress_token"] = progress_token
     if uses:
         mcp_context["acquire_token"] = acquire_token
+    if sequence_operation_id is not None:
+        mcp_context["sequence_operation_id"] = sequence_operation_id
     if mcp_context:
         call_kwargs["_mcp_context"] = mcp_context
 
@@ -203,6 +252,30 @@ async def _handle_tools_call(
             result = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: rpc_call(**call_kwargs)
             )
+            if (
+                sequence_operation_id is not None
+                and skill_info is not None
+                and skill_info.completion == "navigation"
+            ):
+                status_call = app.state.sequence_navigation_status
+                if status_call is None:
+                    raise RuntimeError("Navigation completion adapter unavailable")
+                while True:
+                    status = await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: status_call(operation_id=sequence_operation_id)
+                    )
+                    if status.get("operation_id") != sequence_operation_id:
+                        raise RuntimeError("Navigation completion operation ID mismatch")
+                    if status.get("status") != "running":
+                        result = (
+                            SkillResult.ok("Navigation arrival verified")
+                            if status.get("status") == "completed"
+                            else SkillResult.fail(
+                                "EXECUTION_FAILED", f"Navigation {status.get('status', 'unknown')}"
+                            )
+                        )
+                        break
+                    await asyncio.sleep(0.1)
         except Exception as e:
             logger.exception("MCP tool error", tool=name, duration=f"{time.monotonic() - t0:.3f}s")
             return _jsonrpc_result_text(req_id, f"Error running tool '{name}': {e}", is_error=True)
@@ -219,6 +292,8 @@ async def _handle_tools_call(
 
     if hasattr(result, "agent_encode"):
         logger.info("MCP tool done", tool=name, duration=duration, response=response)
+        if isinstance(result, SkillResult):
+            return _jsonrpc_skill_result(req_id, result)
         return _jsonrpc_result(req_id, {"content": result.agent_encode()})
 
     logger.info("MCP tool done", tool=name, duration=duration, response=response)
@@ -352,6 +427,7 @@ class McpServer(Module):
     _uvicorn_server: uvicorn.Server | None = None
     _serve_future: concurrent.futures.Future[None] | None = None
     _tool_stream_cleanup: Callable[[], None] | None = None
+    _sequence_progress_transport: Any = None
 
     @rpc
     def start(self) -> None:
@@ -361,6 +437,12 @@ class McpServer(Module):
 
     @rpc
     def stop(self) -> None:
+        if app.state.task_sequence is not None:
+            app.state.task_sequence.close()
+            app.state.task_sequence = None
+        if self._sequence_progress_transport is not None:
+            self._sequence_progress_transport.stop()
+            self._sequence_progress_transport = None
         if self._tool_stream_cleanup is not None:
             self._tool_stream_cleanup()
             self._tool_stream_cleanup = None
@@ -395,6 +477,133 @@ class McpServer(Module):
             )
             for skill_info in app.state.skills
         }
+        navigation = app.state.skills_by_name.get("navigate_near_memory_tag")
+        if navigation is not None:
+            available = RpcCall(
+                None, self.rpc, "sequence_navigation_available", navigation.class_name, []
+            )
+            if not available():
+                app.state.skills = [
+                    replace(info, completion=None)
+                    if info.func_name == navigation.func_name
+                    else info
+                    for info in app.state.skills
+                ]
+                app.state.skills_by_name = {s.func_name: s for s in app.state.skills}
+            app.state.sequence_navigation_status = RpcCall(
+                None, self.rpc, "sequence_navigation_status", navigation.class_name, []
+            )
+            app.state.sequence_navigation_cancel = RpcCall(
+                None, self.rpc, "cancel_sequence_navigation", navigation.class_name, []
+            )
+        if app.state.task_sequence is None:
+            self._sequence_progress_transport = make_transport(tool_stream.TOOL_STREAM_TOPIC)
+            self._sequence_progress_transport.start()
+            state_dir = Path(
+                os.environ.get(
+                    "DIMOS_TASK_SEQUENCE_STATE_DIR",
+                    str(
+                        Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+                        / "dimos"
+                    ),
+                )
+            )
+
+            def dispatch(name: str, arguments: dict[str, Any], operation_id: str) -> dict[str, Any]:
+                response = asyncio.run(
+                    _handle_tools_call(
+                        operation_id,
+                        {"name": name, "arguments": arguments},
+                        app.state.rpc_calls,
+                        sequence_operation_id=operation_id,
+                    )
+                )
+                result: dict[str, Any] = response["result"]
+                return result
+
+            def cancel_operation(name: str, operation_id: str) -> bool:
+                info = app.state.skills_by_name.get(name)
+                if info is None or info.completion != "navigation":
+                    return False
+                call = app.state.sequence_navigation_cancel
+                return bool(call is not None and call(operation_id=operation_id))
+
+            last_notification: str | None = None
+
+            def publish(status: dict[str, Any]) -> None:
+                nonlocal last_notification
+                summary = {
+                    key: status.get(key)
+                    for key in ("id", "status", "active_index", "reason", "quiescent")
+                }
+                summary["steps"] = [
+                    {"id": step["id"], "tool": step["tool"], "status": step["status"]}
+                    for step in status.get("steps", [])
+                ]
+                text = json.dumps(summary)
+                if text == last_notification:
+                    return
+                last_notification = text
+                try:
+                    self._sequence_progress_transport.publish(
+                        tool_stream.make_notification("task_sequence", text)
+                    )
+                except Exception:
+                    logger.exception("Sequence progress notification failed")
+
+            app.state.task_sequence = TaskSequenceExecutor(
+                state_dir / "task_sequence.json",
+                lambda: app.state.skills_by_name,
+                dispatch,
+                cancel_operation,
+                publish,
+            )
+
+    def _sequence(self) -> TaskSequenceExecutor:
+        executor: TaskSequenceExecutor | None = app.state.task_sequence
+        if executor is None:
+            raise RuntimeError("Task sequence executor is not ready")
+        return executor
+
+    @skill
+    def start_task_sequence(self, steps: list[dict[str, Any]]) -> str:
+        """Validate and start an ordered durable tool plan (at most 32 steps).
+
+        Each step has tool, arguments, completion ('result' or 'navigation'),
+        and optional timeout in seconds. Use only tools advertising
+        dimos/completion. Started navigation is not arrival. Errors pause the
+        plan; only a confirmed human action may resume or retry it.
+        """
+        return json.dumps(self._sequence().start(steps))
+
+    @skill
+    def task_sequence_status(self) -> str:
+        """Get ordered sequence steps, actual results, active index and pause reason."""
+        return json.dumps(self._sequence().status())
+
+    @skill
+    def pause_task_sequence(self) -> str:
+        """Pause the current sequence and stop its active operation where supported."""
+        return json.dumps(self._sequence().pause())
+
+    @skill
+    def cancel_task_sequence(self) -> str:
+        """Cancel the current sequence; never run its remaining steps."""
+        return json.dumps(self._sequence().cancel())
+
+    @rpc
+    def resume_task_sequence(self, sequence_id: str, retry_failed: bool = False) -> dict[str, Any]:
+        """Resume only after Console human confirmation; not an MCP/agent tool."""
+        return self._sequence().resume(sequence_id, retry_failed=retry_failed)
+
+    @rpc
+    def preempt_task_sequence(self, reason: str = "Manual takeover") -> dict[str, Any]:
+        """Console must call before Stop, keyboard takeover, or manual movement."""
+        return self._sequence().pause(reason)
+
+    @rpc
+    def get_task_sequence_status(self) -> dict[str, Any]:
+        return self._sequence().status()
 
     @skill
     def server_status(self) -> str:

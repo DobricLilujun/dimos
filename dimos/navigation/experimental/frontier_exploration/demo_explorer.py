@@ -63,6 +63,7 @@ class ExploreOptions(BaseModel):
     # Greedy: always take the closest reachable frontier instead of a distant
     # detour, so the robot never circles back over covered ground.
     greedy: bool = True
+    max_leg_distance_m: float = Field(default=1.5, ge=0.3, le=10, allow_inf_nan=False)
     # Coverage completion: only end when this fraction of reachable free cells
     # has been visited, so the run never stops early on a low-gain plateau.
     coverage_threshold: float = Field(default=0.9, ge=0, le=1, allow_inf_nan=False)
@@ -136,6 +137,13 @@ class DemoExplorer(WavefrontFrontierExplorer):
         self._lidar_received = 0.0
         self._costmap_received = 0.0
         self._bootstrapping = False
+        self._costmap_revision = 0
+        self._lidar_revision = 0
+        self._lidar_map_consistent = False
+        self._lidar_timestamp = float("-inf")
+        self._closure_revision: tuple[int, int] | None = None
+        self._closure_updates = 0
+        self._closure_since: float | None = None
 
     @rpc
     def start(self) -> None:
@@ -143,8 +151,33 @@ class DemoExplorer(WavefrontFrontierExplorer):
         self.register_disposable(Disposable(self.lidar.subscribe(self._on_lidar)))
 
     def _on_lidar(self, cloud: PointCloud2) -> None:
-        if len(cloud) and np.isfinite(cloud.points_f32()).all():
+        points = cloud.points_f32()
+        if len(cloud) and np.isfinite(points).all():
+            if cloud.ts is None:
+                self._lidar_received = time.monotonic()
+                return
+            if not math.isfinite(cloud.ts) or cloud.ts <= self._lidar_timestamp:
+                return
             self._lidar_received = time.monotonic()
+            self._lidar_timestamp = cloud.ts
+            self._lidar_revision += 1
+            self._lidar_map_consistent = False
+            grid = self.latest_costmap
+            if grid is not None and cloud.frame_id == grid.frame_id == "world":
+                cols = np.floor((points[:, 0] - grid.origin.position.x) / grid.resolution).astype(
+                    int
+                )
+                rows = np.floor((points[:, 1] - grid.origin.position.y) / grid.resolution).astype(
+                    int
+                )
+                inside = (cols >= 0) & (cols < grid.width) & (rows >= 0) & (rows < grid.height)
+                # Static fusion can pause while fresh lidar still proves that the
+                # saved enclosure has not exposed unknown or out-of-map space.
+                self._lidar_map_consistent = bool(
+                    len(points) >= 32
+                    and np.all(inside)
+                    and np.all(grid.grid[rows, cols] != CostValues.UNKNOWN)
+                )
 
     def _start_is_free(self) -> bool:
         grid, pose = self.latest_costmap, self.latest_odometry
@@ -252,6 +285,7 @@ class DemoExplorer(WavefrontFrontierExplorer):
     def _on_costmap(self, msg: OccupancyGrid) -> None:
         self.latest_costmap = msg
         self._costmap_received = time.monotonic()
+        self._costmap_revision += 1
 
     def _on_odometry(self, msg: PoseStamped) -> None:
         self.latest_odometry = msg
@@ -277,6 +311,7 @@ class DemoExplorer(WavefrontFrontierExplorer):
             self.latest_costmap is not None
             and self.latest_odometry is not None
             and time.monotonic() - self._odom_received <= self.config.sensor_timeout
+            and time.monotonic() - self._lidar_received <= self.config.sensor_timeout
         )
 
     def select_goal(self, pose: Vector3, grid: OccupancyGrid) -> Vector3 | None:
@@ -286,6 +321,14 @@ class DemoExplorer(WavefrontFrontierExplorer):
             minimum_distance = self._minimum_frontier_distance()
         startup = minimum_distance < 0.4
         reached_radius = 0.05 + 0.70 * min(self._startup_displacement / 2.0, 1.0)
+        self._failed = [(p, expiry) for p, expiry in self._failed if expiry > time.monotonic()]
+        if self._failed:
+            grid = grid.copy()
+            yy, xx = np.indices(grid.grid.shape)
+            for previous, _ in self._failed:
+                cell = grid.world_to_grid(previous)
+                blocked = (xx - cell.x) ** 2 + (yy - cell.y) ** 2 < (0.75 / grid.resolution) ** 2
+                grid.grid[blocked] = CostValues.OCCUPIED
         distances = reachable_distances(grid, pose)
         if not np.any(np.isfinite(distances)):
             self._selection_reason = (
@@ -296,7 +339,6 @@ class DemoExplorer(WavefrontFrontierExplorer):
             grid.grid == CostValues.UNKNOWN, structure=np.ones((3, 3), dtype=bool)
         )
         raw_count = int(np.count_nonzero(frontier))
-        self._failed = [(p, expiry) for p, expiry in self._failed if expiry > time.monotonic()]
         yy, xx = np.indices(frontier.shape)
         exclusions = [
             *((p, reached_radius) for p in self.explored_goals),
@@ -360,33 +402,69 @@ class DemoExplorer(WavefrontFrontierExplorer):
         self._selection_reason = (
             f"Selected reachable goal; minimum distance={minimum_distance:.2f}m"
         )
+        selected: Vector3 | None = None
         if startup:
             nearby = [index for index, cost in enumerate(costs) if cost <= 0.8]
             if nearby:
-                return goals[min(nearby, key=lambda index: costs[index])]
+                selected = goals[min(nearby, key=lambda index: costs[index])]
         # Greedy: take the closest reachable frontier (minimum path cost) so the
         # robot never takes a long detour or circles back over covered ground.
-        if self.options.greedy:
-            return goals[min(range(len(goals)), key=lambda index: costs[index])]
-        if self.options.strategy == "frontier":
-            return self._rank_frontiers(goals, sizes, pose, grid)[0]
-        # Information per actual path metre; modest cluster bonus avoids distant detours.
-        scores = [math.sqrt(size) / (cost + 0.5) for size, cost in zip(sizes, costs, strict=True)]
-        return goals[int(np.argmax(scores))]
+        if selected is None:
+            if self.options.greedy:
+                selected = goals[min(range(len(goals)), key=lambda index: costs[index])]
+            elif self.options.strategy == "frontier":
+                selected = self._rank_frontiers(goals, sizes, pose, grid)[0]
+            else:
+                scores = [
+                    math.sqrt(size) / (cost + 0.5) for size, cost in zip(sizes, costs, strict=True)
+                ]
+                selected = goals[int(np.argmax(scores))]
+        return self._short_leg(pose, selected, grid, distances)
+
+    def _short_leg(
+        self, pose: Vector3, goal: Vector3, grid: OccupancyGrid, distances: np.ndarray[Any, Any]
+    ) -> Vector3 | None:
+        """Walk the shortest-path distance field back to a bounded local waypoint."""
+        cell = grid.world_to_grid(goal)
+        row, col = math.floor(cell.y), math.floor(cell.x)
+        limit = self.options.max_leg_distance_m
+        while distances[row, col] > limit:
+            neighbours = []
+            for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+                ny, nx = row + dy, col + dx
+                if not (0 <= ny < grid.height and 0 <= nx < grid.width):
+                    continue
+                if (
+                    dx
+                    and dy
+                    and (
+                        grid.grid[row, nx] != CostValues.FREE
+                        or grid.grid[ny, col] != CostValues.FREE
+                    )
+                ):
+                    continue
+                step = grid.resolution * (math.sqrt(2) if dx and dy else 1)
+                if math.isclose(distances[ny, nx] + step, distances[row, col]):
+                    neighbours.append((float(distances[ny, nx]), ny, nx))
+            if not neighbours:
+                self._selection_reason = "No safe connector to local frontier waypoint"
+                return None
+            _, row, col = min(neighbours)
+        waypoint = grid.grid_to_world((col, row, 0))
+        if math.hypot(waypoint.x - pose.x, waypoint.y - pose.y) < 0.25:
+            self._selection_reason = "Local waypoint is below navigation arrival tolerance"
+            return None
+        self._selection_reason += f"; leg path={distances[row, col]:.2f}m (limit {limit:g}m)"
+        return Vector3(waypoint.x, waypoint.y, 0)
 
     def _coverage_fraction(self, grid: OccupancyGrid, pose: Vector3) -> float:
-        """Fraction of reachable free cells whose visited frontiers cover.
-
-        Traversing the free-space boundary (the reachable frontier cells) is how
-        exploration proves the area is done: a high visited fraction means the
-        robot has swept the edges of the whole reachable space.
-        """
+        """Visited-cell diagnostic; coverage alone is not proof of enclosure."""
         distances = reachable_distances(grid, pose)
         reachable = np.isfinite(distances)
         free = reachable & (grid.grid == CostValues.FREE)
         total = int(np.count_nonzero(free))
         if total == 0:
-            return 1.0
+            return 0.0
         yy, xx = np.indices(free.shape)
         visited = np.zeros_like(free, dtype=bool)
         for goal in self.explored_goals:
@@ -403,19 +481,41 @@ class DemoExplorer(WavefrontFrontierExplorer):
         return bool(np.any(frontier))
 
     def _is_exploration_complete(self, grid: OccupancyGrid, pose: Vector3) -> bool:
-        """Only end when reachable free space is swept or no frontier remains."""
-        if not self._sensors_fresh():
-            return False
-        no_frontier = not self._has_reachable_frontier(
-            simple_inflate(grid, self.config.frontier_inflation), pose.position
+        """Require a stable observed enclosure, not exhaustion of filtered goals."""
+        reachable = np.isfinite(reachable_distances(grid, pose.position))
+        open_edge = (
+            np.any(reachable[0])
+            or np.any(reachable[-1])
+            or np.any(reachable[:, 0])
+            or np.any(reachable[:, -1])
         )
-        if no_frontier and len(self.explored_goals) >= self.options.min_goals:
-            return True
-        coverage = self._coverage_fraction(grid, pose.position)
-        if coverage >= self.options.coverage_threshold and len(self.explored_goals) >= 1:
-            self._status("completed", f"Coverage {coverage:.0%} of reachable free space swept")
-            return True
-        return False
+        if (
+            not self._sensors_fresh()
+            or (self._lidar_revision > 0 and not self._lidar_map_consistent)
+            or (
+                time.monotonic() - self._costmap_received > self.config.sensor_timeout
+                and not self._lidar_map_consistent
+            )
+            or not self._map_session.navigation_ready()
+            or not np.any(reachable)
+            or open_edge
+            or self._has_reachable_frontier(grid, pose.position)
+        ):
+            self._closure_since = None
+            self._closure_updates = 0
+            self._closure_revision = None
+            return False
+        now = time.monotonic()
+        if self._closure_since is None:
+            self._closure_since = now
+        revision = (
+            self._costmap_revision,
+            self._lidar_revision if self._lidar_map_consistent else 0,
+        )
+        if self._closure_revision != revision:
+            self._closure_updates += 1
+            self._closure_revision = revision
+        return self._closure_updates >= 3 and now - self._closure_since >= 5
 
     def _extend_short_frontier(
         self,
@@ -458,9 +558,8 @@ class DemoExplorer(WavefrontFrontierExplorer):
         self.no_gain_counter = self.no_gain_counter + 1 if gain < self.options.gain_percent else 0
         if self.no_gain_counter >= self.options.no_gain_attempts:
             self._status(
-                "completed", f"Low map gain {gain:.2f}% for {self.no_gain_counter} arrivals"
+                "selecting", f"Low map gain {gain:.2f}%; checking remaining reachable frontiers"
             )
-            return True
         return False
 
     def _navigate(self, goal: Vector3) -> bool:
@@ -480,6 +579,7 @@ class DemoExplorer(WavefrontFrontierExplorer):
         )
         anchor = self.latest_odometry
         progress_time = time.monotonic()
+        recovery_attempts = 0
         while not self.stop_event.is_set():
             self._wake.wait(self.options.check_interval)
             with self._guard:
@@ -511,7 +611,25 @@ class DemoExplorer(WavefrontFrontierExplorer):
                 )
                 # Static/moving recovery: the robot is stuck, so turn or back up
                 # to free it before giving up on this target. Never just stop.
-                if self.config.stall_recovery and self._recover_stuck():
+                if (
+                    self.config.stall_recovery
+                    and recovery_attempts < self.options.stall_recovery_attempts
+                ):
+                    recovery_attempts += 1
+                    recovered = self._recover_stuck()
+                else:
+                    recovered = False
+                if recovered:
+                    with self._guard:
+                        if self.stop_event.is_set():
+                            break
+                        self._result = None
+                        self._awaiting_goal = True
+                        if not self._navigation.set_goal(
+                            PoseStamped(position=goal, frame_id="world")
+                        ):
+                            self._awaiting_goal = False
+                            break
                     anchor, progress_time = pose, time.monotonic()
                     continue
                 break
@@ -531,17 +649,27 @@ class DemoExplorer(WavefrontFrontierExplorer):
         """
         if not self._map_session.navigation_ready():
             return False
+        if self._scan_blocker() is not None:
+            self._status(
+                "blocked", "Recovery requires fresh sensors and observed rotation clearance"
+            )
+            return False
         with self._guard:
             if self.stop_event.is_set():
                 return False
             start = self.latest_odometry
         if start is None:
             return False
+        with self._guard:
+            self._awaiting_goal = False
+        self._navigation.cancel_goal()
         # Step 1: a slow in-place rotation sweep (turn to a new view).
         self._status("recovering", "Stuck; turning in place to escape")
         deadline = time.monotonic() + self.config.recovery_turn_duration
         try:
             while not self.stop_event.is_set() and time.monotonic() < deadline:
+                if self._scan_blocker() is not None:
+                    return False
                 with self._guard:
                     self.nav_cmd_vel.publish(
                         Twist(angular=Vector3(0, 0, self.config.recovery_turn_speed))
@@ -557,11 +685,35 @@ class DemoExplorer(WavefrontFrontierExplorer):
             return True
         # Step 2: still stuck, back up a short distance.
         self._status("recovering", "Still stuck; backing up")
+        pose = self.latest_odometry
+        costmap = self.latest_costmap
+        if pose is None or costmap is None:
+            return False
+        yaw = pose.orientation.to_euler().z
+        inflated = simple_inflate(costmap, 0.55)
+        distances = reachable_distances(inflated, pose.position)
+        for distance in np.linspace(0, self.config.recovery_back_distance, 10):
+            point = Vector3(
+                pose.position.x - math.cos(yaw) * distance,
+                pose.position.y - math.sin(yaw) * distance,
+                0,
+            )
+            cell = inflated.world_to_grid(point)
+            x, y = math.floor(cell.x), math.floor(cell.y)
+            if not (
+                0 <= x < inflated.width
+                and 0 <= y < inflated.height
+                and np.isfinite(distances[y, x])
+            ):
+                self._status("blocked", "Recovery back-up leaves observed free clearance")
+                return False
         deadline = time.monotonic() + self.config.recovery_back_distance / max(
             self.config.recovery_back_speed, 1e-3
         )
         try:
             while not self.stop_event.is_set() and time.monotonic() < deadline:
+                if self._scan_blocker() is not None:
+                    return False
                 with self._guard:
                     self.nav_cmd_vel.publish(
                         Twist(linear=Vector3(-self.config.recovery_back_speed, 0, 0))
@@ -662,6 +814,9 @@ class DemoExplorer(WavefrontFrontierExplorer):
                 return False
             self.reset_exploration_session()
             self._failed.clear()
+            self._closure_since = None
+            self._closure_updates = 0
+            self._closure_revision = None
             self.stop_event.clear()
             self.exploration_active = True
             self.exploration_thread = threading.Thread(target=self._exploration_loop, daemon=True)
@@ -706,15 +861,17 @@ class DemoExplorer(WavefrontFrontierExplorer):
         greedy: bool = True,
         coverage_threshold: float = 0.9,
         stall_recovery_attempts: int = 3,
+        max_leg_distance_m: float = 1.5,
     ) -> str:
-        """Explore reachable frontiers, recovering stalls and never stopping early.
+        """Explore in short known-free legs until fresh maps confirm no reachable frontiers.
 
         Greedy mode takes the closest reachable frontier so the robot never
         takes a long detour or circles over covered ground; when it is stuck it
-        turns and backs up to free itself, then keeps going. It only ends when
-        the reachable free space has been swept (coverage threshold), not on a
-        low-gain plateau. May turn slowly in place when the start cell is
-        invalid. Use end_demo_exploration to stop.
+        attempts clearance-checked recovery. Completion needs three distinct
+        map/lidar observations spanning five seconds with no reachable unknown boundary;
+        low gain and filtered/cooling goals alone are not completion.
+        May turn slowly in place when the start cell is invalid.
+        Use end_demo_exploration to stop.
 
         Args:
             strategy: frontier for original scoring; efficient for gain per reachable path metre.
@@ -723,7 +880,8 @@ class DemoExplorer(WavefrontFrontierExplorer):
             no_gain_attempts: Consecutive low-gain arrivals before the gain counter resets.
             check_interval: Progress check seconds; failure feedback wakes immediately.
             greedy: Take the closest reachable frontier instead of a distant detour.
-            coverage_threshold: Fraction of reachable free space to sweep before completing.
+            max_leg_distance_m: Maximum known-free path length per navigation leg.
+            coverage_threshold: Legacy coverage diagnostic; cannot override reachable frontiers.
             stall_recovery_attempts: Turn/back-up attempts before a stuck target is cooled.
         """
         options = ExploreOptions.model_validate(
@@ -734,6 +892,7 @@ class DemoExplorer(WavefrontFrontierExplorer):
                 "no_gain_attempts": no_gain_attempts,
                 "check_interval": check_interval,
                 "greedy": greedy,
+                "max_leg_distance_m": max_leg_distance_m,
                 "coverage_threshold": coverage_threshold,
                 "stall_recovery_attempts": stall_recovery_attempts,
             }

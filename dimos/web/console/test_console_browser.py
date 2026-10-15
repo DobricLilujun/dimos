@@ -16,6 +16,9 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+import os
+from pathlib import Path
+import shutil
 import threading
 import time
 
@@ -24,7 +27,9 @@ import numpy as np
 import pytest
 import uvicorn
 
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.std_msgs.String import String
 from dimos.web.console.module import RobotConsoleModule
 from dimos.web.console.settings import ConsoleRuntime
@@ -50,6 +55,8 @@ def console_server(tmp_path, mocker):
     live_speed = {"enabled": True, "speed_mps": 0.55}
 
     async def rpc(op, args):
+        if op.key in ("get_task_sequence_status", "preempt_task_sequence"):
+            return {"ok": True, "result": {"status": "idle"}}
         if op.key == "prepare_map_shutdown":
             calls.append((op.key, args))
             return {
@@ -175,7 +182,21 @@ def page(console_server):
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+        executable = (
+            None
+            if Path(playwright.chromium.executable_path).exists()
+            else shutil.which("google-chrome")
+        )
+        browser = playwright.chromium.launch(
+            executable_path=executable,
+            env={key: value for key, value in os.environ.items() if key != "DISPLAY"},
+            args=[
+                "--enable-unsafe-swiftshader",
+                "--use-gl=angle",
+                "--use-angle=swiftshader-webgl",
+                "--ozone-platform=headless",
+            ],
+        )
         try:
             page = browser.new_page()
             page.goto(console_server[0])
@@ -188,6 +209,148 @@ def page(console_server):
 def start_stack(page):
     page.locator("#stack-start").click()
     page.locator("#b-stack").get_by_text("running", exact=True).wait_for()
+
+
+def test_object_map_real_webgl_hover_and_confirmed_stable_id_navigation(
+    page, console_server, mocker
+):
+    _, module, _, calls = console_server
+    original = module._call_mcp
+    tag = {
+        "id": "extinguisher-2",
+        "name": "Fire extinguisher",
+        "kind": "object",
+        "description": "Beside the second doorway",
+        "position": [0, 0, 0.4],
+    }
+
+    async def inventory(op, args):
+        if op.key == "query_memory_tags":
+            calls.append((op.key, args))
+            return {"ok": True, "result": {"tags": [tag]}}
+        return await original(op, args)
+
+    mocker.patch.object(module, "_call_mcp", side_effect=inventory)
+    start_stack(page)
+    module._on_map(
+        PointCloud2.from_numpy(
+            np.array(
+                [
+                    [-1, -1, 0],
+                    [-1, 1, 0],
+                    [1, -1, 0.8],
+                    [1, 1, 0.8],
+                ],
+                dtype=np.float32,
+            )
+        )
+    )
+    module._on_map_pose(PoseStamped(position=[0, -0.8, 0], frame_id="world"))
+    page.get_by_role("button", name="Show tagged objects", exact=True).click()
+    page.wait_for_function(
+        "() => /Objects \\(|unavailable|disconnected/.test(document.querySelector('#object-map').innerText)"
+    )
+    assert "Objects (1)" in page.locator("#object-map").inner_text()
+    page.locator("#object-map [role=status]").filter(has_text="1 stored objects").wait_for()
+    assert page.locator("#rr").is_hidden()
+    assert ("query_memory_tags", {}) in calls
+    canvas = page.locator("#object-map canvas")
+    first_frame = canvas.screenshot()
+    page.wait_for_timeout(450)
+    assert canvas.screenshot() != first_frame, (
+        "Stored-object glow must pulse in the actual 3D renderer"
+    )
+    bounds = canvas.bounding_box()
+    x, y = bounds["x"] + bounds["width"] / 2, bounds["y"] + bounds["height"] / 2
+    page.mouse.move(x, y)
+    tooltip = page.locator("#object-map-properties")
+    tooltip.wait_for(state="visible")
+    assert "Beside the second doorway" in tooltip.inner_text()
+    assert "extinguisher-2" in tooltip.inner_text()
+    page.mouse.click(x, y)
+    field = page.locator('#operation-fields input[name="location_id"]')
+    field.wait_for()
+    assert field.input_value() == "extinguisher-2"
+    assert not any(name == "navigate_near_memory_tag" for name, _ in calls)
+    with page.expect_response("**/api/action"):
+        page.locator("#operation-form button[type=submit]").click()
+    assert ("navigate_near_memory_tag", {"location_id": "extinguisher-2"}) in calls
+    page.get_by_role("button", name="Show Rerun", exact=True).click()
+    assert page.locator("#object-map").is_hidden()
+    assert page.locator("#rr").is_visible()
+
+
+def test_task_sequence_restores_paused_progress_and_requires_retry_confirmation(
+    page, console_server, mocker
+):
+    _, module, _, calls = console_server
+    sequence = {
+        "id": "ordered-extinguishers",
+        "status": "paused",
+        "active_index": 1,
+        "quiescent": True,
+        "reason": "Second target blocked; human review required",
+        "steps": [
+            {
+                "tool": "navigate_near_memory_tag",
+                "arguments": {"location_id": "extinguisher-1"},
+                "status": "completed",
+                "result": {"success": True, "message": "Arrived"},
+            },
+            {
+                "tool": "navigate_near_memory_tag",
+                "arguments": {"location_id": "extinguisher-2"},
+                "status": "failed",
+                "result": {"success": False, "message": "Path blocked"},
+            },
+            {
+                "tool": "navigate_near_memory_tag",
+                "arguments": {"location_id": "extinguisher-3"},
+                "status": "pending",
+                "result": None,
+            },
+        ],
+    }
+    original = module._call_rpc.side_effect
+
+    async def rpc(op, args):
+        if op.key == "get_task_sequence_status":
+            return {"ok": True, "result": sequence}
+        if op.key in ("resume_task_sequence", "cancel_task_sequence"):
+            calls.append((op.key, args))
+            sequence["status"] = "running" if op.key == "resume_task_sequence" else "cancelled"
+            sequence["reason"] = ""
+            if op.key == "resume_task_sequence":
+                sequence["steps"][1]["status"] = "pending"
+            return {"ok": True, "result": sequence}
+        return await original(op, args)
+
+    mocker.patch.object(module, "_call_rpc", side_effect=rpc)
+    start_stack(page)
+    panel = page.locator("#task-sequence")
+    panel.get_by_text("Second target blocked; human review required", exact=False).wait_for()
+    assert panel.locator("li").count() == 3
+    assert "completed" in panel.locator("li").nth(0).inner_text()
+    assert not any(name == "resume_task_sequence" for name, _ in calls)
+    panel.locator("li").nth(1).get_by_text("Arguments / result", exact=True).click()
+    assert "extinguisher-2" in panel.locator("li").nth(1).inner_text()
+    assert "Path blocked" in panel.locator("li").nth(1).inner_text()
+    page.get_by_role("button", name="Retry failed step", exact=True).click()
+    page.locator("#operation-dialog").wait_for()
+    assert not any(name == "resume_task_sequence" for name, _ in calls)
+    page.locator("#operation-cancel").click()
+    assert not any(name == "resume_task_sequence" for name, _ in calls)
+    page.get_by_role("button", name="Retry failed step", exact=True).click()
+    with page.expect_response("**/api/task-sequence"):
+        page.locator("#operation-form button[type=submit]").click()
+    assert (
+        "resume_task_sequence",
+        {"sequence_id": "ordered-extinguishers", "retry_failed": True},
+    ) in calls
+    assert "completed" in panel.locator("li").nth(0).inner_text()
+    with page.expect_response("**/api/task-sequence"):
+        page.get_by_role("button", name="Cancel sequence", exact=True).click()
+    panel.get_by_text("cancelled", exact=False).wait_for()
 
 
 def test_control_deck_sections_collapse_and_expand_to_top(page):
@@ -465,10 +628,12 @@ def test_demo_exploration_form_submits_typed_options_and_shows_stop_reason(page,
     assert page.locator('#operation-fields input[name="min_goals"]').input_value() == "10"
     assert page.locator('#operation-fields input[name="gain_percent"]').input_value() == "1"
     assert page.locator('#operation-fields input[name="check_interval"]').input_value() == "3"
+    assert page.locator('#operation-fields input[name="max_leg_distance_m"]').input_value() == "1.5"
     page.locator('#operation-fields select[name="strategy"]').select_option("efficient")
     page.locator('#operation-fields input[name="min_goals"]').fill("12")
     page.locator('#operation-fields input[name="gain_percent"]').fill("0.5")
     page.locator('#operation-fields input[name="check_interval"]').fill("2")
+    page.locator('#operation-fields input[name="max_leg_distance_m"]').fill("1.2")
     with page.expect_response("**/api/action") as response:
         page.locator("#operation-form button[type=submit]").click()
     assert response.value.json()["ok"] is True
@@ -481,6 +646,7 @@ def test_demo_exploration_form_submits_typed_options_and_shows_stop_reason(page,
                 "gain_percent": 0.5,
                 "no_gain_attempts": 2,
                 "check_interval": 2,
+                "max_leg_distance_m": 1.2,
             },
         )
     ]

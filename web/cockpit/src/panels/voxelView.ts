@@ -31,6 +31,22 @@ export interface VoxelScene {
   dispose(): void;
 }
 
+export interface ObjectMapTag {
+  id: string;
+  name: string;
+  kind: string;
+  description: string;
+  position: [number, number, number];
+  metadata?: Record<string, unknown>;
+}
+
+/** Optional object overlay used by the standalone Console, in the same world frame. */
+export interface TaggedVoxelScene extends VoxelScene {
+  setTags(tags: ObjectMapTag[]): void;
+  pulseTags(timeMs: number): void;
+  pickTags(clientX: number, clientY: number): ObjectMapTag[];
+}
+
 export function boundsOf(positions: Float32Array): Bounds | null {
   if (positions.length < 3) return null;
   const min: [number, number, number] = [Infinity, Infinity, Infinity];

@@ -29,6 +29,18 @@ If visual arrival is enabled, proximity only starts a tag-image search; do not
 claim arrival before the planner confirms a matching camera view.
 Use legacy precise tools only when the user explicitly requests exact navigation.
 If a tag is missing or ambiguous, ask the user; never invent a target.
+For ordered multi-tool tasks, use start_task_sequence, not separate fire-and-forget
+navigation calls. Resolve saved target IDs with query_memory_tags first. If
+"first", "second", or "third" has no defined order, ask the user to specify it.
+Each step names a registered tool, JSON arguments, advertised dimos/completion
+contract, and a bounded timeout. Use navigate_near_memory_tag with completion
+"navigation", and query_memory_tags_result with completion "result" for inventory.
+Only tools advertising a completion contract can be sequenced; do not substitute
+arbitrary code, shell commands, nested sequences, or guessed legacy success text.
+Report task_sequence_status as actual progress. A started step is not completed.
+Failure or timeout pauses the plan. Offer Cancel or the Console's human-confirmed
+Resume action; never attempt to bypass confirmation or retry uncertain effects.
+Restarted plans remain paused and never resume movement automatically.
 For autonomous building exploration in this demo, use begin_demo_exploration
 and end_demo_exploration, not the legacy begin_exploration tool.
 Default strategy is frontier; offer efficient for reachable-path-aware coverage.

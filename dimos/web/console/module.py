@@ -58,15 +58,18 @@ import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 import rerun.blueprint as rrb
 from starlette.responses import StreamingResponse
+from starlette.staticfiles import StaticFiles
 import uvicorn
 
 from dimos.core.core import rpc
 from dimos.core.global_config import global_config
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.transport_factory import make_transport
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.logging_config import setup_logger
 from dimos.visualization.rerun.constants import RERUN_GRPC_PORT, RERUN_WEB_VIEWER_PORT
 from dimos.web.console.frontend import INDEX_HTML
@@ -190,6 +193,13 @@ OPERATIONS: dict[str, Operation] = {
                 "gain_percent": {"type": "number", "default": 1, "minimum": 0, "maximum": 100},
                 "no_gain_attempts": {"type": "integer", "default": 2, "minimum": 1, "maximum": 100},
                 "check_interval": {"type": "number", "default": 3, "minimum": 0.1, "maximum": 60},
+                "max_leg_distance_m": {
+                    "type": "number",
+                    "default": 1.5,
+                    "minimum": 0.3,
+                    "maximum": 10,
+                    "description": "Maximum known-free path length per exploration leg (meters)",
+                },
             },
             "required": [
                 "strategy",
@@ -535,6 +545,19 @@ class RobotConsoleModule(Module):
         self._puppy_transport: PubSubTransport[Any] | None = None
         self._navigation_transport: PubSubTransport[Any] | None = None
         self._exploration_transport: PubSubTransport[Any] | None = None
+        self._tagging_transport: PubSubTransport[Any] | None = None
+        self._map_transport: PubSubTransport[Any] | None = None
+        self._pose_transport: PubSubTransport[Any] | None = None
+        self._map_points: list[list[float]] = []
+        self._map_version = 0
+        self._map_received = 0.0
+        self._map_stack_pid: int | None = None
+        self._map_pose: dict[str, float] | None = None
+        self._map_pose_received = 0.0
+        self._map_lock = threading.Lock()
+        self._tag_announcement_at = float("-inf")
+        self._tag_phrase_index = 0
+        self._announced_tags: set[str] = set()
         self._arrival_sequence = 0
         self._camera_jpeg: bytes | None = None
         self._camera_timestamp = 0.0
@@ -620,6 +643,15 @@ class RobotConsoleModule(Module):
             self._exploration_transport = make_transport("/exploration_state", String)
             self._exploration_transport.start()
             self._exploration_transport.subscribe(self._on_exploration_state)
+            self._tagging_transport = make_transport("/tagging_events", String)
+            self._tagging_transport.start()
+            self._tagging_transport.subscribe(self._on_tagging_event)
+            self._map_transport = make_transport("/global_map", PointCloud2)
+            self._map_transport.start()
+            self._map_transport.subscribe(self._on_map)
+            self._pose_transport = make_transport("/odom", PoseStamped)
+            self._pose_transport.start()
+            self._pose_transport.subscribe(self._on_map_pose)
         except Exception:
             logger.exception("console: failed to set up agent streams")
             self._teardown_agent_streams()
@@ -637,6 +669,9 @@ class RobotConsoleModule(Module):
             self._puppy_transport,
             self._navigation_transport,
             self._exploration_transport,
+            self._tagging_transport,
+            self._map_transport,
+            self._pose_transport,
         ):
             if transport is None:
                 continue
@@ -644,6 +679,99 @@ class RobotConsoleModule(Module):
                 transport.stop()
             except Exception:
                 logger.exception("console: transport stop failed")
+
+    def _on_map(self, cloud: PointCloud2) -> None:
+        if cloud.frame_id != "world":
+            logger.warning("Object map rejected non-world cloud", frame=cloud.frame_id)
+            return
+        points = cloud.points_f32()
+        stride = max(1, math.ceil(len(points) / 30_000))
+        finite = [
+            [float(x), float(y), float(z)]
+            for x, y, z in points[::stride, :3]
+            if math.isfinite(x) and math.isfinite(y) and math.isfinite(z)
+        ]
+        with self._map_lock:
+            if self.runtime is not None:
+                pid = self.runtime.status()["pid"]
+                self._sync_map_stack_locked(pid)
+                if pid is None:
+                    return
+            self._map_points = finite
+            self._map_received = time.monotonic()
+            self._map_version += 1
+
+    def _on_map_pose(self, pose: PoseStamped) -> None:
+        if pose.frame_id != "world":
+            return
+        with self._map_lock:
+            if self.runtime is not None:
+                pid = self.runtime.status()["pid"]
+                self._sync_map_stack_locked(pid)
+                if pid is None:
+                    return
+            self._map_pose_received = time.monotonic()
+            self._map_pose = {
+                "x": float(pose.position.x),
+                "y": float(pose.position.y),
+                "z": float(pose.position.z),
+                "yaw": float(pose.orientation.to_euler().z),
+            }
+
+    def _sync_map_stack_locked(self, pid: int | None) -> None:
+        if self._map_stack_pid != pid:
+            self._map_points = []
+            self._map_pose = None
+            self._map_pose_received = 0.0
+            self._map_received = 0.0
+            self._map_version += 1
+        self._map_stack_pid = pid
+
+    def _on_tagging_event(self, message: String) -> None:
+        try:
+            event = json.loads(message.data)
+        except (ValueError, TypeError):
+            logger.exception("Invalid tagging event")
+            return
+        if not isinstance(event, dict):
+            logger.warning("Invalid tagging event payload")
+            return
+        self._emit({"type": "tagging", "event": event})
+        if self._console_loop is not None and self._speaker_enabled:
+            self._console_loop.call_soon_threadsafe(
+                self._announce_tagging_event, event, self._speaker_generation
+            )
+
+    def _announce_tagging_event(self, event: dict[str, Any], generation: int | None = None) -> None:
+        if not self._speaker_enabled or (
+            generation is not None and generation != self._speaker_generation
+        ):
+            return
+        if event.get("type") == "automatic_tagging" and event.get("enabled") is True:
+            self._queue_reply(
+                "Woof! Automatic tagging is on. Let's sniff out some treasures!",
+                f"tagging-enabled-{uuid.uuid4().hex}",
+            )
+        elif event.get("type") == "object_created":
+            tag_id = str(event.get("id") or "")
+            if not tag_id or tag_id in self._announced_tags:
+                return
+            if len(self._announced_tags) >= 4096:
+                self._announced_tags.clear()
+            self._announced_tags.add(tag_id)
+            now = time.monotonic()
+            if now - self._tag_announcement_at < 10 or not self._speech_queue.empty():
+                logger.info("Tag speech coalesced during discovery burst", location_id=tag_id)
+                return
+            name = str(event.get("name") or "treasure")[:80]
+            phrases = (
+                f"Woof! I tagged a {name}. That's my territory now!",
+                f"Bow wow! A {name}! Another treasure marked for my pack.",
+                f"Woof woof! Found a {name}. Puppy has this spot covered!",
+            )
+            self._queue_reply(phrases[self._tag_phrase_index % len(phrases)], f"tag-{tag_id}")
+            self._tag_phrase_index += 1
+            self._tag_announcement_at = now
 
     def _on_camera(self, image: Image) -> None:
         now = time.monotonic()
@@ -828,6 +956,86 @@ class RobotConsoleModule(Module):
     # -- app / endpoints --------------------------------------------------
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="SEDAN GROUP Robot Console")
+        app.mount(
+            "/assets",
+            StaticFiles(directory=Path(__file__).parent / "assets"),
+            name="console-assets",
+        )
+
+        @app.get("/api/object-map")
+        async def object_map() -> dict[str, Any]:
+            if self.runtime is not None and not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            result = await self._call_mcp(OPERATIONS["query_memory_tags"], {})
+            if not result.get("ok"):
+                return result
+            payload = result.get("result")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except ValueError:
+                    logger.exception("Object map received invalid memory response")
+                    return {"ok": False, "error": "Invalid object memory response"}
+            if not isinstance(payload, dict) or not isinstance(payload.get("tags"), list):
+                return {"ok": False, "error": "Object memory did not return a tag inventory"}
+            tags = [
+                tag
+                for tag in payload["tags"]
+                if isinstance(tag, dict) and tag.get("kind") == "object"
+            ]
+            with self._map_lock:
+                now = time.monotonic()
+                return {
+                    "ok": True,
+                    "frame": "world",
+                    "points": self._map_points,
+                    "pose": self._map_pose,
+                    "map_version": self._map_version,
+                    "scene_id": (
+                        f"{self.runtime.status()['pid']}:{self.runtime.settings.scene_map_dir}"
+                        if self.runtime is not None
+                        else self._csrf_token
+                    ),
+                    "stale": self._map_received == 0
+                    or (now - self._map_received > 10 and now - self._map_pose_received > 5),
+                    "tags": tags,
+                }
+
+        @app.api_route("/api/task-sequence", methods=["GET", "POST"])
+        async def task_sequence(request: Request) -> dict[str, Any]:
+            if not self._profile().has_agent:
+                return {"ok": False, "error": "This stack has no task executor"}
+            if self.runtime is not None and not self.runtime.ready:
+                return {"ok": False, "error": "Robot stack is not ready"}
+            method, args = "get_task_sequence_status", {}
+            if request.method == "POST":
+                try:
+                    payload = await request.json()
+                except json.JSONDecodeError:
+                    return {"ok": False, "error": "Task action must be valid JSON"}
+                if not isinstance(payload, dict):
+                    return {"ok": False, "error": "Task action must be an object"}
+                action = payload.get("action")
+                if action in ("resume", "retry"):
+                    sequence_id = payload.get("sequence_id")
+                    if payload.get("confirmed") is not True:
+                        return {"ok": False, "error": "Human confirmation is required"}
+                    if not isinstance(sequence_id, str) or not sequence_id.strip():
+                        return {"ok": False, "error": "sequence_id is required"}
+                    method, args = (
+                        "resume_task_sequence",
+                        {
+                            "sequence_id": sequence_id,
+                            "retry_failed": action == "retry",
+                        },
+                    )
+                elif action == "pause":
+                    method, args = "preempt_task_sequence", {"reason": "Paused by Console"}
+                elif action == "cancel":
+                    method = "cancel_task_sequence"
+                else:
+                    return {"ok": False, "error": "Unknown task action"}
+            return await self._call_rpc(Operation(method, "", "rpc", "", module="McpServer"), args)
 
         @app.get("/api/camera.jpg")
         def camera() -> Response:
@@ -901,6 +1109,20 @@ class RobotConsoleModule(Module):
             started = False
             try:
                 await socket.accept()
+                preempted = await self._preempt_task_sequence("Keyboard takeover")
+                if not preempted.get("ok") or (
+                    isinstance(preempted.get("result"), dict)
+                    and preempted["result"].get("quiescent") is False
+                ):
+                    await socket.send_json(
+                        {
+                            "error": preempted.get(
+                                "error", "Task operation has not stopped; keyboard takeover blocked"
+                            )
+                        }
+                    )
+                    await socket.close(code=1011)
+                    return
                 prepared = await self._call_rpc(
                     Operation("switch_joystick", "", "rpc", "", module="GO2Connection"),
                     {"enable": True},
@@ -1233,6 +1455,9 @@ class RobotConsoleModule(Module):
         if self.runtime is not None:
 
             async def prepare_shutdown(save: bool) -> dict[str, Any]:
+                preempted = await self._preempt_task_sequence("Robot stack stopping")
+                if not preempted.get("ok"):
+                    logger.error("Could not pause tasks before stack shutdown", result=preempted)
                 return await self._call_rpc(
                     Operation("prepare_map_shutdown", "", "rpc", ""), {"save": save}
                 )
@@ -1321,6 +1546,23 @@ class RobotConsoleModule(Module):
         if result.get("ok") is False:
             logger.warning("console: could not stop following", error=result.get("error"))
 
+    async def _preempt_task_sequence(self, reason: str) -> dict[str, Any]:
+        if not self._profile().has_agent:
+            return {"ok": True, "result": {"status": "idle", "quiescent": True}}
+        response = await self._call_rpc(
+            Operation("preempt_task_sequence", "", "rpc", "", module="McpServer"),
+            {"reason": reason},
+        )
+        if response.get("ok"):
+            result = response.get("result")
+            if (
+                not isinstance(result, dict)
+                or result.get("status") not in {"idle", "paused", "completed", "cancelled"}
+                or (result["status"] != "idle" and not isinstance(result.get("quiescent"), bool))
+            ):
+                return {"ok": False, "error": "Task executor returned an invalid pause status"}
+        return response
+
     async def _call_rpc(self, op: Operation, args: dict[str, Any]) -> dict[str, Any]:
         module = self.config.map_module if op.module == DEFAULT_MAP_MODULE else op.module
         address = f"{module}/{op.method}"
@@ -1385,6 +1627,9 @@ class RobotConsoleModule(Module):
         async with self._status_lock:
             if self.runtime is not None:
                 self._status.update(stack=self.runtime.status())
+                pid = self._status["stack"]["pid"]
+                with self._map_lock:
+                    self._sync_map_stack_locked(pid)
                 if not self.runtime.ready:
                     self._status.update(
                         agent_idle=None,

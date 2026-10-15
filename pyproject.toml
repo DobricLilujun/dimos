@@ -99,6 +99,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "jsonschema>=4.23",
     # Transport Protocols
     "dimos-lcm>=0.1.4",
     "eclipse-zenoh>=1.10.1,<2.0",
@@ -481,6 +482,7 @@ lint = [
     "types-PyYAML>=6.0.12.20250915,<7",
     "types-reportlab>=4.5.0",
     "types-requests>=2.32.4.20260107,<3",
+    "types-jsonschema>=4.23",
 
     {include-group = "project-deps"},
 ]

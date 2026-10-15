@@ -118,6 +118,20 @@ def test_fetch_tools_from_mcp_server(mcp_client: McpClient) -> None:
     assert tools[1].name == "greet"
 
 
+def test_completion_contract_is_visible_to_agent_without_inventing_legacy_contract(mcp_client):
+    tool = {
+        "name": "inspect",
+        "description": "Read stored tags",
+        "inputSchema": {"type": "object", "properties": {}},
+        "_meta": {"dimos/completion": "result"},
+    }
+    supported = mcp_client._mcp_tool_to_langchain(tool)
+    assert "completion contract: result" in supported.description
+    assert "started is not completed" in supported.description
+    legacy = mcp_client._mcp_tool_to_langchain({**tool, "_meta": {}})
+    assert legacy.description == "Read stored tags"
+
+
 def test_tool_invocation_via_mcp(mcp_client: McpClient) -> None:
     tools = mcp_client._fetch_tools()
     add_tool = next(t for t in tools if t.name == "add")

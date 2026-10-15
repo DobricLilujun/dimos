@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import queue
 import time
@@ -148,7 +149,7 @@ def test_fuzzy_name_within_cluster_is_a_duplicate(memory, mocker):
     mocker.patch.object(memory, "get_robot_locations", return_value=[existing])
     add = mocker.patch.object(memory, "add_named_location", return_value=True)
     assert memory._tag_object_location(
-        "red fire extinguisher", [1.5, 0, 0], [0, 0, 0], "Seen near door"
+        "red fire extinguisher", [0.9, 0, 0], [0, 0, 0], "Seen near door"
     )
     add.assert_not_called()
 
@@ -161,22 +162,113 @@ def test_distant_similar_name_is_not_a_duplicate(memory, mocker):
         "red fire extinguisher", [5.0, 0, 0], [0, 0, 0], "A second one"
     )
     add.assert_called_once_with(
-        "red fire extinguisher", [5.0, 0, 0], [0, 0, 0], "A second one", kind="object", reference_image=None
+        "red fire extinguisher",
+        [5.0, 0, 0],
+        [0, 0, 0],
+        "A second one",
+        kind="object",
+        reference_image=None,
     )
 
 
-def test_ground_level_tag_wins_over_elevated_duplicate(memory, mocker):
-    # A new ground-level tag near an elevated same-named tag is a different
-    # instance (the ground one wins), so it is stored, not dropped.
+def test_ground_level_reobservation_keeps_existing_instance(memory, mocker):
     existing = RobotLocation("fire extinguisher", (0, 0, 0.7), (0, 0, 0))
     mocker.patch.object(memory, "get_robot_locations", return_value=[existing])
     add = mocker.patch.object(memory, "add_named_location", return_value=True)
     assert memory._tag_object_location(
         "fire extinguisher", [0.5, 0, 0.5], [0, 0, 0], "On the floor"
     )
-    add.assert_called_once_with(
-        "fire extinguisher", [0.5, 0, 0.5], [0, 0, 0], "On the floor", kind="object", reference_image=None
+    add.assert_not_called()
+
+
+def test_unicode_object_names_and_places_do_not_create_false_duplicates(memory, mocker):
+    existing = RobotLocation("灭火器", (0, 0, 0), (0, 0, 0), metadata={"kind": "location"})
+    mocker.patch.object(memory, "get_robot_locations", return_value=[existing])
+    assert memory._name_similarity("灭火器", " 灭火器 ") == 1
+    assert memory._name_similarity("灭火器", "椅子") == 0
+    assert memory._is_duplicate_tag("灭火器", [0, 0, 0]) is None
+
+
+def test_same_category_objects_beyond_instance_radius_remain_separate(memory, mocker):
+    existing = RobotLocation("fire extinguisher", (0, 0, 0), (0, 0, 0), metadata={"kind": "object"})
+    mocker.patch.object(memory, "get_robot_locations", return_value=[existing])
+    assert memory._is_duplicate_tag("red fire extinguisher", [1.5, 0, 0]) is None
+    assert memory._is_duplicate_tag("fire extinguisher", [0, 0, 1.5]) is None
+
+
+def test_reobservation_selects_nearest_same_category_instance_not_first(memory, mocker):
+    first = RobotLocation("bottle", (0, 0, 0), (0, 0, 0), metadata={"kind": "object"})
+    second = RobotLocation("bottle", (0.8, 0, 0), (0, 0, 0), metadata={"kind": "object"})
+    mocker.patch.object(memory, "get_robot_locations", return_value=[first, second])
+    assert memory._is_duplicate_tag("bottle", [0.75, 0, 0]) is second
+
+
+def test_auto_ground_preference_uses_local_floor_and_keeps_wall_safety_objects(memory):
+    floor = np.array([[x / 10, 0, 4] for x in range(10)])
+    context = {"world_points": floor}
+    assert memory._automatic_object_eligible("bottle", [0, 0, 4.3], context)
+    assert not memory._automatic_object_eligible("bottle", [0, 0, 5.2], context)
+    assert memory._automatic_object_eligible("fire extinguisher", [0, 0, 5.2], context)
+
+
+def test_new_object_emits_only_after_successful_persistence(memory, mocker):
+    event = mocker.patch.object(memory, "_publish_tag_event")
+    persist = mocker.patch.object(memory, "tag_location", return_value=False)
+    location = RobotLocation("bottle", (0, 0, 0), (0, 0, 0), metadata={"kind": "object"})
+    assert not memory.add_robot_location(location)
+    event.assert_not_called()
+    persist.return_value = True
+    assert memory.add_robot_location(location)
+    event.assert_called_once_with(
+        {
+            "type": "object_created",
+            "id": location.location_id,
+            "name": "bottle",
+            "position": [0, 0, 0],
+        }
     )
+
+
+def test_concurrent_reobservations_create_one_instance_and_one_event(memory, mocker):
+    stored = []
+    mocker.patch.object(memory, "get_robot_locations", side_effect=lambda: list(stored))
+    mocker.patch.object(memory, "tag_location", side_effect=lambda tag: stored.append(tag) or True)
+    event = mocker.patch.object(memory, "_publish_tag_event")
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(
+            executor.map(
+                lambda _: memory._tag_object_location("bottle", [1, 2, 0], [0, 0, 0], "Bottle"),
+                range(8),
+            )
+        )
+    assert results == [True] * 8
+    assert len(stored) == 1
+    assert event.call_count == 1
+
+
+def test_distinct_detections_in_one_frame_cannot_match_the_same_instance(memory, mocker):
+    existing = RobotLocation("bottle", (0, 0, 0), (0, 0, 0), metadata={"kind": "object"})
+    mocker.patch.object(memory, "get_robot_locations", return_value=[existing])
+    observation_ids = set()
+    assert memory._tag_object_location(
+        "bottle", [0.1, 0, 0], [0, 0, 0], "First", observation_ids=observation_ids
+    )
+    assert observation_ids == {existing.location_id}
+    assert memory._is_duplicate_tag("bottle", [0.5, 0, 0], exclude_ids=observation_ids) is None
+
+
+@pytest.mark.parametrize(
+    "name,position",
+    [
+        ("", [0, 0, 0]),
+        ("bottle", [0, 0]),
+        ("bottle", [float("nan"), 0, 0]),
+    ],
+)
+def test_invalid_object_tags_do_not_reach_storage(memory, mocker, name, position):
+    write = mocker.patch.object(memory, "add_named_location")
+    assert not memory._tag_object_location(name, position, [0, 0, 0], "Invalid")
+    write.assert_not_called()
 
 
 def test_elevated_tag_is_dropped_as_ground_duplicate(memory, mocker):
@@ -224,9 +316,26 @@ def test_automatic_tagging_pause_discards_queued_and_inflight_tags(memory, mocke
     apply.assert_called_once_with({"generation": 2, "place": "new"})
 
 
-def test_automatic_tagging_requires_configured_vlm(memory):
+def test_automatic_tagging_requires_configured_vlm(memory, mocker):
+    event = mocker.patch.object(memory, "_publish_tag_event")
     with pytest.raises(RuntimeError, match="Configure a VLM"):
         memory.set_automatic_tagging(True)
+    event.assert_not_called()
+
+
+def test_automatic_tagging_announces_only_actual_state_transitions(memory, mocker):
+    mocker.patch.object(memory, "_vlm", mocker.Mock())
+    memory.config.vlm_enable_object_tagging = True
+    event = mocker.patch.object(memory, "_publish_tag_event")
+    memory.set_automatic_tagging(True)
+    event.assert_not_called()
+    memory.set_automatic_tagging(False)
+    memory.set_automatic_tagging(False)
+    memory.set_automatic_tagging(True)
+    assert event.call_args_list == [
+        mocker.call({"type": "automatic_tagging", "enabled": False}),
+        mocker.call({"type": "automatic_tagging", "enabled": True}),
+    ]
 
 
 def test_pgo_rewrites_only_this_runs_tag_and_image_coordinates_from_raw_baseline(

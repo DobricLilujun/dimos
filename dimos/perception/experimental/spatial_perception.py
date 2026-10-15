@@ -30,6 +30,7 @@ import time
 from typing import Any
 import uuid
 
+from dimos_lcm.std_msgs import String
 import numpy as np
 from pydantic import AliasChoices, Field
 from reactivex import Observable, interval, operators as ops
@@ -40,7 +41,7 @@ from dimos.constants import DIMOS_PROJECT_ROOT
 from dimos.core.core import rpc
 from dimos.core.global_config import global_config
 from dimos.core.module import Module, ModuleConfig
-from dimos.core.stream import In
+from dimos.core.stream import In, Out
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -126,18 +127,18 @@ class SpatialConfig(ModuleConfig):
     object_segmenter: str = "auto"  # "auto" | "vlm" | "yolo"
 
     # --- Object-tag dedup + ground emphasis ---------------------------------
-    # A re-seen object is dropped instead of creating a duplicate tag when its
-    # name is similar to an existing tag *and* its position falls inside the
-    # cluster radius, so the same fire extinguisher is not tagged twice a few
-    # metres or a few pixels apart. Exact-name match uses a tighter radius so
-    # genuinely different objects are still kept.
-    tag_exact_name_distance_m: float = 1.0
-    tag_dedup_distance_m: float = 1.6  # cluster radius for fuzzy name match
+    # Fuzzy labels must not merge more distant instances than exact labels.
+    tag_exact_name_distance_m: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    tag_dedup_distance_m: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     tag_dedup_name_similarity: float = 0.82  # 0.0-1.0 string similarity
-    # Objects whose world z is above this (metres above the floor) are treated
-    # as elevated; a ground-level tag near an elevated one wins dedup so the
-    # robot prefers tagging things on the floor.
-    tag_ground_level_z_m: float = 0.6
+    # Height above observed local support, not an assumed world z=0 floor.
+    tag_ground_level_z_m: float = Field(default=0.6, gt=0, allow_inf_nan=False)
+    tag_important_objects: list[str] = [
+        "fire extinguisher",
+        "first aid",
+        "emergency",
+        "defibrillator",
+    ]
 
 
 def _vlm_worker(
@@ -229,6 +230,7 @@ class SpatialMemory(Module):
 
     config: SpatialConfig
     dedicated_worker = True
+    tagging_events: Out[String]
 
     # LCM inputs
     color_image: In[Image]
@@ -559,6 +561,7 @@ class SpatialMemory(Module):
                         if task is None:
                             self._vlm_task_queue.put(None)
                             break
+                self._publish_tag_event({"type": "automatic_tagging", "enabled": enabled})
             logger.info("Automatic tagging changed", enabled=enabled)
             return self.automatic_tagging_status()
 
@@ -630,6 +633,7 @@ class SpatialMemory(Module):
         # Add 3D object tags from VLM-detected items.
         object_positions: dict[str, list[float]] = {}
         object_estimates: dict[str, dict[str, Any]] = {}
+        observation_ids: set[str] = set()
         if self.config.vlm_enable_object_tagging:
             for item in result.get("items") or []:
                 item_name = item.get("name")
@@ -644,12 +648,16 @@ class SpatialMemory(Module):
                 if estimate is None:
                     continue
                 world_pos = estimate["position"]
+                if not self._automatic_object_eligible(item_name, world_pos, context):
+                    logger.info("Skipping elevated automatic object tag", name=item_name)
+                    continue
                 self._tag_object_location(
                     item_name,
                     world_pos,
                     rotation,
                     f"Object '{item_name}' seen in {place or 'scene'}: {caption}",
                     reference_image=self._tag_crop(frame_bgr, bbox),
+                    observation_ids=observation_ids,
                     **(
                         {"pgo_metadata": estimate["pgo_metadata"]}
                         if "pgo_metadata" in estimate
@@ -1536,6 +1544,15 @@ class SpatialMemory(Module):
             if not self.tag_location(location):
                 return False
             self.robot_locations.append(location)
+            if location.metadata.get("kind") == "object":
+                self._publish_tag_event(
+                    {
+                        "type": "object_created",
+                        "id": location.location_id,
+                        "name": location.name,
+                        "position": list(location.position),
+                    }
+                )
             logger.info(f"Added robot location '{location.name}' at position {location.position}")
             return True
 
@@ -1543,14 +1560,11 @@ class SpatialMemory(Module):
             logger.error(f"Error adding robot location: {e}")
             return False
 
-    def _is_ground_level(self, position: Sequence[float]) -> bool:
-        """True if the object sits roughly on the floor (low world z)."""
-        return float(position[2]) <= self.config.tag_ground_level_z_m
-
     def _name_similarity(self, a: str, b: str) -> float:
         """String similarity 0.0-1.0, tolerant of case/whitespace/punctuation."""
+
         def norm(s: str) -> str:
-            return re.sub(r"[^a-z0-9]+", " ", s.casefold()).strip()
+            return re.sub(r"[\W_]+", " ", s.casefold()).strip()
 
         na, nb = norm(a), norm(b)
         if not na or not nb:
@@ -1565,23 +1579,28 @@ class SpatialMemory(Module):
         position: Sequence[float],
         *,
         kind: str = "object",
+        exclude_ids: set[str] | None = None,
     ) -> RobotLocation | None:
         """Return the existing location a new tag duplicates, or None.
 
         A new tag is a duplicate when it matches a stored object tag by:
 
         * exact name (case-folded) within ``tag_exact_name_distance_m``, or
-        * name similarity >= ``tag_dedup_name_similarity`` within the wider
-          ``tag_dedup_distance_m`` cluster, so the same object a few metres or
-          a few pixels away is not tagged again.
+        * name similarity >= ``tag_dedup_name_similarity`` within the configured
+          cluster, capped at the exact-name radius.
 
-        When the new tag is ground-level and the candidate is elevated (same
-        name/cluster), the elevated candidate is skipped so a floor object
-        wins the dedup and the robot prefers tagging things on the ground.
+        Horizontal distance tolerates modest height-estimation noise, with a
+        separate height bound to preserve vertically separated instances.
         """
         pos = np.asarray(position, dtype=float)
+        nearest: RobotLocation | None = None
+        nearest_distance = float("inf")
         for existing in self.get_robot_locations():
-            same_name = existing.name.casefold() == name.casefold()
+            if exclude_ids and existing.location_id in exclude_ids:
+                continue
+            if existing.metadata.get("kind", "object") != kind:
+                continue
+            same_name = self._name_similarity(existing.name, name) == 1.0
             if not same_name:
                 if self._name_similarity(existing.name, name) < (
                     self.config.tag_dedup_name_similarity
@@ -1592,20 +1611,40 @@ class SpatialMemory(Module):
             radius = (
                 self.config.tag_exact_name_distance_m
                 if same_name
-                else self.config.tag_dedup_distance_m
+                else min(self.config.tag_dedup_distance_m, self.config.tag_exact_name_distance_m)
             )
-            if np.linalg.norm(np.asarray(existing.position) - pos) > radius:
+            distance = float(np.linalg.norm(np.asarray(existing.position)[:2] - pos[:2]))
+            if distance > radius:
                 continue
-            # A new ground-level tag near an elevated same-ish tag is a different
-            # instance (the ground one wins), so skip this candidate; a new
-            # elevated tag near a ground one is dropped as its duplicate.
-            if (
-                self._is_ground_level(position)
-                and not self._is_ground_level(existing.position)
-            ):
+            if abs(existing.position[2] - pos[2]) > self.config.tag_ground_level_z_m:
                 continue
-            return existing
-        return None
+            if distance < nearest_distance:
+                nearest, nearest_distance = existing, distance
+        return nearest
+
+    def _automatic_object_eligible(
+        self, name: str, position: Sequence[float], context: dict[str, Any]
+    ) -> bool:
+        if any(label in name.casefold() for label in self.config.tag_important_objects):
+            return True
+        points = np.asarray(context.get("map_points", context["world_points"]), dtype=float)
+        if points.size:
+            nearby = points[
+                np.isfinite(points).all(axis=1)
+                & (np.linalg.norm(points[:, :2] - np.asarray(position)[:2], axis=1) <= 1.0)
+            ]
+            if len(nearby) >= 8:
+                floor = float(np.percentile(nearby[:, 2], 10))
+                return float(position[2]) - floor <= self.config.tag_ground_level_z_m
+        logger.info("Ground support unknown; using VLM ground-priority candidate", name=name)
+        return True
+
+    def _publish_tag_event(self, event: dict[str, Any]) -> None:
+        if self.tagging_events.transport is not None:
+            try:
+                self.tagging_events.publish(String(json.dumps(event)))
+            except Exception:
+                logger.exception("Tag saved but event publication failed", event_type=event["type"])
 
     def _tag_object_location(
         self,
@@ -1616,9 +1655,42 @@ class SpatialMemory(Module):
         *,
         pgo_metadata: dict[str, Any] | None = None,
         reference_image: np.ndarray | None = None,
+        observation_ids: set[str] | None = None,
     ) -> bool:
-        duplicate = self._is_duplicate_tag(name, position)
+        if not name.strip() or len(position) != 3 or not all(math.isfinite(v) for v in position):
+            logger.error("Object tag requires a name and finite XYZ position", name=name)
+            return False
+        with self._tagging_lock:
+            self._ensure_pgo_ready()
+            count = len(self.robot_locations)
+            result = self._commit_object_tag(
+                name,
+                position,
+                rotation,
+                description,
+                pgo_metadata=pgo_metadata,
+                reference_image=reference_image,
+                observation_ids=observation_ids,
+            )
+            if result and observation_ids is not None and len(self.robot_locations) > count:
+                observation_ids.add(self.robot_locations[-1].location_id)
+            return result
+
+    def _commit_object_tag(
+        self,
+        name: str,
+        position: list[float],
+        rotation: list[float] | None,
+        description: str,
+        *,
+        pgo_metadata: dict[str, Any] | None = None,
+        reference_image: np.ndarray | None = None,
+        observation_ids: set[str] | None = None,
+    ) -> bool:
+        duplicate = self._is_duplicate_tag(name, position, exclude_ids=observation_ids)
         if duplicate is not None:
+            if observation_ids is not None:
+                observation_ids.add(duplicate.location_id)
             if reference_image is not None and duplicate.frame_id is None:
                 with self._tagging_lock:
                     self._ensure_pgo_ready()

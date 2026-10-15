@@ -56,6 +56,7 @@ def explorer(mocker):
     mocker.patch.object(module, "stop_tool")
     module._on_costmap(grid(np.zeros((10, 10), dtype=np.int8)))
     module._on_odometry(PoseStamped(position=[1, 1, 0]))
+    module._lidar_received = time.monotonic()
     yield module
     module.stop_exploration()
     module._close_module()
@@ -99,6 +100,7 @@ def test_efficient_prefers_near_frontier_over_equal_size_distant_frontier(explor
 
 
 def test_reached_frontier_does_not_hide_remaining_cluster_coverage(explorer):
+    explorer.options = ExploreOptions(max_leg_distance_m=10)
     explorer._startup_displacement = 2.0
     values = np.zeros((12, 12), dtype=np.int8)
     values[:, 10:] = -1
@@ -191,12 +193,12 @@ def test_failed_goal_cooldown_excludes_region_then_expires(explorer, mocker):
     assert explorer.select_goal(pose, costmap) == first
 
 
-def test_low_gain_stops_after_ten_successful_goals_and_two_low_gain_arrivals(explorer):
+def test_low_gain_does_not_report_completion_before_enclosure(explorer):
     before = explorer.latest_costmap
     for i in range(10):
         assert explorer._record_arrival(Vector3(i, 0, 0), before) is False
-    assert explorer._record_arrival(Vector3(10, 0, 0), before) is True
-    assert explorer.exploration_status()["phase"] == "completed"
+    assert explorer._record_arrival(Vector3(10, 0, 0), before) is False
+    assert explorer.exploration_status()["phase"] == "selecting"
 
 
 def test_custom_goal_warmup_and_gain_percent_are_used_exactly(explorer):
@@ -206,7 +208,7 @@ def test_custom_goal_warmup_and_gain_percent_are_used_exactly(explorer):
     assert explorer._record_arrival(Vector3(0, 0, 0), before) is False
     assert explorer._record_arrival(Vector3(1, 0, 0), before) is False
     assert explorer.no_gain_counter == 0
-    assert explorer._record_arrival(Vector3(2, 0, 0), explorer.latest_costmap) is True
+    assert explorer._record_arrival(Vector3(2, 0, 0), explorer.latest_costmap) is False
 
 
 def test_navigation_failure_wakes_immediately_without_three_second_wait(explorer):
@@ -264,13 +266,14 @@ def test_stop_during_selection_cannot_launch_late_goal(explorer, mocker):
     explorer._navigation.set_goal.assert_not_called()
 
 
-def test_paused_map_fusion_keeps_static_map_usable_with_fresh_odometry(explorer, mocker):
+def test_paused_map_fusion_keeps_static_map_usable_with_fresh_odometry_and_lidar(explorer, mocker):
     start = time.monotonic()
     mocker.patch(
         "dimos.navigation.experimental.frontier_exploration.demo_explorer.time.monotonic",
         return_value=start + 30,
     )
     explorer._on_odometry(PoseStamped(position=[2, 1, 0]))
+    explorer._lidar_received = start + 30
     assert explorer._sensors_fresh() is True
     explorer.latest_costmap = None
     assert explorer._sensors_fresh() is False
@@ -632,6 +635,7 @@ def test_stall_recovery_turns_then_makes_progress(explorer, mocker):
     mocker.patch.object(demo_explorer.time, "monotonic", side_effect=mono)
     mocker.patch.object(explorer.stop_event, "wait", return_value=False)
     mocker.patch.object(explorer, "_moved_since", return_value=True)
+    mocker.patch.object(explorer, "_scan_blocker", return_value=None)
     explorer._map_session.navigation_ready.return_value = True
     assert explorer._recover_stuck() is True
     commands = [call.args[0] for call in explorer.nav_cmd_vel.publish.call_args_list]
@@ -649,7 +653,9 @@ def test_stall_recovery_backs_up_when_turn_fails_to_move(explorer, mocker):
 
     mocker.patch.object(demo_explorer.time, "monotonic", side_effect=mono)
     mocker.patch.object(explorer.stop_event, "wait", return_value=False)
-    explorer._moved_since = lambda _start: False  # type: ignore[assignment]
+    mocker.patch.object(explorer, "_moved_since", return_value=False)
+    mocker.patch.object(explorer, "_scan_blocker", return_value=None)
+    mocker.patch.object(explorer, "_sensors_fresh", return_value=True)
     explorer._map_session.navigation_ready.return_value = True
     explorer._recover_stuck()
     commands = [call.args[0] for call in explorer.nav_cmd_vel.publish.call_args_list]
@@ -672,3 +678,118 @@ def test_invalid_new_options_are_rejected(explorer):
         explorer.begin_demo_exploration(coverage_threshold=1.5)
     explorer._navigation.set_goal.assert_not_called()
     explorer.start_tool.assert_not_called()
+
+
+def test_navigation_leg_is_bounded_by_actual_free_path_distance(explorer):
+    values = np.zeros((12, 30), dtype=np.int8)
+    values[:, 28:] = -1
+    costmap, pose = grid(values, 0.1), Vector3(0.2, 0.5, 0)
+    goal = explorer.select_goal(pose, costmap)
+    assert goal is not None
+    cell = costmap.world_to_grid(goal)
+    length = reachable_distances(costmap, pose)[int(cell.y), int(cell.x)]
+    assert 0.25 <= length <= 1.5
+    assert goal.x < 2
+
+
+def test_short_leg_follows_detour_instead_of_cutting_through_wall(explorer):
+    values = np.zeros((20, 20), dtype=np.int8)
+    values[:17, 8] = 100
+    costmap, pose = grid(values, 0.1), Vector3(0.5, 0.5, 0)
+    distances = reachable_distances(costmap, pose)
+    goal = explorer._short_leg(pose, Vector3(1.1, 0.5, 0), costmap, distances)
+    assert goal is not None
+    cell = costmap.world_to_grid(goal)
+    assert distances[int(cell.y), int(cell.x)] <= 1.5
+    assert goal.y > 0.5
+    assert goal.x <= 0.8 or goal.y >= 1.7
+
+
+def test_opening_reappearance_resets_enclosure_evidence(explorer, mocker):
+    values = np.full((10, 10), 100, dtype=np.int8)
+    values[1:-1, 1:-1] = 0
+    costmap, pose = grid(values), PoseStamped(position=[2, 2, 0])
+    mocker.patch.object(explorer, "_sensors_fresh", return_value=True)
+    mocker.patch.object(demo_explorer.time, "monotonic", return_value=100)
+    explorer._costmap_received = 100
+    assert not explorer._is_exploration_complete(costmap, pose)
+    assert explorer._closure_updates == 1
+    costmap.grid[1, 1] = -1
+    explorer._on_costmap(costmap)
+    assert not explorer._is_exploration_complete(costmap, pose)
+    assert explorer._closure_since is None
+    assert explorer._closure_updates == 0
+
+
+def test_closed_room_finishes_after_distinct_fresh_maps_without_minimum_goals(explorer, mocker):
+    values = np.full((10, 10), 100, dtype=np.int8)
+    values[1:-1, 1:-1] = 0
+    costmap, pose = grid(values), PoseStamped(position=[2, 2, 0])
+    clock = mocker.patch.object(demo_explorer.time, "monotonic", return_value=100)
+    for when, complete in [(100, False), (103, False), (106, True)]:
+        clock.return_value = when
+        explorer._on_costmap(costmap)
+        explorer._on_odometry(pose)
+        explorer._lidar_received = when
+        assert explorer._is_exploration_complete(costmap, pose) is complete
+    assert explorer.explored_goals == []
+
+
+def test_repeated_completion_checks_of_one_map_do_not_prove_closure(explorer, mocker):
+    values = np.full((10, 10), 100, dtype=np.int8)
+    values[1:-1, 1:-1] = 0
+    costmap, pose = grid(values), PoseStamped(position=[2, 2, 0])
+    mocker.patch.object(explorer, "_sensors_fresh", return_value=True)
+    clock = mocker.patch.object(demo_explorer.time, "monotonic", return_value=100)
+    assert not explorer._is_exploration_complete(costmap, pose)
+    clock.return_value = 120
+    assert not explorer._is_exploration_complete(costmap, pose)
+    assert explorer._closure_updates == 1
+
+
+def test_fusion_paused_closed_room_can_complete_with_new_consistent_lidar(explorer, mocker):
+    values = np.full((10, 10), 100, dtype=np.int8)
+    values[1:-1, 1:-1] = 0
+    costmap, pose = grid(values), PoseStamped(position=[2, 2, 0])
+    clock = mocker.patch.object(demo_explorer.time, "monotonic", return_value=100)
+    explorer._on_costmap(costmap)
+    points = np.array([[x, y, 0] for x in range(1, 9) for y in range(1, 9)], dtype=np.float32)
+    for stamp, when, complete in [(1, 100, False), (2, 103, False), (3, 106, True)]:
+        clock.return_value = when
+        explorer._on_odometry(pose)
+        explorer._on_lidar(PointCloud2.from_numpy(points, frame_id="world", timestamp=stamp))
+        assert explorer._is_exploration_complete(costmap, pose) is complete
+    assert explorer._costmap_revision == 2
+
+
+def test_lidar_exposing_space_beyond_saved_enclosure_resets_completion(explorer, mocker):
+    values = np.full((10, 10), 100, dtype=np.int8)
+    values[1:-1, 1:-1] = 0
+    costmap, pose = grid(values), PoseStamped(position=[2, 2, 0])
+    mocker.patch.object(demo_explorer.time, "monotonic", return_value=100)
+    explorer._on_costmap(costmap)
+    explorer._on_odometry(pose)
+    explorer._closure_updates = 10
+    explorer._closure_since = 1
+    points = np.array([[2, 2, 0]] * 32 + [[11, 2, 0]], dtype=np.float32)
+    explorer._on_lidar(PointCloud2.from_numpy(points, frame_id="world", timestamp=1))
+    assert not explorer._is_exploration_complete(costmap, pose)
+    assert explorer._closure_updates == 0
+
+
+@pytest.mark.parametrize("case", ["opening", "map_edge", "nonfree_start", "stale"])
+def test_uncertain_or_open_map_never_reports_completed(explorer, mocker, case):
+    values = np.full((10, 10), 100, dtype=np.int8)
+    values[1:-1, 1:-1] = 0
+    if case == "opening":
+        values[1, 1] = -1
+    elif case == "map_edge":
+        values[0, 2] = 0
+    elif case == "nonfree_start":
+        values[2, 2] = 100
+    costmap, pose = grid(values), PoseStamped(position=[2, 2, 0])
+    explorer._closure_since = 1
+    explorer._closure_updates = 10
+    mocker.patch.object(explorer, "_sensors_fresh", return_value=case != "stale")
+    assert not explorer._is_exploration_complete(costmap, pose)
+    assert explorer._closure_updates == 0

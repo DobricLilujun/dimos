@@ -20,8 +20,9 @@ from typing import Any
 
 from reactivex.disposable import Disposable
 
-from dimos.agents.annotation import skill
+from dimos.agents.annotation import current_skill_context, skill
 from dimos.agents.capabilities import CAP_MOVEMENT
+from dimos.agents.skill_result import SkillResult
 from dimos.agents.skills.visual_servoing.query import get_object_bbox_from_image
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
@@ -34,7 +35,11 @@ from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3, make_vector3
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.navigation.base import NavigationState
-from dimos.navigation.go2.loop_closure.memory_spec import NearbyNavigationSpec, TaggedNavigationSpec
+from dimos.navigation.go2.loop_closure.memory_spec import (
+    NearbyNavigationSpec,
+    SequenceNavigationSpec,
+    TaggedNavigationSpec,
+)
 from dimos.navigation.go2.replanning_a_star.spec import NavigationInterfaceSpec
 from dimos.perception.experimental.object_tracking_spec import ObjectTrackingSpec
 from dimos.perception.experimental.spatial_memory_spec import SpatialMemorySpec
@@ -62,6 +67,7 @@ class NavigationSkillContainer(Module):
     _object_tracking: ObjectTrackingSpec | None = None
     _tagged_navigation: TaggedNavigationSpec | None = None
     _nearby_navigation: NearbyNavigationSpec | None = None
+    _sequence_navigation: SequenceNavigationSpec | None = None
 
     color_image: In[Image]
     odom: In[PoseStamped]
@@ -180,7 +186,7 @@ class NavigationSkillContainer(Module):
             ensure_ascii=False,
         )
 
-    @skill(uses=[CAP_MOVEMENT])
+    @skill(uses=[CAP_MOVEMENT], completion="navigation")
     def navigate_near_memory_tag(self, location_id: str) -> str:
         """Approach a saved tag using the configured horizontal arrival radius (default 1 m).
 
@@ -214,9 +220,46 @@ class NavigationSkillContainer(Module):
             ),
             frame_id="world",
         )
-        if not self._nearby_navigation.set_nearby_tagged_goal(location_id, goal):
+        context = current_skill_context() or {}
+        operation_id = context.get("sequence_operation_id")
+        if operation_id is not None:
+            if self._sequence_navigation is None:
+                raise RuntimeError(
+                    "Correlated navigation completion requires the persistent planner"
+                )
+            accepted = self._sequence_navigation.start_sequence_navigation(
+                operation_id, location_id, goal
+            )
+        else:
+            accepted = self._nearby_navigation.set_nearby_tagged_goal(location_id, goal)
+        if not accepted:
             return "Navigation refused. Check map alignment and PGO synchronization."
         return f"Approaching '{location.name}'; will stop within the configured nearby distance (default 1 meter). This is not confirmation of arrival."
+
+    @rpc
+    def sequence_navigation_available(self) -> bool:
+        return self._sequence_navigation is not None
+
+    @rpc
+    def sequence_navigation_status(self, operation_id: str) -> dict[str, Any]:
+        if self._sequence_navigation is None:
+            raise RuntimeError("Correlated navigation completion is unavailable")
+        return self._sequence_navigation.sequence_navigation_status(operation_id)
+
+    @rpc
+    def cancel_sequence_navigation(self, operation_id: str) -> bool:
+        if self._sequence_navigation is None:
+            return False
+        return self._sequence_navigation.cancel_sequence_navigation(operation_id)
+
+    @skill(completion="result")
+    def query_memory_tags_result(self, query: str = "") -> SkillResult:
+        """Read saved tags with a structured completion result, without movement.
+
+        Equivalent inventory to query_memory_tags, suitable for a durable
+        sequence. Metadata contains the stored tag list and stable IDs.
+        """
+        return SkillResult.ok("Stored tags queried", **json.loads(self.query_memory_tags(query)))
 
     @skill(uses=[CAP_MOVEMENT])
     def navigate_to_memory_tag(self, location_id: str) -> str:

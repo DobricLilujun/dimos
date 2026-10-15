@@ -40,7 +40,10 @@ logger = setup_logger()
 
 DEFAULT_VLM_PROMPT = (
     "Describe this scene in one concise sentence, identify the room or area type, "
-    "and list up to 5 prominent objects with 2D bounding boxes. "
+    "and list up to 5 distinct portable objects on or near the floor with 2D bounding boxes. "
+    "Prioritize floor-level items, not walls, ceilings, furniture surfaces or every visible thing. "
+    "Always retain important safety objects such as fire extinguishers, first aid kits "
+    "and defibrillators even when mounted on walls. Use consistent short English object names. "
     'Reply as JSON: {"caption": "...", "place": "...", '
     '"place_bbox": [x1, y1, x2, y2], "items": '
     '[{"name": "...", "bbox": [x1, y1, x2, y2]}]}. '

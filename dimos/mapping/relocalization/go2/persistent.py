@@ -997,6 +997,8 @@ class PersistentGo2Planner(ReplanningAStarPlanner):
         self._searching = False
         self._search_stop = Event()
         self._search_thread: Thread | None = None
+        self._sequence_operation: str | None = None
+        self._sequence_outcomes: dict[str, str] = {}
 
     @rpc
     def navigation_speed_status(self) -> dict[str, Any]:
@@ -1087,6 +1089,9 @@ class PersistentGo2Planner(ReplanningAStarPlanner):
                 elif not result.data and self._arrival_radius is not None:
                     self._nearby_arrived = False
                     self.goal_reached.publish(Bool(False))
+                self._finish_sequence_operation(
+                    "completed" if result.data and self._nearby_arrived is True else "failed"
+                )
                 self._active_goal = None
                 self._active_tag = None
                 self._arrival_radius = None
@@ -1123,6 +1128,7 @@ class PersistentGo2Planner(ReplanningAStarPlanner):
             if self._visual_required:
                 self._start_visual_search()
                 return True
+            self._finish_sequence_operation("completed")
             self._active_goal = None
             self._active_tag = None
             self._arrival_radius = None
@@ -1160,6 +1166,7 @@ class PersistentGo2Planner(ReplanningAStarPlanner):
         with self._goal_lock:
             if self._pgo_paused:
                 return False
+            self._finish_sequence_operation("preempted")
             self._stop_visual_search()
             self._goal_revision += 1
             self._active_goal = copy.deepcopy(goal)
@@ -1267,6 +1274,7 @@ class PersistentGo2Planner(ReplanningAStarPlanner):
                     self._finish_visual_search(False, f"Visual search failed: {error}")
 
     def _finish_visual_search(self, matched: bool, status: str) -> None:
+        self._finish_sequence_operation("completed" if matched else "failed")
         self._stop_visual_search()
         self._active_goal = None
         self._active_tag = None
@@ -1292,6 +1300,7 @@ class PersistentGo2Planner(ReplanningAStarPlanner):
     @rpc
     def cancel_goal(self) -> bool:
         with self._goal_lock:
+            self._finish_sequence_operation("cancelled")
             self._stop_visual_search()
             self._goal_revision += 1
             self._active_goal = None
@@ -1300,6 +1309,55 @@ class PersistentGo2Planner(ReplanningAStarPlanner):
             self._visual_required = False
             self._nearby_arrived = False
             return super().cancel_goal()
+
+    def _finish_sequence_operation(self, status: str) -> None:
+        if self._sequence_operation is not None:
+            self._sequence_outcomes[self._sequence_operation] = status
+            self._sequence_operation = None
+
+    @rpc
+    def start_sequence_navigation(
+        self, operation_id: str, location_id: str, goal: PoseStamped
+    ) -> bool:
+        """Bind an invocation ID under the goal lock, including immediate arrival."""
+        with self._goal_lock:
+            if operation_id in self._sequence_outcomes:
+                return False  # A cancelled/late/replayed invocation cannot move.
+            self._finish_sequence_operation("preempted")
+            accepted = self.set_nearby_tagged_goal(location_id, goal)
+            if accepted:
+                self._sequence_outcomes[operation_id] = "running"
+                self._sequence_operation = operation_id
+                if self._active_goal is None and self._nearby_arrived is True:
+                    self._finish_sequence_operation("completed")
+            else:
+                self.cancel_goal()
+                self._sequence_outcomes[operation_id] = "refused"
+            # Retain bounded tombstones; UUIDs are never reused by the executor.
+            while len(self._sequence_outcomes) > 128:
+                oldest = next(iter(self._sequence_outcomes))
+                if oldest == self._sequence_operation:
+                    break
+                del self._sequence_outcomes[oldest]
+            return accepted
+
+    @rpc
+    def sequence_navigation_status(self, operation_id: str) -> dict[str, Any]:
+        with self._goal_lock:
+            return {
+                "operation_id": operation_id,
+                "status": self._sequence_outcomes.get(operation_id, "unknown"),
+            }
+
+    @rpc
+    def cancel_sequence_navigation(self, operation_id: str) -> bool:
+        with self._goal_lock:
+            if self._sequence_operation == operation_id:
+                self.cancel_goal()
+            elif operation_id not in self._sequence_outcomes:
+                # Cancellation can win the race against the start RPC.
+                self._sequence_outcomes[operation_id] = "cancelled"
+            return self._sequence_outcomes[operation_id] != "running"
 
     @rpc
     def pause_for_pgo(self) -> int:

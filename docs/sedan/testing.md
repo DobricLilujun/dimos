@@ -57,8 +57,12 @@ ending a follow, and the live follow-distance route and its validation. Run with
 dimos/simulation/mujoco dimos/navigation/go2/replanning_a_star`.
 
 The browser tests (`test_console_browser.py`, the `web_browser` marker) need Playwright
-and are not part of the default run. The page's JavaScript can only be syntax-checked
-without a browser, so check the selectors, the People buttons and the sliders by hand
+and are not part of the default run. They include actual WebGL marker hover/click,
+stable-ID navigation confirmation, and paused sequence progress/retry/cancel.
+Use `pytest dimos/web/console/test_console_browser.py -m web_browser --no-cov`.
+Chromium or system Google Chrome is required; the fixture uses headless SwiftShader
+for WebGL. Without a browser, the page's JavaScript can only be syntax-checked,
+so check the selectors, the People buttons and the sliders by hand
 (see [the web console](web-console.md#choosing-a-stack-and-a-connection)). Starting
 MuJoCo needs a display; the person skills need a vision-model key and cost API calls.
 
@@ -75,6 +79,10 @@ must be checked on real hardware:
 | **Go2 speaker / Puppy** | The Go2 **accepts** the speaker and mic; TTS plays; the mic conversation and ambient commentary behave as documented. Firmware support is not covered by offline tests. |
 | **Fusion gate** | At rest the accepted-frame count stops growing; save does not keep growing the map; normal motion resumes. |
 | **PGO** | In a supervised loop, the current-run map/tags/pose are corrected and navigation resumes after sync; a wrong ICP loop is caught (not auto-trusted). |
+| **Automatic tags** | Enable tagging with speaker off/on, reobserve the same object, and view several adjacent extinguishers. New tags speak at most once per ten seconds; duplicates stay silent and distinct instances keep their IDs. Check local floor preference and wall-mounted safety targets. |
+| **Object map** | Show tagged objects before an inventory query; orbit/hover/click markers over actual XYZ/map geometry. Confirm nearby navigation, alignment gating, reconnect, and PGO-updated positions. |
+| **Exploration completion** | Try a small enclosed room and an open doorway. Legs stay short and in known-free space. Only distinct fresh closure evidence completes the run; stale data, blocked targets, and map-edge openings do not. |
+| **Task sequences** | Order three distinct targets and verify actual arrival before the next step. Test failure pause, confirmed continuation, Stop/keyboard takeover, and restart without automatic movement. Keep the physical remote available. |
 
 ## 4. Manual verification cheat-sheet
 

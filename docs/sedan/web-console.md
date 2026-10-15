@@ -107,6 +107,82 @@ following](person-following.md)) add a **People** group to the control deck:
 
 ## The module
 
+### Ordered agent tasks
+
+Ask the chat to run an ordered plan, for example: “Visit the extinguisher beside
+the entrance, then the one beside the kitchen, then the upstairs extinguisher.”
+The agent resolves stable stored IDs before creating a task sequence. If “first”
+or “second” is ambiguous, it asks which objects you mean rather than guessing.
+
+The **Task sequence** panel shows ordered steps, the active index, actual results,
+and any pause reason. Expand **Arguments / result** to inspect the target IDs.
+Navigation waits for the matching planner operation's terminal arrival result,
+not a “navigation started” message, before the next step can run.
+
+- A sequence supports 1–32 steps over registered **bounded** tools with an explicit
+  completion contract. Navigation and structured inventory queries are supported;
+  arbitrary legacy string-returning, background, open-ended, and nested sequence
+  tools are rejected before dispatch, rather than treated as completed.
+- A failed or timed-out step **pauses** the plan. **Pause** stops a supported active
+  operation; **Cancel sequence** prevents remaining steps from running.
+- **Resume** and **Retry failed step** require human confirmation. Completed
+  steps are not repeated. Review uncertain side effects before retrying; an
+  operation that cannot be proven stopped blocks continuation and keyboard takeover.
+- Stop, keyboard takeover, and manual movement preempt the sequence. Physical
+  supervision and the robot's remote are still required.
+- Records survive restart, but unfinished plans restore **paused**, never with
+  automatic movement. An interrupted running step is marked uncertain.
+
+State is written atomically to
+`$XDG_STATE_HOME/dimos/task_sequence.json` (normally
+`~/.local/state/dimos/task_sequence.json`). Set `DIMOS_TASK_SEQUENCE_STATE_DIR`
+to choose another state directory. Do not share a state directory between
+independent concurrently running executors.
+
+Skill authors must explicitly advertise a `result` or `navigation` completion
+contract and return authoritative `SkillResult` data; registering an MCP tool
+alone does not make its success or cancellation semantics safe to sequence.
+
+### Interactive stored-object map
+
+Select **Show tagged objects** above the 3D view to switch from Rerun to the
+interactive **world-frame 3D map**. It displays the downsampled map, robot pose
+and all stored object tags; running a memory search first is not required.
+**Show Rerun** returns to the unchanged Rerun viewer. Inspecting an alignment
+preview also switches back to Rerun.
+
+- Drag to orbit, scroll to zoom, and use **Fit world map** to reset the view.
+- Glowing markers retain their actual XYZ positions. They remain visible through
+  geometry to make saved objects discoverable, with a gentle two-second pulse.
+  Reduced-motion users see a static glow. Pulsing stops while the map is hidden.
+- Hover a marker to inspect its name, category, description, world position,
+  stable ID and available observation metadata. The **Objects** list provides
+  keyboard-focus access to the same properties and separates overlapping tags.
+- Click a marker or an object-list entry to open the existing **Navigate nearby**
+  confirmation. Navigation uses the saved ID, not the marker coordinates.
+  Hover and keyboard inspection remain available when alignment/navigation is
+  disabled. Stale or disconnected maps cannot initiate movement.
+- The map updates every two seconds only while selected and the browser tab is
+  visible. Leaving the view releases its GPU resources. Missing tags do not
+  hide an otherwise available map; stale data, missing pose, and unavailable
+  WebGL are reported explicitly.
+
+The Console serves its renderer locally from `/assets/object-map.js`; it needs
+neither a separate Cockpit/relay deployment nor runtime CDN scripts. The renderer
+shares Cockpit's Z-up Three.js scene. Frontend source lives under
+`web/cockpit/src/console/`; after changing it, rebuild the asset committed under
+`dimos/web/console/assets/`:
+
+```bash
+cd web/cockpit
+npm run console:check
+npm run console:test
+npm run build:console-map
+```
+
+The existing Python wheel/sdist JavaScript package-data rules include the built
+asset; Python installations do not need Node to display the map.
+
 `RobotConsoleModule` declares **no `In` / `Out` ports**, so it never competes
 with the persistent stack's stream wiring. It only observes and publishes by
 **channel name** through the shared transport. This is why the console can be
@@ -124,6 +200,14 @@ What it does:
   input/output (`/agent` tool messages + `/tool_streams`).
 - Serves a **3D view** and a **camera** feed for the standalone console
   (loaded separately so the standard Rerun viewer is untouched).
+- **Show tagged objects** switches to a live interactive 3D point-cloud/object
+  view while preserving Rerun. Hover a glowing marker for its attributes, then
+  click to use the existing confirmed nearby-navigation operation. Object tags
+  load independently of inventory searches; mute does not disable visualization.
+- With the **Go2 speaker** enabled, successful automatic-tagging activation and
+  newly saved objects get short, rate-limited English puppy announcements.
+  Reobservations do not repeat discovery speech. See
+  [voice and tagging](voice-and-tagging.md).
 
 ## Standalone console
 

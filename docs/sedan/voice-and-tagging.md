@@ -70,31 +70,64 @@ are also flagged **busy** so the mic suppresses echo of the robot's own voice.
 
 ## Tag visualization (glowing points)
 
-The web console renders every **tagged object** as a **glowing point**
-(Resident-Evil style) over a 2D projection of world x/y:
+The Console's **Show tagged objects** toggle opens an interactive 3D object map.
+The original Rerun view remains available, including its alignment preview.
+Markers use stored world **x/y/z** over the point-cloud map, not the small,
+normalized XY inventory chart:
 
-- **Hover** shows a tooltip with **name / kind / position**.
-- **Click** a point to **navigate near it** (reuses `navigate_near_memory_tag`).
-- The same query results remain available as a table with a **Navigate nearby**
-  button, so the glowing cloud and the list stay in sync.
+- All stored object tags load without a manual memory query; updates are fetched
+  while the view is visible. Rooms and places are not object markers.
+- **Hover** shows the object's attributes, including name, description, stable
+  ID, and XYZ position. Inspecting a marker does not require navigation readiness.
+- **Click** follows the existing confirmed **Navigate nearby** operation using
+  `navigate_near_memory_tag` and the stable tag ID, never a raw marker coordinate.
+- The inventory query and table remain available. A missing/stale map or a
+  WebGL failure is shown explicitly; it does not authorize robot movement.
 
-The payload (`build_tag_viz_payload`) carries `name`, `kind`, `position`, and
-`location_id` for each object tag; non-object tags (rooms, places, people) are
-skipped so only taggable objects glow.
+The map renderer reuses the Cockpit Three.js scene. Its local asset is built
+with `npm run build:console-map --prefix web/cockpit`; no external script CDN
+or separate relay service is needed.
+
+### Automatic-tagging speech
+
+With **Go2 speaker** enabled, an actual successful off-to-on transition speaks
+“Woof! Automatic tagging is on. Let's sniff out some treasures!” Status reads,
+repeated enable requests, failed enablement, and paused tagging do not speak it.
+Only successfully persisted **new objects** produce discovery announcements;
+reobservations and failed writes do not. Short English puppy phrases rotate,
+including “Woof! I tagged a … That's my territory now!”
+
+Discovery speech is limited to one phrase per ten seconds and skipped while
+other speech is queued. Skipped discoveries are not replayed later. Turning the
+speaker off invalidates queued speech through the existing generation gate.
+Tagging and map updates still work silently; playback uses the robot speaker,
+not the host-computer `speak` tool. All new product text and speech remain English.
 
 ## Stricter auto-tagging
 
-Object tagging dedup is stricter so the same object is not tagged repeatedly a
-few metres or a few pixels away:
+Automatic detection prioritizes portable objects on or near the floor, rather
+than tagging every visible surface. Local point-cloud support is used where
+available; the code does not assume world Z=0 is the floor. Important safety
+objects such as wall-mounted fire extinguishers and first-aid kits are retained.
+When local support is insufficient, height is unknown and the VLM's
+ground-priority candidate is retained, not presented as geometrically verified.
+Manual object tagging is not subject to this automatic preference.
 
-- **Exact name** within `tag_exact_name_distance_m` (1.0 m), or
-- **Name similarity** ≥ `tag_dedup_name_similarity` (0.82) within the wider
-  `tag_dedup_distance_m` cluster (1.6 m).
+Deduplication is atomic with object creation:
 
-There is also a **ground-level preference**: a new ground-level tag near an
-elevated same-named tag is a different instance and is kept; a new elevated tag
-near a ground one is dropped as its duplicate, so the robot prefers tagging
-things on the floor.
+- Exact/normalized names match within `tag_exact_name_distance_m` (1.0 m XY).
+- Similar names require similarity at least `tag_dedup_name_similarity` (0.82),
+  within `tag_dedup_distance_m` (1.0 m), never a wider radius than exact matches.
+- A separate 0.6 m height difference limit preserves vertically separated
+  instances while tolerating modest depth noise. A floor/elevated reobservation
+  no longer bypasses duplicate detection.
+- Name normalization preserves non-ASCII text. Object tags do not merge into
+  explicit room/place/person tags, and the nearest matching instance wins.
+- Distinct detections in one frame cannot reuse the same instance ID.
+
+These are geometric heuristics, not perfect physical-instance recognition.
+Historical duplicate tags are not automatically deleted or renumbered; existing
+IDs and saved navigation references remain valid.
 
 ## Related
 

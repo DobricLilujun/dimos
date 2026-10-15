@@ -69,7 +69,9 @@ def _stamp_and_log(func_name: str, result: Any, elapsed_ms: float) -> Any:
     return result
 
 
-def _make_skill(func: F, uses: list[str], lifecycle: SkillLifecycle) -> F:
+def _make_skill(
+    func: F, uses: list[str], lifecycle: SkillLifecycle, completion: str | None = None
+) -> F:
     if inspect.iscoroutinefunction(func):
 
         @functools.wraps(func)
@@ -113,13 +115,16 @@ def _make_skill(func: F, uses: list[str], lifecycle: SkillLifecycle) -> F:
     wrapped.__skill__ = True  # type: ignore[attr-defined]
     wrapped.__skill_uses__ = list(uses)  # type: ignore[attr-defined]
     wrapped.__skill_lifecycle__ = lifecycle  # type: ignore[attr-defined]
+    wrapped.__skill_completion__ = completion  # type: ignore[attr-defined]
     return cast("F", wrapped)
 
 
 @overload
 def skill(func: F) -> F: ...
 @overload
-def skill(*, uses: list[str] | None = ..., lifecycle: SkillLifecycle = ...) -> Callable[[F], F]: ...
+def skill(
+    *, uses: list[str] | None = ..., lifecycle: SkillLifecycle = ..., completion: str | None = ...
+) -> Callable[[F], F]: ...
 
 
 def skill(
@@ -127,6 +132,7 @@ def skill(
     *,
     uses: list[str] | None = None,
     lifecycle: SkillLifecycle = "instant",
+    completion: str | None = None,
 ) -> F | Callable[[F], F]:
     """Mark a method as an agent-callable skill.
 
@@ -140,13 +146,20 @@ def skill(
     returning, or `"background"` for skills that kick off background work and
     return early -- those must use `start_tool`/`stop_tool` so the matching
     stop-tool frame can release their capabilities.
+
+    ``completion`` opts into durable task sequences. ``"result"`` promises a
+    terminal ``SkillResult``, not an acknowledgement that work merely started.
+    ``"navigation"`` requires the correlated persistent-planner adapter. The
+    default rejects sequencing rather than guessing legacy prose outcomes.
     """
     if lifecycle not in _VALID_LIFECYCLES:
         raise ValueError(f"lifecycle must be one of {_VALID_LIFECYCLES}, got {lifecycle!r}")
+    if completion not in (None, "result", "navigation"):
+        raise ValueError("Unknown skill completion contract")
     if func is not None:
         return _make_skill(func, uses=[], lifecycle="instant")
 
     def decorator(f: F) -> F:
-        return _make_skill(f, uses=list(uses or []), lifecycle=lifecycle)
+        return _make_skill(f, uses=list(uses or []), lifecycle=lifecycle, completion=completion)
 
     return decorator

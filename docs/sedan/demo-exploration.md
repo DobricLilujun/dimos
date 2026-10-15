@@ -32,8 +32,9 @@ to edit):
 | `strategy` | `frontier` | Selection strategy |
 | `min_goals` | 10 | After this many **successful** arrivals, start checking for low gain — **not** a total goal cap; failures do not count |
 | `gain_percent` | 1 | Map-information growth per successful navigation, in percent (1 = 1%) |
-| `no_gain_attempts` | 2 | End after this many consecutive low-gain attempts |
+| `no_gain_attempts` | 2 | Report low gain after this many arrivals; low gain alone is not completion |
 | `check_interval` | 3 s | Progress-check interval — **not** a hard per-goal timeout; an explicit failure wakes immediately and changes goal |
+| `max_leg_distance_m` | 1.5 m | Maximum known-free path length per navigation leg |
 
 A failed area cools for 60 s to avoid repeatedly picking the same unreachable
 point. Both demo modes use **10 cm** obstacle inflation (the original Wavefront
@@ -85,9 +86,9 @@ navigation step**: the original navigation arrival tolerance is still 0.20 m, so
 a too-close frontier only finds a same-direction goal at least 0.25 m away in
 known, reachable free space, with the connector's angle to the frontier ≤ ~32°
 and the path ≤ 0.8 m. If it cannot connect, it waits and explains why — it does
-not fake a 5 cm move or push into unknown. Without a near goal it selects a far
-goal by the chosen strategy; after 2 m of displacement it reverts to normal
-scoring.
+not fake a 5 cm move or push into unknown. Without a nearby frontier it selects a farther frontier by the chosen strategy,
+then walks only a bounded intermediate leg toward it. After 2 m of displacement
+normal frontier ranking resumes, but the short-leg limit remains active.
 
 All goals still pass the original planner's safety checks. Waiting / completion
 reasons distinguish non-free start cell, reachable frontier count, post-exclusion
@@ -99,16 +100,15 @@ count.
 - If there is no ≥ 15 cm translation progress within 15 s, the current goal is
   cancelled and it **tries to recover** before giving up on that goal: it turns
   in place and, if that makes no progress, backs up, then re-checks the goal.
-  Only after several failed recovery attempts is the goal cooled and another
-  picked.
-- If odometry is stale for > 5 s, it stops and reports.
+  Failed recovery cools the goal and chooses another. A goal cannot repeatedly
+  recover forever: `stall_recovery_attempts` bounds recovery cycles for that leg.
+- If odometry or lidar is stale for > 5 s, it stops and reports.
 - The map must exist; while fusion is paused it may continue with a static map.
-- The run does **not** stop early on a low-gain plateau: it keeps waiting for a
-  frontier and only ends when the reachable free space has been swept (coverage)
-  or no frontier remains. This is the never-stop / edge-traversal completion —
-  a low gain on one frontier does not end the run.
-- A larger restored map may trigger low gain quickly — lower `gain_percent` or
-  raise `min_goals` / `no_gain_attempts`.
+- The run does **not** stop on a low-gain plateau, visited-goal exclusions, or
+  cooling failed targets. Low gain is a progress diagnostic, not completion.
+- Rotation recovery requires fresh sensors and observed clearance; back-up also
+  checks an inflated, known-free connector. Unsafe recovery reports blocked
+  instead of driving blind.
 - **Stop exploration** cancels exploration. A PGO failure or a remote stop
   signal also ends it and does **not** auto-resume, to avoid accidental motion.
 
@@ -119,14 +119,29 @@ traversable path) rather than a distant detour, so it does not circle over
 already-covered ground to reach a far frontier. Set `greedy` off to fall back to
 the original frontier / efficient scoring.
 
-### Coverage completion
+### Stable enclosure completion
 
-Completion is based on how much of the reachable free space has been swept, not
-on a fixed number of goals. As the robot visits frontiers, the visited radius
-around each covered frontier marks the surrounding free cells as explored; when
-that fraction reaches `coverage_threshold` (default 0.9) — or no frontier
-remains — the run reports `completed`. A `blocked` (not `completed`) status still
-means it could not safely finish.
+Completion requires **three distinct map/lidar observations spanning at least
+five seconds**, all showing a nonempty robot-reachable free component with no
+unknown boundary and no opening onto the map edge. Alignment must be ready and
+lidar/odometry fresh. Checks use the uninflated map so obstacle inflation does
+not falsely seal a doorway.
+
+This bypasses `min_goals`: a genuinely closed small room can finish even before
+the first successful goal. A stale map, unknown hole, transient closure, non-free
+start, or only filtered/cooling frontiers does not prove completion. Repeated
+polls of one unchanged map do not count as new evidence. While fusion is paused,
+new world-frame lidar scans can confirm the static map only if their observed
+points remain in its known cells; a scan exposing unknown/out-of-map space
+resets closure evidence. Scans must contain at least 32 finite points and have
+new timestamps. This avoids requiring the robot to move just to unpause fusion.
+The legacy `coverage_threshold` parameter is retained for
+compatibility; it cannot override remaining unknown boundaries.
+
+Every leg is limited to **1.5 m of traversable path**, not Euclidean distance.
+Distant frontier targets are approached through intermediate known-free
+waypoints; diagonals never cut occupied corners. This conservative local
+behavior is not a strict indoor boundary detector or a safety geofence.
 
 ## Demo planner width & speed
 

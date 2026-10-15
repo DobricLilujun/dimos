@@ -14,6 +14,7 @@
 
 
 from dimos.agents.annotation import skill
+from dimos.agents.skill_result import SkillResult
 
 
 def test_skill_bare_form_has_empty_uses_and_instant_lifecycle():
@@ -42,3 +43,17 @@ def test_skill_parametrized_with_no_uses_defaults_to_empty():
 
     assert list(s.__skill_uses__) == []
     assert s.__skill_lifecycle__ == "background"
+
+
+def test_explicit_result_contract_preserves_skillresult_and_legacy_default_is_unsupported():
+    @skill(completion="result")
+    def completed() -> SkillResult:
+        return SkillResult.ok("Done")
+
+    @skill
+    def legacy() -> str:
+        return "Started"
+
+    assert completed.__skill_completion__ == "result"
+    assert completed().success is True
+    assert legacy.__skill_completion__ is None

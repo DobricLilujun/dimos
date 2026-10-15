@@ -722,7 +722,14 @@ def test_taking_over_with_the_keyboard_ends_a_follow(module, tmp_path, mocker):
 
     _attach(module, tmp_path, "persistent-people", "replay")
     transport = mocker.patch("dimos.web.console.module.make_transport").return_value
-    mocker.patch.object(module, "_call_rpc", return_value={"ok": True, "result": True})
+    rpc = mocker.patch.object(
+        module,
+        "_call_rpc",
+        side_effect=[
+            {"ok": True, "result": {"status": "idle"}},
+            {"ok": True, "result": True},
+        ],
+    )
     stopped = mocker.patch.object(module, "_stop_following")
     ready = threading.Event()
     transport.publish.side_effect = lambda twist: ready.set()
@@ -734,6 +741,10 @@ def test_taking_over_with_the_keyboard_ends_a_follow(module, tmp_path, mocker):
             assert ready.wait(5)
 
     stopped.assert_called_once()
+    assert [call.args[0].key for call in rpc.call_args_list] == [
+        "preempt_task_sequence",
+        "switch_joystick",
+    ]
 
 
 # ---------------------------------------------------------------------------

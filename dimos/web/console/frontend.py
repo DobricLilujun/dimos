@@ -15,7 +15,7 @@
 """Single-page front-end for the SEDAN GROUP robot console.
 
 Served verbatim by :class:`dimos.web.console.module.RobotConsoleModule` at
-``/``. No build step: vanilla HTML/CSS/JS. The page:
+``/``. Vanilla HTML/CSS/JS, with a locally bundled Three.js object map. The page:
 
 * embeds the existing Rerun web viewer by iframe (original Rerun content
   preserved) in the centre,
@@ -24,8 +24,8 @@ Served verbatim by :class:`dimos.web.console.module.RobotConsoleModule` at
   the agent's replies, and the internal tool input/output,
 * carries a SEDAN GROUP logo and a tech-styled dashboard look.
 
-All live data arrives over a single Server-Sent-Events stream (``/events``);
-actions and chat messages go over ``/api/*``.
+Status and chat arrive over Server-Sent Events (``/events``); the selected
+object map polls ``/api/object-map``. Actions and chat use ``/api/*``.
 """
 
 from __future__ import annotations
@@ -315,16 +315,28 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
 .inventory table { width:100%; border-collapse:collapse; }
 .inventory td, .inventory th { padding:7px 4px; border-bottom:1px solid var(--line); text-align:left; overflow-wrap:anywhere; }
 .inventory .btn { padding:5px; font-size:11px; }
-/* Glowing tag points (Resident-Evil style) over the map: hover for a tooltip,
-   click to navigate. The cloud is a 2D projection of world x/y. */
-.tag-cloud { position:relative; height:180px; margin:8px 0; border:1px solid var(--line); border-radius:8px; background:radial-gradient(circle at 50% 50%, rgba(24,52,38,.55), #05090f); overflow:hidden; }
-.tag-point { position:absolute; width:14px; height:14px; margin:-7px; border-radius:50%; background:var(--accent); box-shadow:0 0 8px 2px rgba(46,220,150,.75), 0 0 16px 4px rgba(46,220,150,.35); cursor:pointer; transition:transform .12s; }
-.tag-point:hover { transform:scale(1.5); }
-.tag-tip { position:absolute; z-index:5; pointer-events:none; background:rgba(10,17,25,.92); border:1px solid var(--line); border-radius:6px; padding:5px 8px; font-size:11px; color:var(--text); white-space:nowrap; transform:translate(-50%,-140%); }
-.tag-tip b { display:block; color:var(--accent); font-size:11px; }
-.tag-tip .pos { color:var(--muted); font-size:10px; }
+#object-map { position:absolute; inset:48px 0 0; overflow:hidden; background:#05090f; }
+#object-map[hidden] { display:none; }
+.task-sequence { padding:10px 16px; border-bottom:1px solid var(--line); max-height:220px; overflow:auto; font-size:12px; }
+.task-sequence h2 { margin:0 0 6px; font-size:13px; }
+.task-sequence ol { margin:6px 0; padding-left:22px; }
+.task-sequence li { padding:3px 0; overflow-wrap:anywhere; }
+.task-sequence pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:10px; margin:4px 0; }
+.task-sequence .actions { display:flex; gap:6px; flex-wrap:wrap; }
+.object-map-canvas { display:block; width:100%; height:100%; touch-action:none; }
+.object-map-toolbar { position:absolute; top:8px; left:10px; right:10px; display:flex; align-items:center; gap:8px; pointer-events:none; font:11px var(--mono); }
+.object-map-toolbar button, .object-map-list button { pointer-events:auto; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--accent); padding:6px; cursor:pointer; }
+.object-map-toolbar span { color:var(--muted); background:rgba(10,17,25,.85); padding:6px; }
+.object-map-toolbar [data-stale="true"] { color:var(--warn); }
+.object-map-tooltip { position:absolute; z-index:6; width:280px; max-width:calc(100% - 16px); padding:10px; pointer-events:none; white-space:pre-wrap; overflow-wrap:anywhere; max-height:200px; overflow:auto; color:var(--text); background:rgba(10,17,25,.96); border:1px solid var(--accent); border-radius:8px; font:11px var(--mono); }
+.object-map-list { position:absolute; bottom:10px; left:10px; width:280px; max-width:calc(100% - 20px); max-height:35%; overflow:auto; background:rgba(10,17,25,.94); border:1px solid var(--line); border-radius:8px; padding:8px; font-size:11px; }
+.object-map-list summary { cursor:pointer; color:var(--accent); }
+.object-map-list button { display:block; width:100%; margin-top:5px; text-align:left; overflow-wrap:anywhere; }
+.object-map-list button[aria-disabled="true"] { color:var(--muted); cursor:help; }
+.object-map-list button:focus-visible { outline:2px solid var(--accent); }
 @media(max-width:1100px) { main { grid-template-columns:260px minmax(0,1fr) 320px; } .title { display:none; } }
 @media(max-width:800px) { .app { height:auto; min-height:100vh; grid-template-rows:auto 1fr auto; } header { flex-wrap:wrap; padding:10px; gap:8px; } main { grid-template-columns:1fr; } aside.deck { max-height:45vh; } center.viz { height:50vh; } aside.chat { height:65vh; } footer { flex-wrap:wrap; padding:10px; gap:8px; } .form-grid { grid-template-columns:1fr; } }
+@media(max-width:800px) { center.viz:has(#object-map:not([hidden])) { min-height:520px; } }
 
 /* scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -403,9 +415,11 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
         <span class="chip">Rerun · <b id="viz-host">live 3D</b></span>
         <span class="chip link" id="viz-open">open in new tab</span>
         <button class="chip link" id="viz-refresh">Refresh viewer</button>
+        <button class="chip link" id="object-map-toggle" aria-pressed="false">Show tagged objects</button>
       </div>
       <div class="stream-view" id="world-view">
         <iframe id="rr" title="Rerun 3D" style="display:none"></iframe>
+        <div id="object-map" hidden></div>
         <span class="stream-label">3D</span>
         <button class="stream-switch" id="world-switch" aria-label="Make 3D the main view"></button>
       </div>
@@ -454,6 +468,18 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
         <span class="badge" id="b-thinking" style="display:none"><span class="dot"></span>thinking</span>
       </div>
       <div class="msgs" id="msgs" role="log" aria-label="Conversation"></div>
+      <section id="task-sequence" class="task-sequence" hidden aria-label="Task sequence">
+        <h2>Task sequence</h2>
+        <p id="task-sequence-status" role="status">No active task sequence</p>
+        <ol id="task-sequence-steps"></ol>
+        <div class="actions">
+          <button class="chip link" id="task-sequence-refresh">Refresh tasks</button>
+          <button class="chip link" id="task-sequence-pause" hidden>Pause</button>
+          <button class="chip link" id="task-sequence-resume" hidden>Resume</button>
+          <button class="chip link" id="task-sequence-retry" hidden>Retry failed step</button>
+          <button class="chip link" id="task-sequence-cancel" hidden>Cancel sequence</button>
+        </div>
+      </section>
       <div id="people-controls" hidden>
       <div class="slider-control slider-follow">
         <div class="slider-heading"><label for="follow-distance">Live person follow distance</label>
@@ -555,6 +581,40 @@ let taggingEnabled = null;
 let speakerEnabled = false;
 const pressedKeys = new Set();
 let cameraBusy = false;
+let objectMap = null;
+let objectMapLoading = null;
+let objectMapSelected = false;
+
+// The map bundle reuses Cockpit's Z-up renderer without requiring its relay.
+async function selectObjectMap(on) {
+  objectMapSelected = on;
+  $("#object-map-toggle").setAttribute("aria-pressed",String(on));
+  $("#object-map-toggle").textContent=on?"Show Rerun":"Show tagged objects";
+  $("#object-map").hidden=!on;
+  $("#rr").style.display=on?"none":"block";
+  $("#rr-fallback").style.display="none";
+  if(!on){objectMap?.setVisible(false);return;}
+  try {
+    if(!objectMap) {
+      $("#object-map").textContent="Loading interactive world map…";
+      objectMapLoading ||= import("/assets/object-map.js");
+      const module=await objectMapLoading;
+      if(!objectMapSelected)return;
+      objectMap ||= module.mountObjectMap($("#object-map"),{
+        navigationReady:()=>state.nav && (!CONFIG.standalone || state.stack==="running"),
+        navigate:(id,button)=>{
+          const op=CONFIG.operations.find(op=>op.key==="navigate_near_memory_tag");
+          if(!op || !state.nav || (CONFIG.standalone && state.stack!=="running"))return;
+          runOp(op,button,{location_id:id});
+        }
+      });
+    }
+    objectMap.setVisible(objectMapSelected && !document.hidden);
+  } catch(e) {
+    objectMapLoading=null;
+    $("#object-map").textContent="Interactive map unavailable: "+e.message+". Select Show Rerun to return to the viewer.";
+  }
+}
 
 // ---------- helpers ----------
 function log(kind, key, detail) {
@@ -589,13 +649,14 @@ function setupRerun(url) {
   };
   // Use the iframe by default; if the browser blocks it the fallback link remains.
   iframe.src = url;
-  iframe.style.display = "block";
+  iframe.style.display = objectMapSelected ? "none" : "block";
   $("#rr-fallback").style.display = "none";
   $("#viz-open").onclick = () => window.open(url, "_blank");
   const link = $("#rr-link"); if (link) link.href = url;
-  $("#viz-refresh").onclick = () => setupRerun(url);
+  $("#viz-refresh").onclick = () => {setupRerun(url);objectMap?.refresh();};
 }
 function showAlignmentView() {
+  selectObjectMap(false);
   const url=new URL(CONFIG.rerun_url);
   const sources=url.searchParams.getAll("url").filter(source=>!source.endsWith(".rbl"));
   url.searchParams.delete("url");
@@ -779,50 +840,12 @@ function renderInventory(result) {
   if (!result || !Array.isArray(result.tags)) return;
   const wrap = $("#inventory"); wrap.replaceChildren();
   const summary = el("p"); summary.textContent = `${result.matching_tag_count} matching / ${result.total_stored_tags} saved · world`; wrap.appendChild(summary);
-  wrap.appendChild(renderTagCloud(result.tags));
   const table = el("table"); const head = el("tr"); for (const title of ["Name / ID","Position","Go"]) {const th=el("th");th.textContent=title;head.appendChild(th);}table.appendChild(head);
   for (const tag of result.tags) {
     const tr = el("tr"); for (const value of [tag.name + "\n" + tag.id, pretty(tag.position)]) {const td=el("td");td.textContent=value;tr.appendChild(td);}
     const td = el("td"); const btn=el("button","btn");btn.textContent="Navigate nearby";btn.dataset.help="Navigate near this saved tag using the configured arrival distance. Supervise robot movement.";btn.dataset.navigation="true";btn.disabled=!state.nav;btn.onclick=()=>runOp(CONFIG.operations.find(op=>op.key==="navigate_near_memory_tag"),btn,{location_id:tag.id});td.appendChild(btn);tr.appendChild(td);table.appendChild(tr);
   }
   wrap.appendChild(table);
-}
-
-// Glowing tag points over a 2D projection of world x/y. Hover shows a tooltip
-// (name / kind / position); click navigates near the tag (Resident-Evil style).
-function renderTagCloud(tags) {
-  const cloud = el("div", "tag-cloud");
-  const tip = el("div", "tag-tip"); tip.hidden = true; cloud.appendChild(tip);
-  const showTip = (point, tag) => {
-    tip.innerHTML = "";
-    const name = el("b"); name.textContent = tag.name || "tag"; tip.appendChild(name);
-    const kind = el("div"); kind.textContent = tag.kind || "object"; tip.appendChild(kind);
-    const pos = el("div", "pos"); pos.textContent = pretty(tag.position); tip.appendChild(pos);
-    const r = point.getBoundingClientRect(), c = cloud.getBoundingClientRect();
-    tip.style.left = (r.left + r.width / 2 - c.left) + "px";
-    tip.style.top = (r.top - c.top) + "px";
-    tip.hidden = false;
-  };
-  const finite = tags.filter(t => Array.isArray(t.position) && t.position.length >= 2 && isFinite(t.position[0]) && isFinite(t.position[1]));
-  if (!finite.length) { const none = el("p", "note"); none.style.cssText = "padding:8px;color:var(--muted)"; none.textContent = "No object tags to show"; cloud.appendChild(none); return cloud; }
-  const xs = finite.map(t => t.position[0]), ys = finite.map(t => t.position[1]);
-  const xMin = Math.min(...xs), xMax = Math.max(...xs), yMin = Math.min(...ys), yMax = Math.max(...ys);
-  const spanX = Math.max(xMax - xMin, 1e-6), spanY = Math.max(yMax - yMin, 1e-6);
-  const pad = 10;
-  for (const tag of finite) {
-    const x = pad + ((tag.position[0] - xMin) / spanX) * (100 - 2 * pad);
-    // Invert y so north (larger y) is up in the view.
-    const y = pad + (1 - (tag.position[1] - yMin) / spanY) * (100 - 2 * pad);
-    const point = el("button", "tag-point");
-    point.style.left = x + "%"; point.style.top = y + "%";
-    point.disabled = !state.nav;
-    point.title = ""; // we render our own tooltip for a richer hover
-    point.onclick = () => runOp(CONFIG.operations.find(op => op.key === "navigate_near_memory_tag"), point, { location_id: tag.id });
-    point.addEventListener("pointerenter", () => showTip(point, tag));
-    point.addEventListener("pointerleave", () => { tip.hidden = true; });
-    cloud.appendChild(point);
-  }
-  return cloud;
 }
 
 // ---------- chat ----------
@@ -904,11 +927,71 @@ function renderToolStream(ev) {
   // live tool progress / message from /tool_streams
   const name = ev.name || "tool";
   const text = ev.text || "";
+  if(name==="task_sequence"){refreshTaskSequence();return;}
   if (!text) return;
   appendStackLog(`[${now()}] [tool:${name}] ${text}`);
   const card = makeToolCard(name, "", text, "live");
   card.querySelector(".io").classList.add("full");
   addTool(card);
+}
+
+let taskSequenceState = null;
+let taskSequencePending = false;
+let taskSequenceTimer = null;
+function renderTaskSequence(sequence) {
+  taskSequenceState=sequence;
+  const status=sequence.status || "idle",steps=sequence.steps || [];
+  $("#task-sequence-status").textContent=status==="idle"?"No active task sequence":
+    `${status} · step ${Math.min((sequence.active_index || 0)+1,steps.length)}/${steps.length}`+
+    (sequence.reason?` · ${sequence.reason}`:"")+
+    (sequence.quiescent===false?" · waiting for active operation to stop":"");
+  const list=$("#task-sequence-steps");list.replaceChildren();
+  for(const step of steps) {
+    const item=el("li");item.textContent=`${step.tool} — ${step.status}`;
+    const details=el("details"),summary=el("summary");summary.textContent="Arguments / result";
+    const value=el("pre");value.textContent=pretty({arguments:step.arguments,result:step.result});
+    details.append(summary,value);item.appendChild(details);list.appendChild(item);
+  }
+  const terminal=["idle","completed","cancelled"].includes(status);
+  $("#task-sequence-pause").hidden=status!=="running";
+  $("#task-sequence-resume").hidden=status!=="paused";
+  const active=steps[sequence.active_index];
+  $("#task-sequence-retry").hidden=status!=="paused" ||
+    !active || !["failed","uncertain"].includes(active.status);
+  $("#task-sequence-cancel").hidden=terminal && sequence.quiescent!==false;
+  if(active && ["failed","uncertain"].includes(active.status))$("#task-sequence-resume").hidden=true;
+}
+async function refreshTaskSequence() {
+  clearTimeout(taskSequenceTimer);
+  if(taskSequencePending || !state.agent || (CONFIG.standalone && state.stack!=="running"))return;
+  taskSequencePending=true;$("#task-sequence").hidden=false;
+  try {
+    const response=await api("/api/task-sequence");
+    renderTaskSequence(response.result);
+  } catch(error) {
+    $("#task-sequence-status").textContent="Task status unavailable: "+error.message;
+  } finally {
+    taskSequencePending=false;
+    if(!document.hidden && state.agent && (!CONFIG.standalone || state.stack==="running")) {
+      taskSequenceTimer=setTimeout(refreshTaskSequence,3000);
+    }
+  }
+}
+async function taskSequenceAction(action) {
+  const sequence=taskSequenceState;
+  if(!sequence || !sequence.id)return;
+  if(["resume","retry"].includes(action)) {
+    const description=action==="retry"?
+      "Retry the failed or uncertain step? Review any side effects first. Completed steps are not repeated. Supervise robot movement.":
+      "Continue the remaining ordered tools? This may move the robot. Supervise and keep the area clear.";
+    if(await requestOperation({label:action==="retry"?"Retry task step":"Resume task sequence",human_only:true,description})===null)return;
+  }
+  try {
+    const result=await api("/api/task-sequence",{
+      action,sequence_id:sequence.id,confirmed:["resume","retry"].includes(action)
+    });
+    renderTaskSequence(result.result);
+  } catch(error) {log("err","task sequence",error.message);}
 }
 function setThinking(on) {
   const b = $("#b-thinking"); b.style.display = on ? "" : "none";
@@ -968,9 +1051,12 @@ function applyStack(s) {
   $("#stack-start").disabled=["starting","running","stopping"].includes(s.state);
   $("#stack-stop").disabled=!s.pid;
   if(previous !== s.state && s.error) addSystem(s.error);
-  if(previous !== "running" && s.state==="running") setupRerun(CONFIG.rerun_url);
+  if(previous !== "running" && s.state==="running") {
+    setupRerun(CONFIG.rerun_url);refreshTaskSequence();
+  }
   updateControls();
   if(s.state!=="running") {
+    clearTimeout(taskSequenceTimer);taskSequenceState=null;$("#task-sequence").hidden=true;
     if($("#fusion-detail"))$("#fusion-detail").textContent="Robot stack is not running.";
     disableKeyboard();
     speakerEnabled=false;$("#speaker-toggle").textContent="Go2 speaker: Off";
@@ -1019,9 +1105,23 @@ function connect() {
   es.addEventListener("tool", e => {
     try { renderToolStream(JSON.parse(e.data)); } catch (err) {log("err","tool event",err.message);}
   });
+  es.addEventListener("tagging", e => {
+    try {
+      const event=JSON.parse(e.data).event;
+      if(event?.type==="object_created") {
+        log("ok","object tagged",(event.name || "Object")+" · "+event.id);
+        if(objectMapSelected && !document.hidden)objectMap?.refresh();
+      } else if(event?.type==="automatic_tagging") {
+        taggingEnabled=event.enabled===true;
+        if($("#tagging-toggle"))$("#tagging-toggle").textContent="Automatic tagging: "+(taggingEnabled?"On":"Off");
+      }
+    } catch(err){log("err","tagging event",err.message);}
+  });
   es.addEventListener("stack",e=>{try{applyStack(JSON.parse(e.data));}catch(err){log("err","stack event",err.message);}});
   es.addEventListener("stack_log",e=>{try{appendStackLog(JSON.parse(e.data).text);}catch(err){log("err","stack log",err.message);}});
   es.addEventListener("open", () => { setBadge("b-conn", "ok", "connected"); $("#f-events").textContent = "live"; });
+  es.addEventListener("open", () => objectMap?.refresh());
+  es.addEventListener("open", () => refreshTaskSequence());
   es.addEventListener("error", () => { setBadge("b-conn", "bad", "disconnected"); $("#f-events").textContent="reconnecting"; });
 }
 
@@ -1075,6 +1175,17 @@ async function boot() {
   $("#console-clear").onclick = () => {$("#stack-log").textContent="";};
   $("#camera-switch").onclick = () => swapViews(true);
   $("#world-switch").onclick = () => swapViews(false);
+  $("#object-map-toggle").onclick = () => selectObjectMap(!objectMapSelected);
+  $("#task-sequence-refresh").onclick=refreshTaskSequence;
+  for(const action of ["pause","resume","retry","cancel"]) {
+    $("#task-sequence-"+action).onclick=()=>taskSequenceAction(action);
+  }
+  document.addEventListener("visibilitychange",()=>{
+    if(document.hidden)clearTimeout(taskSequenceTimer);else refreshTaskSequence();
+  });
+  document.addEventListener("visibilitychange",()=>objectMap?.setVisible(objectMapSelected && !document.hidden));
+  window.addEventListener("pagehide",()=>{objectMap?.dispose();objectMap=null;});
+  window.addEventListener("pageshow",event=>{if(event.persisted && objectMapSelected)selectObjectMap(true);});
   $("#keyboard-enable").onclick = enableKeyboard;
   $("#speaker-toggle").onclick = toggleSpeaker;
   $("#visual-arrival-toggle").onclick = async () => {
@@ -1184,7 +1295,7 @@ async function boot() {
   $("#stack-stop").onclick = () => lifecycle("stop");
   $("#stack-stop-without-save").onclick = () => lifecycle("stop",false);
   $("#alignment-view").onclick=showAlignmentView;
-  $("#alignment-world-view").onclick=()=>setupRerun(CONFIG.rerun_url);
+  $("#alignment-world-view").onclick=()=>{selectObjectMap(false);setupRerun(CONFIG.rerun_url);};
   $("#diagnostics").onclick = async () => {try{$("#diagnostic-output").textContent=pretty(await api("/api/diagnostics"));}catch(e){addSystem(e.message);}};
   $("#input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
