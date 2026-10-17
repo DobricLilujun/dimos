@@ -179,18 +179,111 @@ class DemoExplorer(WavefrontFrontierExplorer):
                     and np.all(grid.grid[rows, cols] != CostValues.UNKNOWN)
                 )
 
-    def _start_is_free(self) -> bool:
+    def _log_invalid_start(
+        self,
+        pose: Vector3,
+        raw: OccupancyGrid,
+        inflated: OccupancyGrid,
+        routing: OccupancyGrid,
+        *,
+        stage: str,
+    ) -> None:
+        def sample(grid: OccupancyGrid) -> dict[str, Any]:
+            cell = grid.world_to_grid(pose)
+            x, y = math.floor(cell.x), math.floor(cell.y)
+            inside = 0 <= x < grid.width and 0 <= y < grid.height
+            value = int(grid.grid[y, x]) if inside else None
+            state = (
+                "outside_map"
+                if value is None
+                else "unknown"
+                if value == CostValues.UNKNOWN
+                else "free"
+                if value == CostValues.FREE
+                else "occupied"
+                if value >= CostValues.OCCUPIED
+                else "non_free_cost"
+            )
+            return {"cell": [x, y], "value": value, "state": state}
+
+        now = time.monotonic()
+        raw_start, inflated_start, routing_start = sample(raw), sample(inflated), sample(routing)
+        causes = []
+        if raw_start["state"] != "free":
+            causes.append(f"raw_start_{raw_start['state']}")
+        if inflated_start["state"] != "free" and raw_start["state"] == "free":
+            causes.append("obstacle_inflation")
+        if routing_start["state"] != "free" and inflated_start["state"] == "free":
+            causes.append("failed_goal_exclusion")
+        odom = self.latest_odometry
+        if odom is not None and odom.frame_id != raw.frame_id:
+            causes.append("frame_mismatch")
+        failed_zones = []
+        for previous, expiry in self._failed:
+            cell = routing.world_to_grid(previous)
+            x, y = routing_start["cell"]
+            covers_start = (x - cell.x) ** 2 + (y - cell.y) ** 2 < (0.75 / routing.resolution) ** 2
+            if expiry > now and covers_start:
+                failed_zones.append(
+                    {
+                        "goal_xyz": [previous.x, previous.y, previous.z],
+                        "distance_m": math.hypot(previous.x - pose.x, previous.y - pose.y),
+                        "remaining_s": round(expiry - now, 3),
+                    }
+                )
+        x, y = raw_start["cell"]
+        patch = (
+            raw.grid[
+                max(0, y - 2) : min(raw.height, y + 3), max(0, x - 2) : min(raw.width, x + 3)
+            ].tolist()
+            if raw_start["state"] != "outside_map"
+            else []
+        )
+        logger.warning(
+            "Exploration start cell invalid",
+            stage=stage,
+            causes=causes,
+            robot_xyz=[pose.x, pose.y, pose.z],
+            odom_frame=odom.frame_id if odom is not None else None,
+            map_frame=raw.frame_id,
+            map_origin_xyz=[
+                raw.origin.position.x,
+                raw.origin.position.y,
+                raw.origin.position.z,
+            ],
+            map_origin_yaw=float(raw.origin.orientation.euler[2]),
+            map_size_cells=[raw.width, raw.height],
+            resolution_m=raw.resolution,
+            inflation_radius_m=self.config.frontier_inflation,
+            raw_start=raw_start,
+            inflated_start=inflated_start,
+            routing_start=routing_start,
+            raw_neighborhood=patch,
+            failed_exclusion_radius_m=0.75,
+            covering_failed_zones=failed_zones,
+            map_revision=self._costmap_revision,
+            costmap_age_s=round(now - self._costmap_received, 3)
+            if self._costmap_received
+            else None,
+            odom_age_s=round(now - self._odom_received, 3) if self._odom_received else None,
+            lidar_age_s=round(now - self._lidar_received, 3) if self._lidar_received else None,
+        )
+
+    def _start_is_free(self, *, log_failure: bool = True) -> bool:
         grid, pose = self.latest_costmap, self.latest_odometry
         if grid is None or pose is None:
             return False
         inflated = simple_inflate(grid, self.config.frontier_inflation)
         cell = inflated.world_to_grid(pose.position)
         x, y = math.floor(cell.x), math.floor(cell.y)
-        return (
+        valid = (
             0 <= x < inflated.width
             and 0 <= y < inflated.height
             and inflated.grid[y, x] == CostValues.FREE
         )
+        if not valid and log_failure:
+            self._log_invalid_start(pose.position, grid, inflated, inflated, stage="start_check")
+        return valid
 
     def _scan_blocker(self) -> str | None:
         if not self._map_session.navigation_ready():
@@ -224,7 +317,7 @@ class DemoExplorer(WavefrontFrontierExplorer):
         self._status("initializing", "Robot start cell invalid; collecting startup map")
         if self.stop_event.wait(1) or self.stop_event.is_set():
             return False
-        if self._start_is_free():
+        if self._start_is_free(log_failure=False):
             return True
         self._navigation.cancel_goal()
         deadline = time.monotonic() + 8
@@ -239,7 +332,7 @@ class DemoExplorer(WavefrontFrontierExplorer):
                 if blocker:
                     self._status("blocked", blocker)
                     return False
-                if self._start_is_free():
+                if self._start_is_free(log_failure=False):
                     return True
                 if time.monotonic() >= deadline:
                     self._status(
@@ -314,7 +407,10 @@ class DemoExplorer(WavefrontFrontierExplorer):
             and time.monotonic() - self._lidar_received <= self.config.sensor_timeout
         )
 
-    def select_goal(self, pose: Vector3, grid: OccupancyGrid) -> Vector3 | None:
+    def select_goal(
+        self, pose: Vector3, grid: OccupancyGrid, *, raw_grid: OccupancyGrid | None = None
+    ) -> Vector3 | None:
+        inflated = grid
         with self._guard:
             if self._startup_origin is None:
                 self._startup_origin = Vector3(pose.x, pose.y, pose.z)
@@ -331,6 +427,13 @@ class DemoExplorer(WavefrontFrontierExplorer):
                 grid.grid[blocked] = CostValues.OCCUPIED
         distances = reachable_distances(grid, pose)
         if not np.any(np.isfinite(distances)):
+            self._log_invalid_start(
+                pose,
+                raw_grid if raw_grid is not None else inflated,
+                inflated,
+                grid,
+                stage="goal_selection",
+            )
             self._selection_reason = (
                 "Robot start cell is outside the map or not free after inflation"
             )
@@ -753,7 +856,9 @@ class DemoExplorer(WavefrontFrontierExplorer):
                 assert grid is not None and pose is not None
                 self._status("selecting", "Finding reachable unvisited frontiers")
                 goal = self.select_goal(
-                    pose.position, simple_inflate(grid, self.config.frontier_inflation)
+                    pose.position,
+                    simple_inflate(grid, self.config.frontier_inflation),
+                    raw_grid=grid,
                 )
                 if self.stop_event.is_set():
                     break

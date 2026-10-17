@@ -76,6 +76,104 @@ def test_dijkstra_never_cuts_blocked_diagonal_corner():
     assert np.isinf(distances[1, 1])
 
 
+@pytest.mark.parametrize(
+    ("position", "value", "cause", "state"),
+    [
+        ([1, 1, 0], -1, "raw_start_unknown", "unknown"),
+        ([1, 1, 0], 100, "raw_start_occupied", "occupied"),
+        ([1, 1, 0], 50, "raw_start_non_free_cost", "non_free_cost"),
+        ([-1, 1, 0], 0, "raw_start_outside_map", "outside_map"),
+    ],
+)
+def test_invalid_start_logs_raw_cell_and_map_context(
+    explorer, mocker, position, value, cause, state
+):
+    values = np.zeros((5, 5), dtype=np.int8)
+    values[1, 1] = value
+    explorer._on_costmap(grid(values, resolution=1))
+    explorer._on_odometry(PoseStamped(position=position, frame_id="world"))
+    warning = mocker.patch.object(demo_explorer.logger, "warning")
+
+    assert not explorer._start_is_free()
+
+    warning.assert_called_once()
+    assert warning.call_args.args == ("Exploration start cell invalid",)
+    details = warning.call_args.kwargs
+    assert details["causes"] == [cause]
+    assert details["stage"] == "start_check"
+    assert details["raw_start"] == {
+        "cell": [position[0], position[1]],
+        "value": None if state == "outside_map" else value,
+        "state": state,
+    }
+    assert details["robot_xyz"] == position
+    assert details["map_size_cells"] == [5, 5]
+    assert details["map_origin_xyz"] == [0, 0, 0]
+    assert details["map_frame"] == details["odom_frame"] == "world"
+    assert details["covering_failed_zones"] == []
+    assert details["raw_neighborhood"] == (
+        [] if state == "outside_map" else values[:4, :4].tolist()
+    )
+    assert details["costmap_age_s"] >= 0
+
+
+def test_goal_selection_logs_inflation_separately_from_raw_occupancy(explorer, mocker):
+    values = np.zeros((7, 7), dtype=np.int8)
+    values[3, 4] = 100
+    costmap = grid(values, resolution=0.1)
+    warning = mocker.patch.object(demo_explorer.logger, "warning")
+    pose = Vector3(0.35, 0.35, 0)
+    explorer._on_odometry(PoseStamped(position=pose, frame_id="world"))
+
+    assert explorer.select_goal(pose, simple_inflate(costmap, 0.1), raw_grid=costmap) is None
+
+    details = warning.call_args.kwargs
+    assert details["causes"] == ["obstacle_inflation"]
+    assert details["raw_start"]["value"] == 0
+    assert details["inflated_start"]["value"] == 100
+    assert details["inflation_radius_m"] == 0.1
+    assert details["stage"] == "goal_selection"
+
+
+def test_goal_selection_logs_covering_failed_zone_and_ignores_expired_zones(explorer, mocker):
+    mocker.patch.object(demo_explorer.time, "monotonic", return_value=100)
+    warning = mocker.patch.object(demo_explorer.logger, "warning")
+    costmap = grid(np.zeros((7, 7), dtype=np.int8), resolution=0.1)
+    pose = Vector3(0.35, 0.35, 0)
+    explorer._on_odometry(PoseStamped(position=pose, frame_id="world"))
+    explorer._failed = [(Vector3(0.4, 0.3, 0), 125), (pose, 99)]
+
+    assert explorer.select_goal(pose, costmap, raw_grid=costmap) is None
+
+    details = warning.call_args.kwargs
+    assert details["causes"] == ["failed_goal_exclusion"]
+    assert details["raw_start"]["value"] == details["inflated_start"]["value"] == 0
+    assert details["routing_start"]["value"] == 100
+    assert details["failed_exclusion_radius_m"] == 0.75
+    assert len(details["covering_failed_zones"]) == 1
+    zone = details["covering_failed_zones"][0]
+    assert zone["goal_xyz"] == [0.4, 0.3, 0]
+    assert zone["remaining_s"] == 25
+    assert zone["distance_m"] == pytest.approx(np.hypot(0.05, 0.05))
+
+
+def test_invalid_start_logs_frame_mismatch_without_claiming_localization_drift(explorer, mocker):
+    explorer._on_costmap(grid([[-1]]))
+    explorer._on_odometry(PoseStamped(position=[0, 0, 0], frame_id="odom"))
+    warning = mocker.patch.object(demo_explorer.logger, "warning")
+
+    assert not explorer._start_is_free()
+
+    assert warning.call_args.kwargs["causes"] == ["raw_start_unknown", "frame_mismatch"]
+
+
+def test_free_start_does_not_emit_invalid_start_diagnostics(explorer, mocker):
+    warning = mocker.patch.object(demo_explorer.logger, "warning")
+    assert explorer._start_is_free()
+    explorer.select_goal(Vector3(1, 1, 0), explorer.latest_costmap)
+    warning.assert_not_called()
+
+
 @pytest.mark.parametrize("strategy", ["frontier", "efficient"])
 def test_frontier_goal_is_reachable_free_space_not_unknown_centroid(explorer, strategy):
     explorer.options = ExploreOptions(strategy=strategy)
@@ -164,7 +262,9 @@ def test_demo_ten_centimetre_inflation_keeps_narrow_corridor_reachable(explorer)
 def test_exploration_loop_uses_demo_inflation_not_original_wavefront_radius(explorer, mocker):
     inflate = mocker.spy(demo_explorer, "simple_inflate")
     mocker.patch.object(
-        explorer, "select_goal", side_effect=lambda pose, costmap: explorer.stop_event.set()
+        explorer,
+        "select_goal",
+        side_effect=lambda pose, costmap, **kwargs: explorer.stop_event.set(),
     )
     explorer._run_exploration_loop()
     assert inflate.call_count == 2
@@ -257,7 +357,7 @@ def test_stale_sensor_cancels_active_navigation(explorer, mocker):
 
 
 def test_stop_during_selection_cannot_launch_late_goal(explorer, mocker):
-    def choose(pose, costmap):
+    def choose(pose, costmap, **kwargs):
         explorer.stop_event.set()
         return Vector3(4, 1, 0)
 
@@ -282,7 +382,7 @@ def test_paused_map_fusion_keeps_static_map_usable_with_fresh_odometry_and_lidar
 def test_failure_retries_another_goal_without_recording_success(explorer, mocker):
     goal = Vector3(4, 1, 0)
 
-    def choose(pose, costmap):
+    def choose(pose, costmap, **kwargs):
         if explorer._failed:
             explorer.stop_event.set()
             return None
@@ -490,6 +590,7 @@ def test_startup_sensor_loss_stops_existing_rotation(startup, mocker):
 
 def test_startup_timeout_is_blocked_not_completed_and_never_translates(startup, mocker):
     explorer, clock = startup
+    warning = mocker.patch.object(demo_explorer.logger, "warning")
 
     def advance(duration):
         if duration == 0.1:
@@ -502,6 +603,8 @@ def test_startup_timeout_is_blocked_not_completed_and_never_translates(startup, 
     mocker.patch.object(explorer.stop_event, "wait", side_effect=advance)
     explorer._run_exploration_loop()
     assert clock.return_value == 108
+    warning.assert_called_once()
+    assert warning.call_args.kwargs["stage"] == "start_check"
     assert explorer.exploration_status()["phase"] == "blocked"
     assert "bounded startup scan" in explorer.exploration_status()["reason"]
     commands = [call.args[0] for call in explorer.nav_cmd_vel.publish.call_args_list]

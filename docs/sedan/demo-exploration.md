@@ -95,6 +95,38 @@ reasons distinguish non-free start cell, reachable frontier count, post-exclusio
 count, too-small frontier clusters, un-extendable short goals, and cooled-goal
 count.
 
+### Diagnosing an invalid start cell
+
+The backend emits a structured **`Exploration start cell invalid`** warning at
+startup checks and when goal selection cannot reach even its start cell.
+Use `dimos log -f --json` to inspect its fields. Existing waiting/blocked status
+messages and navigation behavior are unchanged.
+
+`causes` distinguishes observed conditions:
+
+- `raw_start_unknown`: the original map has no free-space observation at the robot.
+- `raw_start_occupied` / `raw_start_non_free_cost`: the original cell is already
+  occupied or has another nonzero cost.
+- `raw_start_outside_map`: the current pose maps outside the grid.
+- `obstacle_inflation`: the original cell is free but inflation makes it non-free.
+- `failed_goal_exclusion`: the inflated cell is free but a temporary failed-goal
+  exclusion covers it.
+- `frame_mismatch`: odometry and map frame IDs differ.
+
+Each warning includes `stage`, `robot_xyz`, frame IDs, map origin/yaw, dimensions,
+resolution, inflation radius, map revision, and sensor receive ages. Compare
+`raw_start`, `inflated_start`, and `routing_start` (cell indices, values, states)
+to see where the start becomes invalid. `raw_neighborhood` is a clipped 5-by-5
+patch in row/y then column/x order (empty outside the map). `covering_failed_zones`
+lists overlapping live exclusions, their target positions, distances and remaining
+cooldown seconds.
+
+These are map-based observations, not proof of a physical cause: unknown may be
+a lidar blind spot; occupied points may be real obstacles or artifacts; an
+out-of-map cell may reflect localization, alignment or map extent. Use the logged
+coordinates and map view to distinguish them. High-rate rotation scan checks do
+not repeat this warning every 0.1 seconds.
+
 ## Stopping and recovery
 
 - If there is no ≥ 15 cm translation progress within 15 s, the current goal is
