@@ -335,8 +335,23 @@ dialog p, .note { color:var(--muted); line-height:1.5; }
 .object-map-list button[aria-disabled="true"] { color:var(--muted); cursor:help; }
 .object-map-list button:focus-visible { outline:2px solid var(--accent); }
 @media(max-width:1100px) { main { grid-template-columns:260px minmax(0,1fr) 320px; } .title { display:none; } }
-@media(max-width:800px) { .app { height:auto; min-height:100vh; grid-template-rows:auto 1fr auto; } header { flex-wrap:wrap; padding:10px; gap:8px; } main { grid-template-columns:1fr; } aside.deck { max-height:45vh; } center.viz { height:50vh; } aside.chat { height:65vh; } footer { flex-wrap:wrap; padding:10px; gap:8px; } .form-grid { grid-template-columns:1fr; } }
-@media(max-width:800px) { center.viz:has(#object-map:not([hidden])) { min-height:520px; } }
+@media(max-width:800px) {
+  .app { height:auto; min-height:100vh; grid-template-rows:auto 1fr auto; }
+  header { flex-wrap:wrap; padding:10px; gap:8px; }
+  main { grid-template-columns:1fr; }
+  aside.deck { max-height:42vh; }
+  center.viz { height:auto; min-height:0; }
+  center.viz:has(#object-map:not([hidden])) { min-height:0; }
+  .viewer { min-height:280px; }
+  /* The 3D object map / progress view stays inside the viewer and is compact on
+     a phone, so it never takes over the whole screen. */
+  #object-map { position:static; inset:auto; height:62%; min-height:200px; }
+  .backend-console { height:170px; }
+  .task-sequence { max-height:150px; }
+  aside.chat { height:auto; max-height:78vh; }
+  footer { flex-wrap:wrap; padding:10px; gap:8px; }
+  .form-grid { grid-template-columns:1fr; }
+}
 
 /* scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }

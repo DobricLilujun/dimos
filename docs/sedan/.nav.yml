@@ -19,3 +19,5 @@ nav:
       - testing.md
       - cli.md
       - logging.md
+  - Updates:
+      - updates.md

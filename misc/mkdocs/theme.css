@@ -374,6 +374,13 @@ nav.md-nav--primary > label.md-nav__title {
   border-top: 1px solid var(--dim-hairline);
 }
 
+/* Hide the theme attribution ("Made with Material for MkDocs") and the
+   copyright block at the bottom of every page. */
+.md-footer-meta,
+.md-copyright {
+  display: none !important;
+}
+
 /* ------------------------------------------------------- interactive chrome
  *
  * The shape language for anything interactive: a pill for anything you click,

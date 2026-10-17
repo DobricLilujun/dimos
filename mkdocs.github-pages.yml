@@ -8,7 +8,6 @@ site_url: https://dobriclilujun.github.io/dimos
 repo_url: https://github.com/DobricLilujun/dimos
 repo_name: DobricLilujun/dimos
 edit_uri: edit/learning-branch/docs/
-copyright: Dimensional Inc.
 
 docs_dir: docs
 site_dir: site
@@ -39,6 +38,11 @@ exclude_docs: |
 # mkdocs serve watches docs/ and the config; the theme lives outside both.
 watch:
   - misc/mkdocs
+
+# The changelog hook only adds a generated "Updates" page (from the git log);
+# it does not touch docs/index.md or rewrite links, so it is safe to enable.
+hooks:
+  - misc/mkdocs/changelog.py
 
 theme:
   name: material
