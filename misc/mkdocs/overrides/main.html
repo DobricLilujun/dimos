@@ -70,6 +70,15 @@
   display: none !important;
 }
 
+/* The right-side section/progress indicator is fixed at the middle-right and
+   overlaps body text on a phone. Hide it on small screens so it never covers
+   content; the thin top reading-progress bar stays (it is only 3px). */
+@media (max-width: 800px) {
+  .dimos-section-indicator {
+    display: none !important;
+  }
+}
+
 /* Subtle pulse animation for progress bar when at 100% */
 .dimos-progress-bar.complete {
   animation: dimos-pulse 1.5s ease-in-out infinite;
