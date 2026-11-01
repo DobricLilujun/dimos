@@ -33,6 +33,7 @@ from dimos.simulation.mujoco.constants import (
     DEPTH_CAMERA_FOV,
     LIDAR_FPS,
     LIDAR_RESOLUTION,
+    MAX_RANGE,
     VIDEO_FPS,
     VIDEO_HEIGHT,
     VIDEO_WIDTH,
@@ -109,7 +110,12 @@ def _run_simulation(config: MujocoConfig, shm: ShmReader, robot_model: str | Non
         robot_name = "unitree_go1"
 
     controller = MockController(shm)
-    model, data = load_model(controller, robot=robot_name, scene_xml=load_scene_xml(config))
+    model, data = load_model(
+        controller,
+        robot=robot_name,
+        scene_xml=load_scene_xml(config),
+        second_person=config.mujoco_second_person,
+    )
 
     if model is None or data is None:
         raise ValueError("Failed to load MuJoCo model: model or data is None")
@@ -131,7 +137,11 @@ def _run_simulation(config: MujocoConfig, shm: ShmReader, robot_model: str | Non
     camera_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "head_camera")
     lidar_camera_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "lidar_front_camera")
 
-    person_position_controller = PersonPositionController(model)
+    person_position_controllers = [PersonPositionController(model)]
+    if config.mujoco_second_person:
+        person_position_controllers.append(
+            PersonPositionController(model, body_name="person2", topic="/person2_pose")
+        )
 
     if config.shadows == "off" or (
         config.shadows == "auto" and _shadow_render_is_slow(model, data)
@@ -173,6 +183,7 @@ def _run_simulation(config: MujocoConfig, shm: ShmReader, robot_model: str | Non
         last_lidar_time = 0.0
         video_interval = 1.0 / VIDEO_FPS
         lidar_interval = 1.0 / LIDAR_FPS
+        lidar_max_range = config.mujoco_lidar_max_range or MAX_RANGE
 
         m_viewer.cam.lookat = config.camera_position[0:3]
         m_viewer.cam.distance = config.camera_position[3]
@@ -200,7 +211,8 @@ def _run_simulation(config: MujocoConfig, shm: ShmReader, robot_model: str | Non
             for _ in range(config.steps_per_frame):
                 mujoco.mj_step(model, data)
 
-            person_position_controller.tick(data)
+            for person_position_controller in person_position_controllers:
+                person_position_controller.tick(data)
 
             m_viewer.sync()
 
@@ -258,7 +270,11 @@ def _run_simulation(config: MujocoConfig, shm: ShmReader, robot_model: str | Non
 
                 for depth_image, camera_pos, camera_mat in cameras_data:
                     points = depth_image_to_point_cloud(
-                        depth_image, camera_pos, camera_mat, fov_degrees=DEPTH_CAMERA_FOV
+                        depth_image,
+                        camera_pos,
+                        camera_mat,
+                        fov_degrees=DEPTH_CAMERA_FOV,
+                        max_range=lidar_max_range,
                     )
                     if points.size > 0:
                         all_points.append(points)
@@ -274,7 +290,8 @@ def _run_simulation(config: MujocoConfig, shm: ShmReader, robot_model: str | Non
             if time_until_next_step > 0:
                 time.sleep(time_until_next_step)
 
-        person_position_controller.stop()
+        for person_position_controller in person_position_controllers:
+            person_position_controller.stop()
 
 
 if __name__ == "__main__":

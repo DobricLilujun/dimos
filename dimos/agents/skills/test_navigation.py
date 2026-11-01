@@ -12,23 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import threading
+import json
 from typing import Any
 
-from dimos_lcm.std_msgs import Bool
 from langchain_core.messages import HumanMessage
+import numpy as np
 import pytest
 
 from dimos.agents.skills.navigation import NavigationSkillContainer
 from dimos.core.core import rpc
 from dimos.core.module import Module
 from dimos.core.stream import Out
+from dimos.models.vl.openai import OpenAIVlModel
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
-from dimos.msgs.geometry_msgs.Vector3 import make_vector3
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.navigation.base import NavigationState
-from dimos.navigation.go2.replanning_a_star.spec import NavigationInterfaceSpec
-from dimos.perception.experimental.spatial_memory_spec import SpatialMemorySpec
 from dimos.types.robot_location import RobotLocation
 
 
@@ -41,6 +39,20 @@ class FakeOdom(Module):
 
 
 class StubSpatialMemory(Module):
+    @rpc
+    def capture_object_observation(self) -> tuple[Image, dict[str, Any]]:
+        raise RuntimeError("No test observation")
+
+    @rpc
+    def tag_object_from_observation(
+        self, name: str, bbox: list[int], image: Image, context: dict[str, Any]
+    ) -> str:
+        raise RuntimeError("No test observation")
+
+    @rpc
+    def get_robot_locations(self) -> list[RobotLocation]:
+        return []
+
     @rpc
     def tag_location(self, robot_location: RobotLocation) -> bool:
         return True
@@ -167,185 +179,241 @@ def test_go_to_semantic_location(agent_setup) -> None:
     assert "success" in history[-1].content.lower()
 
 
-@pytest.fixture
-def container(mocker):
-    """A started container on a mocked planner, spatial memory and tool-stream
-    helpers, with a tagged location 'bed' 1 m from the robot."""
-    module = NavigationSkillContainer()
+@pytest.mark.parametrize("accepted", [False, True])
+def test_navigation_reports_rejected_goals(mocker, accepted) -> None:
+    mocker.patch("dimos.models.vl.qwen.QwenVlModel")
+    container = NavigationSkillContainer()
     try:
-        module._skill_started = True
-        mocker.patch.object(
-            module, "_navigation", mocker.Mock(spec=NavigationInterfaceSpec), create=True
-        )
-        mocker.patch.object(
-            module, "_spatial_memory", mocker.Mock(spec=SpatialMemorySpec), create=True
-        )
-        module._spatial_memory.query_tagged_location.return_value = RobotLocation(
-            name="bed", position=(1.0, 2.0, 0.0), rotation=(0.0, 0.0, 0.0)
-        )
-        module._latest_odom = PoseStamped(position=make_vector3(0.0, 2.0, 0.0))
-        for name in ("start_tool", "tool_update", "stop_tool"):
-            mocker.patch.object(module, name)
-        yield module
+        navigator = mocker.patch.object(container, "_navigation", create=True)
+        navigator.set_goal.return_value = accepted
+        result = container._navigate_to(PoseStamped(position=[1, 0, 0]), "Found office")
+        assert ("Started navigating" in result) == accepted
+        assert ("Navigation refused" in result) == (not accepted)
     finally:
-        module.stop()
+        container.dispose()
 
 
-def test_navigate_with_text_keeps_the_tool_open_while_the_goal_is_under_way(container) -> None:
-    message = container.navigate_with_text("bed")
+@pytest.fixture
+def memory_skills(mocker):
+    mocker.patch("dimos.models.vl.qwen.QwenVlModel")
+    container = NavigationSkillContainer()
+    mocker.patch.object(container, "_skill_started", True)
+    memory = mocker.patch.object(container, "_spatial_memory", create=True)
+    navigator = mocker.patch.object(container, "_navigation", create=True)
+    navigator.set_goal.return_value = True
+    memory.get_robot_locations.return_value = [
+        RobotLocation(
+            name="fire extinguisher",
+            position=(1, 2, 1.2),
+            rotation=(0, 0, 0),
+            location_id="ext-1",
+            metadata={"kind": "object", "description": "Near door"},
+        ),
+        RobotLocation(
+            name="Fire Extinguisher",
+            position=(5, 6, 1.2),
+            rotation=(0, 0, 0),
+            location_id="ext-2",
+        ),
+        RobotLocation(name="office", position=(0, 0, 0), rotation=(0, 0, 0)),
+    ]
+    yield container, memory, navigator
+    container.dispose()
 
-    assert "A tool update reports when the robot stops" in message
-    goal = container._navigation.set_goal.call_args.args[0]
-    assert (goal.position.x, goal.position.y) == (1.0, 2.0)
-    container.start_tool.assert_called_once_with("navigate_with_text")
-    container.stop_tool.assert_not_called()
+
+def test_starting_location_uses_first_aligned_world_pose(memory_skills):
+    container, _, navigator = memory_skills
+    with pytest.raises(RuntimeError, match="aligned world odometry"):
+        container.query_starting_location()
+    container._on_odom(PoseStamped(frame_id="session", position=[9, 9, 0]))
+    with pytest.raises(RuntimeError, match="aligned world odometry"):
+        container.return_to_starting_location()
+    container._on_odom(PoseStamped(frame_id="world", position=[2, 3, 0], ts=42))
+    container._on_odom(PoseStamped(frame_id="world", position=[8, 7, 0]))
+    assert json.loads(container.query_starting_location())["position"] == [2, 3, 0]
+    assert "Started navigating" in container.return_to_starting_location()
+    assert navigator.set_goal.call_args.args[0].position.x == 2
+    navigator.set_goal.return_value = False
+    assert "Navigation refused" in container.return_to_starting_location()
 
 
-def test_goal_reached_reports_where_the_robot_stopped_and_closes_the_tool(container) -> None:
-    container.navigate_with_text("bed")
+def test_memory_inventory_lists_all_same_name_tags_without_movement(memory_skills):
+    container, _, navigator = memory_skills
+    result = json.loads(container.query_memory_tags("fire extinguisher"))
+    assert result["matching_tag_count"] == 2
+    assert result["total_stored_tags"] == 3
+    assert [tag["id"] for tag in result["tags"]] == ["ext-1", "ext-2"]
+    assert result["tags"][0]["position"] == [1, 2, 1.2]
+    assert result["tags"][0]["kind"] == "object"
+    assert result["tags"][0]["description"] == "Near door"
+    assert result["tags"][1]["kind"] == "unknown"
+    assert json.loads(container.query_memory_tags())["matching_tag_count"] == 3
+    assert json.loads(container.query_memory_tags("missing"))["matching_tag_count"] == 0
+    navigator.set_goal.assert_not_called()
 
-    container._on_goal_reached(Bool(False))
 
-    container.tool_update.assert_called_once_with(
-        "navigate_with_text",
-        "Navigation to 'bed' stopped short of the target: robot at (0.00, 2.00), 1.00 m from it.",
+@pytest.mark.parametrize("accepted", [True, False])
+def test_memory_tag_navigation_uses_selected_id_and_respects_gate(memory_skills, accepted):
+    container, _, navigator = memory_skills
+    container._on_odom(PoseStamped(position=[0, 0, 0.3], frame_id="world"))
+    navigator.set_goal.return_value = accepted
+    result = container.navigate_to_memory_tag("ext-2")
+    goal = navigator.set_goal.call_args.args[0]
+    assert goal.position.to_numpy().tolist() == [5, 6, 0.3]
+    assert goal.frame_id == "world"
+    assert ("Started navigating" in result) == accepted
+    assert ("Navigation refused" in result) != accepted
+
+
+def test_memory_tag_navigation_rejects_unknown_id(memory_skills):
+    container, _, navigator = memory_skills
+    with pytest.raises(ValueError, match="No saved tag"):
+        container.navigate_to_memory_tag("missing")
+    navigator.set_goal.assert_not_called()
+
+
+@pytest.mark.parametrize("selection", ["id", "name"])
+def test_tag_navigation_passes_stable_id_to_persistent_planner(memory_skills, mocker, selection):
+    container, memory, navigator = memory_skills
+    tagged = mocker.patch.object(container, "_tagged_navigation")
+    tagged.set_tagged_goal.return_value = True
+    if selection == "id":
+        result = container.navigate_to_memory_tag("ext-1")
+    else:
+        memory.query_tagged_location.return_value = memory.get_robot_locations.return_value[0]
+        result = container._navigate_by_tagged_location("fire extinguisher")
+    assert "Started navigating" in result
+    assert tagged.set_tagged_goal.call_args.args[0] == "ext-1"
+    navigator.set_goal.assert_not_called()
+
+
+def test_nearby_tool_uses_new_interface_without_changing_precise_tool(memory_skills, mocker):
+    container, _, navigator = memory_skills
+    nearby = mocker.patch.object(container, "_nearby_navigation")
+    nearby.set_nearby_tagged_goal.return_value = True
+    assert "configured nearby distance" in container.navigate_near_memory_tag("ext-1")
+    assert nearby.set_nearby_tagged_goal.call_args.args[0] == "ext-1"
+    navigator.set_goal.assert_not_called()
+    container.navigate_to_memory_tag("ext-1")
+    navigator.set_goal.assert_called_once()
+
+
+def test_nearby_tool_fails_explicitly_without_persistent_planner(memory_skills):
+    container, _, navigator = memory_skills
+    with pytest.raises(RuntimeError, match="persistent Go2 planner"):
+        container.navigate_near_memory_tag("ext-1")
+    navigator.set_goal.assert_not_called()
+
+
+def test_sequence_navigation_uses_correlated_planner_rpc_not_legacy_start(memory_skills, mocker):
+    container, _, navigator = memory_skills
+    nearby = mocker.patch.object(container, "_nearby_navigation")
+    tracked = mocker.patch.object(container, "_sequence_navigation")
+    tracked.start_sequence_navigation.return_value = True
+    result = container.navigate_near_memory_tag(
+        "ext-1", _mcp_context={"sequence_operation_id": "operation-1"}
     )
-    container.stop_tool.assert_called_once_with("navigate_with_text")
+    assert "not confirmation of arrival" in result
+    assert tracked.start_sequence_navigation.call_args.args[:2] == ("operation-1", "ext-1")
+    nearby.set_nearby_tagged_goal.assert_not_called()
+    navigator.set_goal.assert_not_called()
 
 
-def test_arrival_is_reported(container) -> None:
-    container.navigate_with_text("bed")
-    container._latest_odom = PoseStamped(position=make_vector3(1.0, 2.0, 0.0))
+def test_sequence_navigation_without_completion_adapter_never_moves(memory_skills, mocker):
+    container, _, navigator = memory_skills
+    nearby = mocker.patch.object(container, "_nearby_navigation")
+    assert container.sequence_navigation_available() is False
+    with pytest.raises(RuntimeError, match="Correlated navigation completion"):
+        container.navigate_near_memory_tag(
+            "ext-1", _mcp_context={"sequence_operation_id": "operation-1"}
+        )
+    nearby.set_nearby_tagged_goal.assert_not_called()
+    navigator.set_goal.assert_not_called()
 
-    container._on_goal_reached(Bool(True))
 
-    container.tool_update.assert_called_once_with(
-        "navigate_with_text", "Arrived at 'bed': robot at (1.00, 2.00), 0.00 m from it."
+def test_sequence_inventory_returns_authoritative_result_without_changing_legacy_api(memory_skills):
+    container, _, navigator = memory_skills
+    result = container.query_memory_tags_result("fire extinguisher")
+    assert result.success is True
+    assert result.metadata == json.loads(container.query_memory_tags("fire extinguisher"))
+    skills = {info.func_name: info for info in container.get_skills()}
+    assert skills["query_memory_tags_result"].completion == "result"
+    assert skills["navigate_near_memory_tag"].completion == "navigation"
+    assert skills["query_memory_tags"].completion is None
+    navigator.set_goal.assert_not_called()
+
+
+def test_memory_tools_are_exposed_with_typed_mcp_schemas(memory_skills):
+    container, _, _ = memory_skills
+    skills = {entry.func_name: entry for entry in container.get_skills()}
+    query_schema = json.loads(skills["query_memory_tags"].args_schema)
+    navigation_schema = json.loads(skills["navigate_to_memory_tag"].args_schema)
+    nearby_schema = json.loads(skills["navigate_near_memory_tag"].args_schema)
+    assert query_schema["properties"]["query"]["type"] == "string"
+    assert query_schema["properties"]["query"]["default"] == ""
+    assert navigation_schema["required"] == ["location_id"]
+    assert nearby_schema["required"] == ["location_id"]
+    assert nearby_schema["properties"]["location_id"]["type"] == "string"
+    assert skills["query_memory_tags"].uses == ()
+    assert "movement" in skills["navigate_to_memory_tag"].uses
+    assert "movement" in skills["navigate_near_memory_tag"].uses
+
+
+def test_memory_tag_navigation_rejects_invalid_coordinates(memory_skills):
+    container, memory, navigator = memory_skills
+    memory.get_robot_locations.return_value = [
+        RobotLocation("bad", (float("nan"), 0, 0), (0, 0, 0), location_id="bad")
+    ]
+    with pytest.raises(ValueError, match="invalid coordinates"):
+        container.navigate_to_memory_tag("bad")
+    navigator.set_goal.assert_not_called()
+
+
+def test_object_tag_uses_captured_image_geometry_not_robot_pose(memory_skills, mocker):
+    container, memory, navigator = memory_skills
+    image = Image.from_numpy(np.zeros((100, 100, 3), dtype=np.uint8), ts=10.0)
+    context = {"snapshot": "geometry"}
+    memory.capture_object_observation.return_value = image, context
+    detect = mocker.patch(
+        "dimos.agents.skills.navigation.get_object_bbox_from_image",
+        return_value=(40, 40, 60, 60),
     )
-    container.stop_tool.assert_called_once_with("navigate_with_text")
+    memory.tag_object_from_observation.return_value = '{"position":[14,20,1]}'
+    container._on_odom(PoseStamped(position=[100, 200, 0.3]))
+    assert container.tag_object("fire extinguisher") == '{"position":[14,20,1]}'
+    detect.assert_called_once_with(container._vl_model, image, "fire extinguisher")
+    memory.tag_object_from_observation.assert_called_once_with(
+        "fire extinguisher", [40, 40, 60, 60], image, context
+    )
+    memory.tag_location.assert_not_called()
+    navigator.set_goal.assert_not_called()
 
 
-def test_goal_reached_is_reported_once(container) -> None:
-    container.navigate_with_text("bed")
-
-    container._on_goal_reached(Bool(False))
-    container._on_goal_reached(Bool(True))
-
-    container.tool_update.assert_called_once()
-    container.stop_tool.assert_called_once()
-
-
-def test_goal_reached_without_a_navigation_under_way_is_ignored(container) -> None:
-    container._on_goal_reached(Bool(True))
-
-    container.tool_update.assert_not_called()
-    container.stop_tool.assert_not_called()
+def test_object_tag_does_not_save_when_detection_fails(memory_skills, mocker):
+    container, memory, _ = memory_skills
+    memory.capture_object_observation.return_value = (
+        Image.from_numpy(np.zeros((100, 100, 3), dtype=np.uint8)),
+        {},
+    )
+    mocker.patch("dimos.agents.skills.navigation.get_object_bbox_from_image", return_value=None)
+    with pytest.raises(RuntimeError, match="No visible object"):
+        container.tag_object("fire extinguisher")
+    memory.tag_object_from_observation.assert_not_called()
 
 
-def test_a_planner_giving_up_inside_set_goal_still_ends_the_navigation(container) -> None:
-    # The planner finds no path inside set_goal and publishes goal_reached before
-    # the call returns. The frame arrives on the transport's thread.
-    frame = threading.Thread(target=container._on_goal_reached, args=(Bool(False),))
-    container._navigation.set_goal.side_effect = lambda _goal: frame.start()
-
-    container.navigate_with_text("bed")
-    frame.join()
-
-    container.tool_update.assert_called_once()
-    assert "stopped short" in container.tool_update.call_args.args[1]
-    # The call's own stop_tool can run as well, a no-op on the closed stream.
-    container.stop_tool.assert_called_with("navigate_with_text")
-    assert container._active is None
-
-
-def test_a_second_call_while_a_goal_is_under_way_is_refused(container) -> None:
-    container.navigate_with_text("bed")
-
-    message = container.navigate_with_text("kitchen")
-
-    assert message == "Already navigating to 'bed'. Call stop_navigation first."
-    container._navigation.set_goal.assert_called_once()
-    # The open stream is re-stamped with the second call's movement hold.
-    assert container.start_tool.call_count == 2
-    container.stop_tool.assert_not_called()
-
-    container._on_goal_reached(Bool(True))
-
-    assert "Arrived at 'bed'" in container.tool_update.call_args.args[1]
-    container.stop_tool.assert_called_once_with("navigate_with_text")
-
-
-def test_an_exception_during_the_lookup_closes_the_tool(container) -> None:
-    container._spatial_memory.query_tagged_location.side_effect = RuntimeError("rpc failed")
-
-    with pytest.raises(RuntimeError):
-        container.navigate_with_text("bed")
-
-    container.stop_tool.assert_called_once_with("navigate_with_text")
-    # The next call is not refused.
-    container._spatial_memory.query_tagged_location.side_effect = None
-    assert "Started navigating" in container.navigate_with_text("bed")
-
-
-def test_an_exception_from_set_goal_closes_the_tool(container) -> None:
-    container._navigation.set_goal.side_effect = RuntimeError("planner down")
-
-    with pytest.raises(RuntimeError):
-        container.navigate_with_text("bed")
-
-    container.stop_tool.assert_called_once_with("navigate_with_text")
-    assert container._active is None
-    container._on_goal_reached(Bool(False))
-    container.tool_update.assert_not_called()
-
-
-def test_stop_navigation_during_a_lookup_leaves_the_stream_to_that_call(container) -> None:
-    # stop_navigation and navigate_with_text sent in one agent turn run in parallel.
-    # Here the stop lands while the lookup is under way.
-    def stop_meanwhile(_query):
-        container.stop_navigation()
-        return RobotLocation(name="bed", position=(1.0, 2.0, 0.0), rotation=(0.0, 0.0, 0.0))
-
-    container._spatial_memory.query_tagged_location.side_effect = stop_meanwhile
-
-    message = container.navigate_with_text("bed")
-
-    assert "Started navigating" in message
-    container._navigation.cancel_goal.assert_called_once_with()
-    container._navigation.set_goal.assert_called_once()
-    # The stop left the stream to the call, and the goal it sent keeps it open.
-    container.stop_tool.assert_not_called()
-
-    container._on_goal_reached(Bool(True))
-
-    container.stop_tool.assert_called_once_with("navigate_with_text")
-
-
-def test_no_match_releases_the_tool_at_once(container) -> None:
-    container._spatial_memory.query_tagged_location.return_value = None
-    container._spatial_memory.query_by_text.return_value = []
-
-    message = container.navigate_with_text("sofa")
-
-    assert "No matching location" in message
-    container._navigation.set_goal.assert_not_called()
-    container.stop_tool.assert_called_once_with("navigate_with_text")
-
-
-def test_stop_navigation_cancels_the_goal_and_closes_the_tool(container) -> None:
-    container.navigate_with_text("bed")
-
-    assert container.stop_navigation() == "Stopped"
-
-    container._navigation.cancel_goal.assert_called_once_with()
-    container.stop_tool.assert_called_once_with("navigate_with_text")
-    # The cancel's own goal_reached frame is not reported as a stop short of the target.
-    container._on_goal_reached(Bool(False))
-    container.tool_update.assert_not_called()
-
-
-def test_stop_navigation_with_nothing_under_way(container) -> None:
-    assert container.stop_navigation() == "Stopped"
-
-    container._navigation.cancel_goal.assert_called_once_with()
-    container.stop_tool.assert_called_once_with("navigate_with_text")
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8000", "http://127.0.0.1:8000/v1"])
+def test_manual_tagging_uses_configured_openai_compatible_vision_service(url, mocker):
+    client = mocker.patch("dimos.models.vl.openai.OpenAI")
+    container = NavigationSkillContainer(vlm_url=url, vlm_model="local-vision")
+    try:
+        assert isinstance(container._vl_model, OpenAIVlModel)
+        assert container._vl_model.config.base_url == "http://127.0.0.1:8000/v1"
+        assert container._vl_model.config.model_name == "local-vision"
+        container._vl_model.config.api_key = "test-only-key"
+        assert container._vl_model._client is client.return_value
+        client.assert_called_once_with(
+            api_key="test-only-key",
+            base_url="http://127.0.0.1:8000/v1",
+        )
+    finally:
+        container.dispose()

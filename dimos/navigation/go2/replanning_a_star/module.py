@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import os
 from typing import Any
 
@@ -73,28 +74,22 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
     def start(self) -> None:
         super().start()
 
-        self.register_disposable(Disposable(self.odom.subscribe(self._planner.handle_odom)))
+        self.register_disposable(Disposable(self.odom.subscribe(self._handle_odom)))
         self.register_disposable(
             Disposable(
-                self.odometry.subscribe(
-                    lambda msg: self._planner.handle_odom(msg.to_pose_stamped())
-                )
+                self.odometry.subscribe(lambda msg: self._handle_odom(msg.to_pose_stamped()))
             )
         )
         self.register_disposable(
-            Disposable(self.global_costmap.subscribe(self._planner.handle_global_costmap))
+            Disposable(self.global_costmap.subscribe(self._handle_global_costmap))
         )
-        self.register_disposable(
-            Disposable(self.goal_request.subscribe(self._planner.handle_goal_request))
-        )
-        self.register_disposable(
-            Disposable(self.target.subscribe(self._planner.handle_goal_request))
-        )
+        self.register_disposable(Disposable(self.goal_request.subscribe(self._handle_goal_request)))
+        self.register_disposable(Disposable(self.target.subscribe(self._handle_goal_request)))
 
         self.register_disposable(
             Disposable(
                 self.clicked_point.subscribe(
-                    lambda pt: self._planner.handle_goal_request(pt.to_pose_stamped())
+                    lambda pt: self._handle_goal_request(pt.to_pose_stamped())
                 )
             )
         )
@@ -106,9 +101,9 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
 
         self.register_disposable(self._planner.path.subscribe(self.path.publish))
 
-        self.register_disposable(self._planner.cmd_vel.subscribe(self.nav_cmd_vel.publish))
+        self.register_disposable(self._planner.cmd_vel.subscribe(self._publish_navigation_velocity))
 
-        self.register_disposable(self._planner.goal_reached.subscribe(self.goal_reached.publish))
+        self.register_disposable(self._planner.goal_reached.subscribe(self._publish_goal_result))
 
         if "DEBUG_NAVIGATION" in os.environ:
             self.register_disposable(
@@ -128,8 +123,23 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
         if msg.data:
             self.cancel_goal()
 
+    def _handle_global_costmap(self, grid: OccupancyGrid) -> None:
+        self._planner.handle_global_costmap(grid)
+
+    def _publish_navigation_velocity(self, velocity: Twist) -> None:
+        self.nav_cmd_vel.publish(velocity)
+
+    def _handle_odom(self, pose: PoseStamped) -> None:
+        self._planner.handle_odom(pose)
+
+    def _publish_goal_result(self, result: Bool) -> None:
+        self.goal_reached.publish(result)
+
     @rpc
     def set_goal(self, goal: PoseStamped) -> bool:
+        return self._handle_goal_request(goal)
+
+    def _handle_goal_request(self, goal: PoseStamped) -> bool:
         self._planner.handle_goal_request(goal)
         return True
 
@@ -157,3 +167,19 @@ class ReplanningAStarPlanner(Module, NavigationInterface):
     @rpc
     def reset_safe_goal_clearance(self) -> None:
         self._planner.reset_safe_goal_clearance()
+
+    @rpc
+    def planner_width_status(self) -> dict[str, float]:
+        return {"width_m": self._planner.robot_width()}
+
+    @rpc
+    def set_planner_width(self, width_m: float) -> dict[str, float]:
+        if (
+            isinstance(width_m, bool)
+            or not isinstance(width_m, (int, float))
+            or not math.isfinite(width_m)
+            or not 0.1 <= width_m <= 1.0
+        ):
+            raise ValueError("Planner width must be between 0.1 and 1.0 meters")
+        self._planner.set_robot_width(float(width_m))
+        return self.planner_width_status()

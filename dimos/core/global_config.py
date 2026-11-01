@@ -81,6 +81,24 @@ class GlobalConfig(BaseSettings):
     zenoh_domain: str = Field(default="", pattern=r"^[A-Za-z0-9_.-]*$")
     viewer: ViewerBackend = "rerun"
     n_workers: int = 2
+    memory_limit: str = "auto"
+    mujoco_camera_position: str | None = None
+    mujoco_room: str | None = None
+    mujoco_room_from_occupancy: str | None = None
+    mujoco_global_costmap_from_occupancy: str | None = None
+    mujoco_global_map_from_pointcloud: str | None = None
+    mujoco_start_pos: str = "-1.0, 1.0"
+    mujoco_steps_per_frame: int = 7
+    # Add a second, differently dressed person (body "person2", poses on
+    # /person2_pose) to the MuJoCo scene.
+    mujoco_second_person: bool = False
+    # How far the simulated lidar sees, in metres; None keeps the default (3 m). The
+    # people in the person-following demo stand 3-6 m from the robot's start.
+    mujoco_lidar_max_range: float | None = None
+    # Shadow-mapping the office scene costs ~4x per offscreen render on
+    # integrated GPUs (e.g. Apple Silicon), dropping the sim below realtime.
+    # "auto" keeps shadows and turns them off if the sim falls behind realtime.
+    mujoco_shadows: Literal["auto", "on", "off"] = "auto"
     scene_package: str | None = None
     robot_model: str | None = None
     # Robot geometry shared by every navigation and patrol module in a stack;
@@ -101,6 +119,28 @@ class GlobalConfig(BaseSettings):
     relay_url: str | None = None
     """HTTP URL of a relay started elsewhere (e.g. http://localhost:7780); the
     bridge discovers its WebTransport endpoint through /api/info."""
+    relay_ca: str | None = None
+    """PEM CA bundle that signed the relay_url relay's certificate (mkcert, a
+    private CA); replaces the default trust stores. Unset for a relay with a
+    public certificate."""
+    relay_key: str | None = None
+    """Key that identifies this robot to a relay started with --auth-file
+    (bound to its robot id there). Prefer RELAY_KEY in the environment or
+    .env over the --relay-key flag, which shows in the process list."""
+    dimos_cloud_url: str = "https://api.dimensional.org"
+    dimos_api_key: str | None = None
+    typesafe_api_key: str | None = Field(
+        default=None, validation_alias=AliasChoices("TYPESAFE_API_KEY", "typesafe_api_key")
+    )
+    openai_api_key: str | None = Field(
+        default=None, validation_alias=AliasChoices("OPENAI_API_KEY", "openai_api_key")
+    )
+    dimos_upload_codec: str = "lz4"
+    dimos_upload_retries: int = 2
+    dimos_upload_chunk_mb: int | None = None
+    dimos_upload_quiet_s: float = 30.0
+    dimos_http_timeout: float = 60.0
+    dimos_staging_dir: Path | None = None
 
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,

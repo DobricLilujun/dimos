@@ -123,6 +123,8 @@ class LidarRelocalizer:
     def __init__(self, global_map: PointCloud, config: RelocalizeConfig) -> None:
         self.config = config
         self.map = global_map
+        self.last_fitness: float | None = None
+        self.last_rmse: float | None = None
         self._target = self._prepare(global_map)
 
     def _prepare(self, cloud: PointCloud) -> _Prepared:
@@ -212,6 +214,8 @@ class LidarRelocalizer:
     def attempt(self, local_map: PointCloud, world_frame: str, map_frame: str) -> RelocAttempt:
         """The fix if accepted, ready to publish, with the registration it was scored on."""
         result = self.align(local_map)
+        self.last_fitness = float(result.fitness)
+        self.last_rmse = float(result.inlier_rmse)
         logger.info(f"align: fitness={result.fitness:.3f} rmse={result.inlier_rmse:.3f}")
         if result.fitness < self.config.fitness_threshold:
             return RelocAttempt(None, result)

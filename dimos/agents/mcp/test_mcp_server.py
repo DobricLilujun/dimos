@@ -165,7 +165,6 @@ def test_mcp_module_handles_errors() -> None:
     assert response is not None
     assert "isError" not in response["result"]
     assert response["result"]["content"][0]["text"] == "done"
-
     # Unknown skill returns not found
     response = asyncio.run(
         handle_request(
@@ -177,6 +176,7 @@ def test_mcp_module_handles_errors() -> None:
     assert response is not None
     assert response["result"]["isError"] is True
     assert "not found" in response["result"]["content"][0]["text"].lower()
+    assert response["result"]["isError"] is True
 
 
 def test_skill_result_without_strict_json_answers_with_text_only() -> None:

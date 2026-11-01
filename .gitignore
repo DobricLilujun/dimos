@@ -103,6 +103,11 @@ site/
 
 # Optuna study store, written by the relocalization eval (see lidar/eval.md)
 optuna.db
-
-# policy blobs are loaded from outside the repository
 *.bin
+
+# MuJoCo writes this log into the working directory
+MUJOCO_LOG.TXT
+
+# Playwright CLI local artifacts (logs + page snapshots)
+.playwright-cli/
+assets/scene_maps/

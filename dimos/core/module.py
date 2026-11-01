@@ -75,6 +75,7 @@ class SkillInfo:
     args_schema: str
     uses: tuple[str, ...] = ()
     lifecycle: str = "instant"
+    completion: str | None = None
 
 
 # Skill metadata derives from the class, so one build serves every instance.
@@ -520,6 +521,7 @@ class ModuleBase(Configurable, CompositeResource):
                     args_schema=schema,
                     uses=uses,
                     lifecycle=lifecycle,
+                    completion=getattr(attr, "__skill_completion__", None),
                 )
             )
         return skills

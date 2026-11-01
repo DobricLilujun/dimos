@@ -155,6 +155,18 @@ class GlobalPlanner(Resource):
     def reset_safe_goal_clearance(self) -> None:
         self._reset_safe_goal_clearance()
 
+    def robot_width(self) -> float:
+        with self._lock:
+            return self._global_config.robot_width
+
+    def set_robot_width(self, width_m: float) -> None:
+        with self._lock:
+            self._global_config.robot_width = width_m
+            should_replan = self._current_goal is not None and self._current_odom is not None
+        if should_replan:
+            self._replan_limiter.reset()
+            self._plan_path()
+
     def cancel_goal(self, *, but_will_try_again: bool = False, arrived: bool = False) -> None:
         # return silently so we don't flood the logs.
         with self._lock:
@@ -299,8 +311,9 @@ class GlobalPlanner(Resource):
 
         logger.info("Replanning.", attempt=self._replan_limiter.get_attempt())
 
-        assert current_odom is not None
-        assert current_goal is not None
+        if current_goal is None or current_odom is None:
+            logger.debug("Replanning skipped: goal was cancelled or odometry is unavailable")
+            return
 
         if current_goal.position.distance(current_odom.position) < self._replan_goal_tolerance:
             self.cancel_goal(arrived=True)
@@ -325,7 +338,9 @@ class GlobalPlanner(Resource):
             current_odom = self._current_odom
             current_goal = self._current_goal
 
-        assert current_goal is not None
+        if current_goal is None:
+            logger.debug("Planning skipped: goal was cancelled")
+            return
 
         if current_odom is None:
             logger.warning("Cannot handle goal request: missing odometry.")
@@ -351,9 +366,12 @@ class GlobalPlanner(Resource):
 
         resampled_path = smooth_resample_path(path, current_goal, 0.1)
 
-        self.path.on_next(resampled_path)
-
-        self._local_planner.start_planning(resampled_path)
+        with self._lock:
+            if self._current_goal is not current_goal:
+                logger.info("Discarding computed path: navigation goal was cancelled or replaced")
+                return
+            self.path.on_next(resampled_path)
+            self._local_planner.start_planning(resampled_path)
 
     def _find_wide_path(self, goal: Vector3, robot_pos: Vector3) -> Path | None:
         #        sizes_to_try: list[float] = [2.2, 1.7, 1.3, 1]

@@ -29,6 +29,7 @@ logger = setup_logger()
 class OpenAIVlModelConfig(VlModelConfig):
     model_name: str = "gpt-4o-mini"
     api_key: str | None = None
+    base_url: str | None = None
 
 
 class OpenAIVlModel(VlModel):
@@ -42,7 +43,7 @@ class OpenAIVlModel(VlModel):
                 "OpenAI API key must be provided or set in OPENAI_API_KEY environment variable"
             )
 
-        return OpenAI(api_key=api_key)
+        return OpenAI(api_key=api_key, base_url=self.config.base_url)
 
     def query(
         self,

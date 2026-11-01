@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/console", "src/panels/voxelScene.ts", "src/panels/voxelView.ts", "vite.console.config.ts"]
+}

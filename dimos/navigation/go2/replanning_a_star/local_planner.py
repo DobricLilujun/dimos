@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import os
-from threading import Event, RLock, Thread
+from threading import Event, RLock, Thread, current_thread
 import time
 import traceback
 from typing import Literal, TypeAlias
@@ -21,7 +21,8 @@ from typing import Literal, TypeAlias
 import numpy as np
 from reactivex import Subject
 
-from dimos.core.resource import Resource
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
+from dimos.core.global_config import GlobalConfigfrom dimos.core.resource import Resource
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
@@ -128,7 +129,15 @@ class LocalPlanner(Resource):
         self._stop_planning_event.set()
 
         with self._lock:
-            self._thread = None
+            thread = self._thread
+        if thread is not None and thread is not current_thread():
+            thread.join(DEFAULT_THREAD_JOIN_TIMEOUT)
+            if thread.is_alive():
+                logger.error("Local planner did not stop; refusing to start another navigation")
+                raise RuntimeError("Local planner thread did not stop in time")
+        with self._lock:
+            if self._thread is thread:
+                self._thread = None
 
         self._reset_state()
 

@@ -70,6 +70,7 @@ class RobotLocation:
             Dictionary with metadata fields compatible with vector DB storage
         """
         metadata = {
+            **self.metadata,
             "pos_x": float(self.position[0]),
             "pos_y": float(self.position[1]),
             "pos_z": float(self.position[2]),
@@ -79,7 +80,7 @@ class RobotLocation:
             "timestamp": self.timestamp,
             "location_id": self.location_id,
             "location_name": self.name,
-            "description": self.name,  # Makes it searchable by text
+            "description": self.metadata.get("description", self.name),
         }
 
         # Only add frame_id if it's not None
@@ -129,7 +130,6 @@ class RobotLocation:
                     "location_id",
                     "frame_id",
                     "location_name",
-                    "description",
                 ]
             },
         )

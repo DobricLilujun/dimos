@@ -112,7 +112,9 @@ classifiers = [
 ]
 
 dependencies = [
+<<<<<<< HEAD
     "matplotlib>=3.7.1", # Rerun initializes point-cloud colormaps for all streams.
+    "jsonschema>=4.23",
     # Transport Protocols
     "dimos-lcm>=0.1.6",
     "lcm>=1.5.3", # the `lcm` module itself (protocol/service/lcmservice.py)
@@ -181,7 +183,9 @@ dependencies = [
     # DimSim scene client (dimos/simulation/dimsim/scene_client.py) imports `websocket`
     # at module load; DimSim is a non-extra-gated robot connection backend.
     "websocket-client>=1.8",
+<<<<<<< HEAD
     "websockets>=16.0", # Rerun viewer bridge (visualization/rerun/websocket_server.py)
+    "faster-whisper>=1.2.1",
 ]
 
 
@@ -521,6 +525,7 @@ lint = [
     "types-PyYAML>=6.0.12.20250915,<7",
     "types-reportlab>=4.5.0",
     "types-requests>=2.32.4.20260107,<3",
+    "types-jsonschema>=4.23",
 
     {include-group = "project-deps"},
 ]
