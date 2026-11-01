@@ -22,7 +22,8 @@ import numpy as np
 from reactivex import Subject
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
-from dimos.core.global_config import GlobalConfigfrom dimos.core.resource import Resource
+from dimos.core.global_config import GlobalConfig
+from dimos.core.resource import Resource
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid

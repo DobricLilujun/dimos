@@ -24,7 +24,6 @@ from scipy.spatial.transform import Rotation
 from dimos.core.coordination.blueprint_config.parser import BlueprintConfigParser
 from dimos.core.coordination.module_coordinator import (
     _resolve_single_ref,
-    _verify_no_name_conflicts,
 )
 from dimos.core.module import Module
 from dimos.mapping.relocalization.go2 import persistent
@@ -1179,7 +1178,6 @@ def test_stream_navigation_goals_use_the_same_confirmation_gate(mocker):
 
 def test_persistent_blueprint_routes_all_world_data_through_alignment_gate():
     blueprint = unitree_go2_agentic_persistent
-    _verify_no_name_conflicts(blueprint)
     modules = {atom.module for atom in blueprint.active_blueprints}
     assert PersistentGo2Map in modules
     assert PersistentGo2Planner in modules

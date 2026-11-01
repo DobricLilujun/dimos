@@ -12,29 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The Go2 agentic *persistent* workflow with the SEDAN GROUP web console.
+"""The Go2 agentic *persistent* workflow (demo explorer variant).
 
-Same stack as :data:`unitree_go2_agentic_persistent`, plus a
-:class:`~dimos.web.console.module.RobotConsoleModule` that serves a web
-control deck + ChatGPT-style chat on ``:8090``. The console embeds the
-existing Rerun web viewer by iframe (original Rerun content preserved) and
-adds:
-
-* button-driven control of the workflow operations in the
-  ``unitree-go2-agentic-persistent`` usage tutorial (alignment, map capture,
-  object/location tagging, memory query, navigation, stop),
-* a chat that sends text to the agent (``/human_input``) and renders the
-  agent's replies (``/agent``), the robot's feedback, and the internal tool
-  input/output (``/agent`` tool messages + ``/tool_streams``).
-
-The console module declares no ``In``/``Out`` ports, so it never competes with
-the persistent stack's stream wiring; it only observes/publishes by channel
-name through the shared transport.
+Same stack as :data:`unitree_go2_agentic_persistent`, plus the demo explorer
+and a persistent Go2 planner. This is the base stack the person-following
+variant builds on.
 """
 
-from dataclasses import replace
-
-from dimos.agents.mcp.mcp_client import McpClient
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.mapping.relocalization.go2.persistent import PersistentGo2Planner
 from dimos.navigation.experimental.frontier_exploration.demo_explorer import DemoExplorer
@@ -44,10 +28,6 @@ from dimos.navigation.experimental.frontier_exploration.wavefront_frontier_goal_
 from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent import (
     unitree_go2_agentic_persistent,
 )
-from dimos.robot.unitree.go2.connection import GO2Connection
-from dimos.visualization.rerun.bridge import RerunBridgeModule
-from dimos.web.console.module import RobotConsoleModule
-from dimos.web.console.prompts import CONSOLE_AGENT_PROMPT
 
 unitree_go2_agentic_persistent_demo = (
     autoconnect(
@@ -58,28 +38,3 @@ unitree_go2_agentic_persistent_demo = (
     .disabled_modules(WavefrontFrontierExplorer)
     .global_config(n_workers=8)
 )
-
-unitree_go2_agentic_persistent_console = autoconnect(
-    replace(
-        unitree_go2_agentic_persistent_demo,
-        blueprints=tuple(
-            replace(atom, kwargs={**atom.kwargs, "rerun_web": True})
-            if atom.module is RerunBridgeModule
-            else replace(
-                atom,
-                kwargs={
-                    **atom.kwargs,
-                    "system_prompt": CONSOLE_AGENT_PROMPT,
-                },
-            )
-            if atom.module is McpClient
-            else replace(
-                atom, kwargs={**atom.kwargs, "puppy_enabled": True, "puppy_noise_reduction": True}
-            )
-            if atom.module is GO2Connection
-            else atom
-            for atom in unitree_go2_agentic_persistent_demo.blueprints
-        ),
-    ),
-    RobotConsoleModule.blueprint(),
-).global_config(n_workers=9)

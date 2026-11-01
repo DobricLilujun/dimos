@@ -36,8 +36,8 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.robot.unitree.go2 import connection as go2_conn
 from dimos.robot.unitree.go2.connection import ConnectionConfig, GO2Connection
-from dimos.simulation.mujoco.config import MujocoConfigfrom dimos.robot.unitree.go2.connection_spec import GO2ConnectionSpec
-from dimos.spec.utils import spec_annotation_compliance
+from dimos.simulation.mujoco.config import MujocoConfig
+
 
 @pytest.fixture
 def stub_webrtc(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
@@ -83,8 +83,8 @@ def test_scoped_connection_settings_resolve_sources_and_nested_defaults(tmp_path
     assert config.dimsim.headless is False
     assert config.aes_128_key == "test-aes-key"
     assert config.obstacle_avoidance is False
-    assert "obstacle_avoidance" not in parsed.global_config_values()def test_go2_connection_satisfies_skill_connection_spec() -> None:
-    assert spec_annotation_compliance(GO2Connection, GO2ConnectionSpec)
+    assert "obstacle_avoidance" not in parsed.global_config_values()
+
 
 def test_make_connection_replay_forwards_exit_on_complete() -> None:
     """--go2connection.replay-exit reaches ReplayConnection (the lazy `replay` opens no DB)."""

@@ -165,7 +165,6 @@ all_blueprints = {
     "unitree-go2-agentic-huggingface": "dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_huggingface:unitree_go2_agentic_huggingface",
     "unitree-go2-agentic-ollama": "dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_ollama:unitree_go2_agentic_ollama",
     "unitree-go2-agentic-persistent": "dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent:unitree_go2_agentic_persistent",
-    "unitree-go2-agentic-persistent-console": "dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent_console:unitree_go2_agentic_persistent_console",
     "unitree-go2-agentic-persistent-demo": "dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent_console:unitree_go2_agentic_persistent_demo",
     "unitree-go2-agentic-persistent-person-following": "dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent_person_following:unitree_go2_agentic_persistent_person_following",
     "unitree-go2-basic": "dimos.robot.unitree.go2.blueprints.basic.unitree_go2_basic:unitree_go2_basic",
@@ -274,11 +273,7 @@ all_modules = {
     "go2-mid360-recorder": "dimos.robot.unitree.go2.go2_mid360_recorder.Go2Mid360Recorder",
     "go2-mid360-static-tf": "dimos.robot.unitree.go2.go2_mid360_static_transforms.Go2Mid360StaticTf",
     "go2-teleop-module": "dimos.teleop.webxr.extensions.Go2TeleopModule",
-<<<<<<< HEAD
-=======
-    "go2-zenoh": "dimos.robot.unitree.go2.zenoh.zenohconnection.GO2Zenoh",
     "goal-tracker": "dimos.navigation.go2.replanning_a_star.goal_tracker.GoalTracker",
->>>>>>> learning-branch
     "google-maps-skill-container": "dimos.agents.skills.google_maps_skill_container.GoogleMapsSkillContainer",
     "gps-nav-skill-container": "dimos.agents.skills.gps_nav_skill.GpsNavSkillContainer",
     "grasp-gen-x-module": "dimos.manipulation.grasping.grasp_gen_x.module.GraspGenXModule",
@@ -338,12 +333,9 @@ all_modules = {
     "path-following-coordinator": "dimos.control.path_following_coordinator.PathFollowingCoordinator",
     "patrolling-module": "dimos.navigation.experimental.patrolling.module.PatrollingModule",
     "perceive-loop-skill": "dimos.perception.experimental.perceive_loop_skill.PerceiveLoopSkill",
-<<<<<<< HEAD
     "perception-localize": "dimos.perception.localize.module.PerceptionLocalize",
-=======
     "persistent-go2-map": "dimos.mapping.relocalization.go2.persistent.PersistentGo2Map",
     "persistent-go2-planner": "dimos.mapping.relocalization.go2.persistent.PersistentGo2Planner",
->>>>>>> learning-branch
     "person-follow-skill-container": "dimos.agents.skills.person_follow.PersonFollowSkillContainer",
     "person-navigation-skill-container": "dimos.agents.skills.person_navigation.PersonNavigationSkillContainer",
     "person-tracker": "dimos.perception.detection.person_tracker.PersonTracker",
@@ -370,7 +362,6 @@ all_modules = {
     "replay-module": "dimos.memory.replay_module.ReplayModule",
     "rerun-bridge-module": "dimos.visualization.rerun.bridge.RerunBridgeModule",
     "rerun-web-socket-server": "dimos.visualization.rerun.websocket_server.RerunWebSocketServer",
-    "robot-console-module": "dimos.web.console.module.RobotConsoleModule",
     "rust-recorder": "dimos.experimental.memory.rust_recorder.RustRecorder",
     "scene-graph-server-module": "dimos.agents.skills.scene_graph_server.SceneGraphServerModule",
     "security-module": "dimos.experimental.security_demo.security_module.SecurityModule",

@@ -39,3 +39,28 @@ def calculate_peak_volume(audio_data: np.ndarray) -> float:
         peak = peak / 32768.0
 
     return peak  # type: ignore[no-any-return]
+
+
+def calculate_rms_volume(audio_data: np.ndarray) -> float:
+    """
+    Calculate RMS (Root Mean Square) volume of audio data.
+
+    Args:
+        audio_data: Audio data as numpy array
+
+    Returns:
+        RMS volume as a float between 0.0 and 1.0
+    """
+    # For multi-channel audio, calculate RMS across all channels
+    if len(audio_data.shape) > 1 and audio_data.shape[1] > 1:
+        # Flatten all channels
+        audio_data = audio_data.flatten()
+
+    # Calculate RMS
+    rms = np.sqrt(np.mean(np.square(audio_data)))
+
+    # For int16 data, normalize to [0, 1]
+    if audio_data.dtype == np.int16:
+        rms = rms / 32768.0
+
+    return rms  # type: ignore[no-any-return]
