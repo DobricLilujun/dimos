@@ -23,6 +23,7 @@ import json
 import os
 import queue
 import tempfile
+from unittest.mock import MagicMock
 
 import chromadb
 import cv2
@@ -76,14 +77,9 @@ def _patch_heavy(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(sp, "ImageEmbeddingProvider", FakeEmbeddingProvider)
 
-    class FakeVM:
-        def __init__(self, *a, **k) -> None: ...  # accept any init
-
-        def clear(self, *a, **k) -> None: ...  # called by stop()/save()
-
-        def save(self, *a, **k) -> None: ...
-
-    monkeypatch.setattr(sp, "VisualMemory", FakeVM)
+    # Permissive stand-in for the image store: the assertions here are about
+    # the scene-map report, not about stored reference images.
+    monkeypatch.setattr(sp, "VisualMemory", lambda *a, **k: MagicMock())
     monkeypatch.setattr(sp, "SpatialVectorDB", lambda *a, **k: object())
 
 
@@ -161,7 +157,13 @@ def captured_context():
         "intrinsics": [[100, 0, 50], [0, 100, 50], [0, 0, 1]],
         "camera_origin": [1, 2, 3],
         "camera_rotation": np.eye(3),
-        "world_points": [[1, 2, 7], [1.1, 2, 7], [0.9, 2, 7]],
+        "world_points": [
+            [1, 2, 7],
+            [1.1, 2, 7],
+            [0.9, 2, 7],
+            [1, 1.9, 7],
+            [1, 2.1, 7],
+        ],
     }
 
 
@@ -173,18 +175,27 @@ def test_named_location_honors_supplied_target_without_live_tf(memory):
     memory._tf.get.assert_not_called()
 
 
-def test_async_result_registers_captured_targets_and_writes_immediately(memory, captured_context, tmp_path):
+def test_async_result_registers_captured_targets_and_writes_immediately(
+    memory, captured_context, tmp_path
+):
     memory.config.vlm_enable_object_tagging = True
     memory.config.vlm_enable_place_tagging = True
     memory._vlm_report_path = tmp_path / "tags.jsonl"
     memory._tf.get.return_value = Transform(translation=Vector3(100, 200, 300))
-    memory._handle_vlm_result({
-        "frame_id": "old_frame", "caption": "Kitchen entrance with a chair",
-        "place": "kitchen", "place_bbox": [40, 40, 60, 60],
-        "items": [{"name": "chair", "bbox": [40, 40, 60, 60]}],
-        "position": [1, 2, 3], "rotation": [0, 0, 0], "timestamp": 10,
-        "projection_context": captured_context,
-    })
+    memory._handle_vlm_result(
+        {
+            "frame_id": "old_frame",
+            "caption": "Kitchen entrance with a chair",
+            "place": "kitchen",
+            "place_bbox": [40, 40, 60, 60],
+            "items": [{"name": "chair", "bbox": [40, 40, 60, 60]}],
+            "position": [1, 2, 3],
+            "rotation": [0, 0, 0],
+            "timestamp": 10,
+            "projection_context": captured_context,
+            "frame_bgr": np.zeros((100, 100, 3), dtype=np.uint8),
+        }
+    )
     assert memory.find_robot_location("chair").position == (1.0, 2.0, 7.0)
     assert memory.find_robot_location("kitchen").position == (1.0, 2.0, 3.0)
     report = json.loads(memory._vlm_report_path.read_text())
@@ -196,17 +207,24 @@ def test_async_result_registers_captured_targets_and_writes_immediately(memory, 
 
 def test_place_without_box_uses_observation_pose(memory):
     memory.config.vlm_enable_place_tagging = True
-    memory._handle_vlm_result({
-        "frame_id": "old_frame", "caption": "A kitchen", "place": "kitchen",
-        "position": [1, 2, 3], "rotation": [0, 0, 0],
-    })
+    memory._handle_vlm_result(
+        {
+            "frame_id": "old_frame",
+            "caption": "A kitchen",
+            "place": "kitchen",
+            "position": [1, 2, 3],
+            "rotation": [0, 0, 0],
+        }
+    )
     assert memory.find_robot_location("kitchen").position == (1.0, 2.0, 3.0)
     assert memory._vlm_report[-1]["place_estimate"] == {"method": "robot_observation_pose"}
 
 
 def test_capture_transforms_sensor_cloud_and_rejects_stale_cloud(memory):
     memory._latest_camera_info = CameraInfo(
-        width=100, height=100, frame_id="camera_optical",
+        width=100,
+        height=100,
+        frame_id="camera_optical",
         K=[100, 0, 50, 0, 100, 50, 0, 0, 1],
     )
     cloud = o3d.geometry.PointCloud()
@@ -215,12 +233,17 @@ def test_capture_transforms_sensor_cloud_and_rejects_stale_cloud(memory):
     memory._tf.get.side_effect = [
         Transform(translation=Vector3(1, 2, 3)),
         Transform(translation=Vector3(1, 2, 3)),
+        Transform(translation=Vector3(1, 2, 3)),
     ]
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
     context = memory._capture_projection_context(frame, 10)
     np.testing.assert_allclose(context["world_points"], [[1, 2, 7]])
     memory._tf.get.assert_any_call(
-        "world", "lidar", time_point=10, time_tolerance=1.0, warn=False,
+        "world",
+        "lidar",
+        time_point=10,
+        time_tolerance=1.0,
+        warn=False,
     )
     memory._tf.get.side_effect = None
     memory._tf.get.return_value = Transform(translation=Vector3(50, 50, 50))
@@ -238,11 +261,21 @@ def test_worker_preserves_geometry_and_place_box(mocker, captured_context):
     results = queue.Queue()
     success, encoded = cv2.imencode(".jpg", np.zeros((100, 100, 3), dtype=np.uint8))
     assert success
-    tasks.put({"frame_id": "old_frame", "frame_array": encoded, "projection_context": captured_context})
+    tasks.put(
+        {"frame_id": "old_frame", "frame_array": encoded, "projection_context": captured_context}
+    )
     tasks.put(None)
     sp._vlm_worker(
-        {"base_url": "https://example.invalid", "model": "test", "prompt": "test",
-         "max_tokens": 10, "timeout": 1, "api_key": "dummy"}, tasks, results,
+        {
+            "base_url": "https://example.invalid",
+            "model": "test",
+            "prompt": "test",
+            "max_tokens": 10,
+            "timeout": 1,
+            "api_key": "dummy",
+        },
+        tasks,
+        results,
     )
     result = results.get_nowait()
     assert result["place_bbox"] == [40, 40, 60, 60]
@@ -268,12 +301,17 @@ def test_segmentation_mask_filters_box_background(captured_context):
 def test_result_is_written_even_without_a_new_frame(memory, captured_context, tmp_path):
     memory._vlm_report_path = tmp_path / "stationary_tags.jsonl"
     memory._vlm_result_queue = queue.Queue()
-    memory._vlm_result_queue.put({
-        "frame_id": "old_frame", "caption": "A chair", "place": None,
-        "position": [1, 2, 3], "rotation": [0, 0, 0],
-        "projection_context": captured_context,
-        "items": [{"name": "chair", "bbox": [40, 40, 60, 60]}],
-    })
+    memory._vlm_result_queue.put(
+        {
+            "frame_id": "old_frame",
+            "caption": "A chair",
+            "place": None,
+            "position": [1, 2, 3],
+            "rotation": [0, 0, 0],
+            "projection_context": captured_context,
+            "items": [{"name": "chair", "bbox": [40, 40, 60, 60]}],
+        }
+    )
     memory._process_frame()
     report = json.loads(memory._vlm_report_path.read_text())
     assert report["detections"] == [{"name": "chair", "bbox": [40, 40, 60, 60]}]

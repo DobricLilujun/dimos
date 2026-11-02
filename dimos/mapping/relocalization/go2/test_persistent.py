@@ -28,7 +28,6 @@ from dimos.core.coordination.module_coordinator import (
 from dimos.core.module import Module
 from dimos.mapping.relocalization.go2 import persistent
 from dimos.mapping.relocalization.go2.persistent import PersistentGo2Map, PersistentGo2Planner
-from dimos.mapping.voxels.module import VoxelGridMapper
 from dimos.msgs.geometry_msgs.PointStamped import PointStamped
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Transform import Transform
@@ -37,6 +36,7 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
+from dimos.navigation.go2.loop_closure.module import PGOVoxelMapper
 from dimos.navigation.go2.loop_closure.pgo import Keyframe, PoseGraph
 from dimos.navigation.go2.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic import unitree_go2_agentic
@@ -113,7 +113,7 @@ def test_manual_pause_blocks_fusion_not_lidar_and_resume_restores_legacy_behavio
 ):
     pgo = mocker.patch.object(persistent, "PGOMap").return_value
     pgo.add.return_value = False
-    pgo.graph.return_value = PoseGraph()
+    pgo.pgo.snapshot.return_value = PoseGraph()
     pgo.global_map.return_value = cloud([[0, 0, 0]])
     module = session(create_new=True, pgo_enabled=pgo_enabled)
     module._on_lidar(cloud([[0, 0, 0]]))
@@ -216,7 +216,7 @@ def test_pgo_corrects_live_pose_cloud_tf_and_saves_without_moving_old_map(
     prior = save_premap(path)
     pgo = mocker.patch.object(persistent, "PGOMap").return_value
     pgo.add.return_value = True
-    pgo.graph.return_value = fixed_graph()
+    pgo.pgo.snapshot.return_value = fixed_graph()
     pgo.global_map.return_value = cloud([[2.5, 0, 0]])
     module = session(pgo_enabled=True)
     module._candidate = Transform(frame_id="world", child_frame_id="world")
@@ -247,7 +247,7 @@ def test_pgo_corrects_live_pose_cloud_tf_and_saves_without_moving_old_map(
     np.testing.assert_allclose(saved[: len(prior)], prior.points_f32())
     np.testing.assert_allclose(saved[-1], [2.5, 0, 0])
     module._pgo_memory.update_pgo_graph.assert_called_with(
-        pgo.graph.return_value, module._pgo_session, mocker.ANY
+        pgo.pgo.snapshot.return_value, module._pgo_session, mocker.ANY
     )
     module._pgo_navigation.pause_for_pgo.assert_called_once()
     module._pgo_navigation.resume_after_pgo.assert_called_once()
@@ -255,7 +255,9 @@ def test_pgo_corrects_live_pose_cloud_tf_and_saves_without_moving_old_map(
         2.5
     )
     module.pgo_stop.publish.assert_not_called()
-    pgo.flush.assert_called_once()
+    # The corrected frame reached PGO before the save above; PGOMap re-places on
+    # every add (rebuild_cooldown_s=0), so the saved file already reflects it.
+    pgo.add.assert_called_once()
 
 
 def test_pgo_memory_sync_failure_blocks_motion_navigation_and_map_overwrite(
@@ -266,7 +268,7 @@ def test_pgo_memory_sync_failure_blocks_motion_navigation_and_map_overwrite(
     saved = path.read_bytes()
     pgo = mocker.patch.object(persistent, "PGOMap").return_value
     pgo.add.return_value = True
-    pgo.graph.return_value = fixed_graph()
+    pgo.pgo.snapshot.return_value = fixed_graph()
     pgo.global_map.return_value = cloud([[2.5, 0, 0]])
     module = session(pgo_enabled=True)
     module._candidate = Transform(frame_id="world", child_frame_id="world")
@@ -291,7 +293,7 @@ def test_pgo_checkpoint_failure_blocks_navigation_and_preserves_saved_map(
     saved = path.read_bytes()
     pgo = mocker.patch.object(persistent, "PGOMap").return_value
     pgo.add.return_value = True
-    pgo.graph.return_value = fixed_graph()
+    pgo.pgo.snapshot.return_value = fixed_graph()
     pgo.global_map.return_value = cloud([[2.5, 0, 0]])
     module = session(pgo_enabled=True)
     module._candidate = Transform(frame_id="world", child_frame_id="world")
@@ -436,7 +438,7 @@ def test_restore_final_save_stop_reload_keeps_old_and_new_points(
     if pgo_enabled:
         pgo = mocker.patch.object(persistent, "PGOMap").return_value
         pgo.add.return_value = False
-        pgo.graph.return_value = PoseGraph()
+        pgo.pgo.snapshot.return_value = PoseGraph()
         pgo.global_map.return_value = cloud([[7, 0, 0]])
     module = session(pgo_enabled=pgo_enabled)
     module._relocalizer.relocalize.return_value = Transform.from_matrix(
@@ -916,7 +918,7 @@ def test_live_loop_saves_corrected_map_and_resumes_active_tag_navigation(
     save_premap(path)
     pgo = mocker.patch.object(persistent, "PGOMap").return_value
     pgo.add.return_value = True
-    pgo.graph.return_value = fixed_graph()
+    pgo.pgo.snapshot.return_value = fixed_graph()
     pgo.global_map.return_value = cloud([[2.5, 0, 0]])
     module = session(pgo_enabled=True)
     module._candidate = Transform(frame_id="world", child_frame_id="world")
@@ -1181,9 +1183,9 @@ def test_persistent_blueprint_routes_all_world_data_through_alignment_gate():
     modules = {atom.module for atom in blueprint.active_blueprints}
     assert PersistentGo2Map in modules
     assert PersistentGo2Planner in modules
-    assert VoxelGridMapper not in modules
+    assert PGOVoxelMapper not in modules
     assert ReplanningAStarPlanner not in modules
-    assert VoxelGridMapper in {atom.module for atom in unitree_go2_agentic.active_blueprints}
+    assert PGOVoxelMapper in {atom.module for atom in unitree_go2_agentic.active_blueprints}
     producers = {}
     for atom in blueprint.active_blueprints:
         for port in atom.streams:

@@ -25,7 +25,7 @@ from dimos.navigation.go2.replanning_a_star.global_planner import GlobalPlanner
 
 @pytest.fixture
 def planner():
-    global_planner = GlobalPlanner(GlobalConfig())
+    global_planner = GlobalPlanner(robot_width=0.5, robot_rotation_diameter=0.6)
     yield global_planner
     global_planner.stop()
 

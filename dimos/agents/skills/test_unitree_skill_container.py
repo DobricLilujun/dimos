@@ -55,6 +55,18 @@ class StubGO2Connection(Module):
     def publish_request(self, topic: str, data: dict[str, Any]) -> dict[Any, Any]:
         return {}
 
+    @rpc
+    def sit(self) -> bool:
+        return True
+
+    @rpc
+    def rise_sit(self) -> bool:
+        return True
+
+    @rpc
+    def recovery_stand(self) -> bool:
+        return True
+
 
 class MockedUnitreeSkill(UnitreeSkillContainer):
     pass

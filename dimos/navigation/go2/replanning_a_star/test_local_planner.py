@@ -16,15 +16,14 @@ from threading import Event, Thread
 
 import pytest
 
-from dimos.core.global_config import GlobalConfig
 from dimos.navigation.go2.replanning_a_star.local_planner import LocalPlanner
 from dimos.navigation.go2.replanning_a_star.navigation_map import NavigationMap
 
 
 @pytest.fixture
 def planner():
-    config = GlobalConfig()
-    local = LocalPlanner(config, NavigationMap(config, "voronoi"), 0.2)
+    robot_width = 0.5
+    local = LocalPlanner(NavigationMap(robot_width, "voronoi"), 0.2, robot_width=robot_width)
     yield local
     local.stop()
 
