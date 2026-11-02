@@ -15,7 +15,7 @@
 """A tiny web "dialog" server that reports the scene graph.
 
 Reuses features that already exist in DimOS: the native scene map / scene graph
-built by :class:`SpatialMemory` (queried through :class:`SpatialMemorySpec`) and
+built by :class:`SpatialMemory` (queried through :class:`TaggedLocationMemorySpec`) and
 the robot's own web-server pattern (this mirrors ``WebInput``/``FastAPIServer``).
 
 It exposes a very small HTTP surface so an operator can ask, from any browser or
@@ -42,7 +42,7 @@ from urllib.parse import parse_qs, urlparse
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
-from dimos.perception.experimental.spatial_memory_spec import SpatialMemorySpec
+from dimos.perception.experimental.spatial_memory_spec import TaggedLocationMemorySpec
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -58,7 +58,7 @@ class SceneGraphServerModule(Module):
     """Serve the robot's scene graph over a minimal HTTP dialog interface."""
 
     config: SceneGraphServerConfig
-    _spatial_memory: SpatialMemorySpec | None = None  # injected by blueprint
+    _spatial_memory: TaggedLocationMemorySpec | None = None  # injected by blueprint
 
     _server: ThreadingHTTPServer | None = None
     _thread: Thread | None = None
@@ -100,7 +100,7 @@ class SceneGraphServerModule(Module):
 
     # -- data helpers (shared by the handler) ----------------------------------
     @staticmethod
-    def _locations_payload(memory: SpatialMemorySpec) -> list[dict[str, Any]]:
+    def _locations_payload(memory: TaggedLocationMemorySpec) -> list[dict[str, Any]]:
         payload: list[dict[str, Any]] = []
         for location in memory.get_robot_locations():
             position = getattr(location, "position", None)
@@ -117,14 +117,14 @@ class SceneGraphServerModule(Module):
         return payload
 
     @staticmethod
-    def _scene_graph_payload(memory: SpatialMemorySpec) -> dict[str, Any]:
+    def _scene_graph_payload(memory: TaggedLocationMemorySpec) -> dict[str, Any]:
         return {
             "locations": SceneGraphServerModule._locations_payload(memory),
             "stats": memory.get_stats(),
         }
 
     @staticmethod
-    def _query_payload(memory: SpatialMemorySpec, query: str) -> dict[str, Any]:
+    def _query_payload(memory: TaggedLocationMemorySpec, query: str) -> dict[str, Any]:
         try:
             results = memory.query_by_text(query) or []
         except Exception as e:  # pragma: no cover
@@ -151,7 +151,7 @@ class SceneGraphServerModule(Module):
         return {"query": query, "results": items}
 
 
-def _make_handler(memory: SpatialMemorySpec) -> type[BaseHTTPRequestHandler]:
+def _make_handler(memory: TaggedLocationMemorySpec) -> type[BaseHTTPRequestHandler]:
     """Build an HTTP handler that answers scene-graph queries from ``memory``."""
 
     class _Handler(BaseHTTPRequestHandler):

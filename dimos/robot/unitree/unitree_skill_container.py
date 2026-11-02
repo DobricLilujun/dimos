@@ -31,9 +31,8 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.navigation.base import NavigationState
 from dimos.navigation.go2.replanning_a_star.spec import NavigationInterfaceSpec
-from dimos.perception.experimental.spatial_memory_spec import SpatialMemorySpec
+from dimos.perception.experimental.spatial_memory_spec import TaggedLocationMemorySpec
 from dimos.robot.unitree.go2.connection_spec import GO2ConnectionSpec
-from dimos.types.robot_location import RobotLocation
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -222,7 +221,8 @@ class UnitreeSkillContainer(Module):
 
     _navigation: NavigationInterfaceSpec
     _connection: GO2ConnectionSpec
-    _spatial_memory: SpatialMemorySpec
+    # Optional: only blueprints that deploy a spatial-memory module get it wired in.
+    _spatial_memory: TaggedLocationMemorySpec | None = None
 
     tf: In[TFMessage]
 
@@ -271,6 +271,9 @@ class UnitreeSkillContainer(Module):
         if not name:
             return f"{kind.capitalize()} name cannot be empty."
 
+        if self._spatial_memory is None:
+            return f"Cannot navigate to a {kind}: no spatial memory module is running."
+
         # Try exact name first, then semantic query.
         location = self._spatial_memory.find_robot_location(name)
         if location is None:
@@ -290,6 +293,8 @@ class UnitreeSkillContainer(Module):
 
     def _list_place_names(self) -> str:
         """Return a comma-separated list of known place/object names."""
+        if self._spatial_memory is None:
+            return "(spatial memory unavailable)"
         try:
             locations = self._spatial_memory.get_robot_locations()
             names = sorted({loc.name for loc in locations})

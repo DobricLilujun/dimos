@@ -499,7 +499,9 @@ class PersonNavigationSkillContainer(Module):
                 else description.casefold() in location.name.casefold()
             )
         ]
-        return max(matches, key=lambda location: location.timestamp, default=None)
+        if not matches:
+            return None
+        return max(matches, key=lambda location: location.timestamp)
 
     def _approach_goal(self, person: Vector3) -> PoseStamped | None:
         with self._lock:

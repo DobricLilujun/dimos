@@ -34,6 +34,11 @@ class NavigationMap:
         with self._lock:
             self._binary = occupancy_grid
 
+    def set_robot_width(self, robot_width: float) -> None:
+        """Change the inflation width used by the next navigation map build."""
+        with self._lock:
+            self._robot_width = robot_width
+
     @property
     def binary_costmap(self) -> OccupancyGrid:
         """

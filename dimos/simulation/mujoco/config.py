@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 from dimos.protocol.service.spec import BaseConfig
+from dimos.simulation.mujoco.constants import MAX_RANGE
 
 
 class MujocoConfig(BaseConfig):
@@ -31,6 +32,10 @@ class MujocoConfig(BaseConfig):
     )
     room: str = "office_555"
     room_from_occupancy: Path | None = None
+    # A second simulated person walking a loop, used by the person-following demos.
+    mujoco_second_person: bool = False
+    # Cap on the simulated lidar range in metres; distant walls stay unobserved.
+    mujoco_lidar_max_range: float = MAX_RANGE
     start_pos: tuple[float, float] = (-1.0, 1.0)
     steps_per_frame: int = 7
     # Auto disables shadows when rendering cannot keep up with realtime.

@@ -22,7 +22,6 @@ import numpy as np
 from reactivex import Subject
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
-from dimos.core.global_config import GlobalConfig
 from dimos.core.resource import Resource
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
@@ -111,6 +110,11 @@ class LocalPlanner(Resource):
     def handle_odom(self, msg: PoseStamped) -> None:
         with self._lock:
             self._current_odom = msg
+
+    def set_robot_width(self, robot_width: float) -> None:
+        """Change the clearance width used by the next planned path."""
+        with self._lock:
+            self._robot_width = robot_width
 
     def start_planning(self, path: Path) -> None:
         self.stop_planning()

@@ -84,6 +84,7 @@ class GlobalPlanner(Resource):
         self.goal_reached = Subject()
 
         self._robot_rotation_diameter = robot_rotation_diameter
+        self._robot_width = robot_width
         self._navigation_map = NavigationMap(robot_width, "voronoi")
         self._navigation_map_near = NavigationMap(robot_width, "gradient")
         self._local_planner = LocalPlanner(
@@ -157,12 +158,15 @@ class GlobalPlanner(Resource):
 
     def robot_width(self) -> float:
         with self._lock:
-            return self._global_config.robot_width
+            return self._robot_width
 
     def set_robot_width(self, width_m: float) -> None:
         with self._lock:
-            self._global_config.robot_width = width_m
+            self._robot_width = width_m
+            self._navigation_map.set_robot_width(width_m)
+            self._navigation_map_near.set_robot_width(width_m)
             should_replan = self._current_goal is not None and self._current_odom is not None
+        self._local_planner.set_robot_width(width_m)
         if should_replan:
             self._replan_limiter.reset()
             self._plan_path()

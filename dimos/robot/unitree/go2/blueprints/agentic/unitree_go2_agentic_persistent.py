@@ -17,7 +17,7 @@ from dataclasses import replace
 from dimos.agents.skills.person_follow import PersonFollowSkillContainer
 from dimos.core.coordination.blueprints import Blueprint, autoconnect
 from dimos.mapping.relocalization.go2.persistent import PersistentGo2Map, PersistentGo2Planner
-from dimos.mapping.voxels.module import VoxelGridMapper
+from dimos.navigation.go2.loop_closure.module import PGOVoxelMapper
 from dimos.navigation.go2.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic import unitree_go2_agentic
@@ -30,7 +30,7 @@ _persistent = (
         PersistentGo2Map.blueprint(),
         PersistentGo2Planner.blueprint(),
     )
-    .disabled_modules(VoxelGridMapper, ReplanningAStarPlanner)
+    .disabled_modules(PGOVoxelMapper, ReplanningAStarPlanner)
     .remappings(
         [
             (GO2Connection, "lidar", "session_lidar"),

@@ -88,23 +88,90 @@ class YoloSegSegmenter(ObjectSegmentationProvider):
     """
 
     _COCO_NAMES: set[str] = {
-        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
-        "truck", "boat", "traffic light", "fire hydrant", "stop sign",
-        "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep",
-        "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
-        "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
-        "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
-        "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
-        "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
-        "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
-        "couch", "potted plant", "bed", "dining table", "toilet", "tv",
-        "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave",
-        "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
-        "scissors", "teddy bear", "hair drier", "toothbrush",
+        "person",
+        "bicycle",
+        "car",
+        "motorcycle",
+        "airplane",
+        "bus",
+        "train",
+        "truck",
+        "boat",
+        "traffic light",
+        "fire hydrant",
+        "stop sign",
+        "parking meter",
+        "bench",
+        "bird",
+        "cat",
+        "dog",
+        "horse",
+        "sheep",
+        "cow",
+        "elephant",
+        "bear",
+        "zebra",
+        "giraffe",
+        "backpack",
+        "umbrella",
+        "handbag",
+        "tie",
+        "suitcase",
+        "frisbee",
+        "skis",
+        "snowboard",
+        "sports ball",
+        "kite",
+        "baseball bat",
+        "baseball glove",
+        "skateboard",
+        "surfboard",
+        "tennis racket",
+        "bottle",
+        "wine glass",
+        "cup",
+        "fork",
+        "knife",
+        "spoon",
+        "bowl",
+        "banana",
+        "apple",
+        "sandwich",
+        "orange",
+        "broccoli",
+        "carrot",
+        "hot dog",
+        "pizza",
+        "donut",
+        "cake",
+        "chair",
+        "couch",
+        "potted plant",
+        "bed",
+        "dining table",
+        "toilet",
+        "tv",
+        "laptop",
+        "mouse",
+        "remote",
+        "keyboard",
+        "cell phone",
+        "microwave",
+        "oven",
+        "toaster",
+        "sink",
+        "refrigerator",
+        "book",
+        "clock",
+        "vase",
+        "scissors",
+        "teddy bear",
+        "hair drier",
+        "toothbrush",
     }
 
     def __init__(self, model: str = "yolov8n-seg.pt", conf: float = 0.25) -> None:
-        from ultralytics import YOLO
+        from ultralytics import YOLO  # type: ignore[attr-defined]
 
         self._model = YOLO(model)
         self._conf = conf
@@ -161,10 +228,8 @@ class YoloSegSegmenter(ObjectSegmentationProvider):
             return None
 
         best_idx = int(np.argmax(scores))
-        best_mask = (masks[best_idx] > 0.5).astype(np.uint8)
-        logger.info(
-            f"YOLOv8-seg selected '{item_name}' mask with score {scores[best_idx]:.2f}"
-        )
+        best_mask: np.ndarray = (masks[best_idx] > 0.5).astype(np.uint8)
+        logger.info(f"YOLOv8-seg selected '{item_name}' mask with score {scores[best_idx]:.2f}")
         return best_mask
 
     @staticmethod

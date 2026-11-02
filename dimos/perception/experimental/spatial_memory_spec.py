@@ -25,6 +25,17 @@ class SpatialMemorySpec(Spec, Protocol):
     def query_by_text(self, text: str, limit: int = 5) -> list[dict]: ...  # type: ignore[type-arg]
 
 
+class TaggedLocationMemorySpec(Spec, Protocol):
+    """Read access to VLM-tagged places and objects, used by place/object navigation
+    and by the scene-graph HTTP endpoint."""
+
+    def find_robot_location(self, name: str) -> RobotLocation | None: ...
+    def query_tagged_location(self, query: str) -> RobotLocation | None: ...
+    def get_robot_locations(self) -> list[RobotLocation]: ...
+    def query_by_text(self, text: str, limit: int = 5) -> list[dict]: ...  # type: ignore[type-arg]
+    def get_stats(self) -> dict[str, int]: ...
+
+
 class PersonMemorySpec(Spec, Protocol):
     """What the person skills need from SpatialMemory: locate, tag and refresh people."""
 

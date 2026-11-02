@@ -59,7 +59,7 @@ from dimos.navigation.go2.replanning_a_star.module import (
     ReplanningAStarPlanner,
     ReplanningAStarPlannerConfig,
 )
-from dimos.perception.experimental.spatial_memory_spec import SpatialMemorySpec
+from dimos.perception.experimental.spatial_memory_spec import TaggedLocationMemorySpec
 from dimos.robot.unitree.type.lidar import repair_stale_ts
 from dimos.utils.logging_config import setup_logger
 from dimos.utils.reactive import backpressure
@@ -179,9 +179,9 @@ class PersistentGo2Map(Module):
                 raise ValueError("PGO requires SpatialMemory for synchronized tag corrections")
             if self._pgo_navigation is None:
                 raise ValueError("PGO requires PersistentGo2Planner for synchronized replanning")
-            self._pgo = PGOMap(
-                voxel_size=self.config.voxel_size, fixed_world=True, rebuild_cooldown_s=0
-            )
+            # rebuild_cooldown_s=0 keeps the rendered map re-placed on every frame,
+            # so pending loop corrections are applied without an explicit flush.
+            self._pgo = PGOMap(voxel_size=self.config.voxel_size, rebuild_cooldown_s=0)
             self._pgo_memory.update_pgo_graph(PoseGraph(), self._pgo_session)
 
         self._grid = VoxelGrid(voxel_size=self.config.voxel_size, frame_id="world")
@@ -516,7 +516,7 @@ class PersistentGo2Map(Module):
                     ).to_pose(ts=self._latest_odom.ts)
                 try:
                     rebuilt = self._pgo.add(aligned, pose)
-                    graph = self._pgo.graph()
+                    graph = self._pgo.pgo.snapshot()
                     revision = None
                     if rebuilt:
                         self._pgo_paused = True
@@ -869,8 +869,8 @@ class PersistentGo2Map(Module):
             assert self.config.map_file is not None
             path = Path(self.config.map_file)
             path.parent.mkdir(parents=True, exist_ok=True)
-            if self._pgo is not None:
-                self._pgo.flush()
+            # No explicit flush: PGOMap was built with rebuild_cooldown_s=0, so
+            # every accepted frame already re-places the map with current corrections.
             data = self._current_map().lcm_encode()
             with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
                 temporary = Path(file.name)
@@ -977,7 +977,7 @@ class PersistentGo2Planner(ReplanningAStarPlanner):
 
     config: PersistentGo2PlannerConfig
     _map_session: PersistentGo2Map
-    _spatial_memory: SpatialMemorySpec
+    _spatial_memory: TaggedLocationMemorySpec
     _costmapper: CostMapper
     _tag_view: TagViewSpec
 

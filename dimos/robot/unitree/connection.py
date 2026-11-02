@@ -432,9 +432,7 @@ class UnitreeWebRTCConnection(Resource):
 
     def rise_sit(self) -> bool:
         """Rise back to a standing posture from a sitting position."""
-        return bool(
-            self.publish_request(RTC_TOPIC["SPORT_MOD"], {"api_id": SPORT_CMD["RiseSit"]})
-        )
+        return bool(self.publish_request(RTC_TOPIC["SPORT_MOD"], {"api_id": SPORT_CMD["RiseSit"]}))
 
     def recovery_stand(self) -> bool:
         """Recover to a stance ready for more commands.
