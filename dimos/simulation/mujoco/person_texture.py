@@ -20,12 +20,13 @@ shading and leaves skin, hair and shoes alone, and means no new binary asset has
 be committed.
 """
 
-import cv2
 import numpy as np
 
 
 def recolor_person_texture(png: bytes) -> bytes:
     """Turn the navy top white and the beige trousers dark blue; return PNG bytes."""
+    import cv2
+
     image = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError("Person texture is not a decodable image")

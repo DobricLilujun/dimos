@@ -127,9 +127,7 @@ def is_mode_tool(tool_name: str) -> bool:
     return tool_name in MODE_PHRASES
 
 
-def phrase_for_transition(
-    tool_name: str, *, entered: bool, default: bool = True
-) -> str | None:
+def phrase_for_transition(tool_name: str, *, entered: bool, default: bool = True) -> str | None:
     """The line to speak for a transition; falls back to a neutral line.
 
     Falls back to ``DEFAULT_ENTER``/``DEFAULT_EXIT`` only when ``default`` is

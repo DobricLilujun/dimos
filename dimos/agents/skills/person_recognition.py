@@ -378,9 +378,7 @@ class NamedPersonRecognizerSkillContainer(Module):
         return f"Known people: {known}. Recognized so far: {seen}."
 
 
-# ---------------------------------------------------------------------------
 # Traditional-CV (OpenCV LBPH) backend
-# ---------------------------------------------------------------------------
 
 
 class _CenterCropFaceDetector:

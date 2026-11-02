@@ -29,7 +29,7 @@ unitree_go2_agentic = autoconnect(
     McpServer.blueprint(),
     McpClient.blueprint(),
     _common_agentic,
-    # --- Three new features (all inert by default; opt-in via CLI flags) ---
+    # Three new features (all inert by default; opt-in via CLI flags)
     # (1) Scene map / scene graph: SpatialMemory (in unitree_go2_spatial) already
     #     builds a native real-time scene map. Load a previously-generated one with
     #     `--spatial-memory.scene-map-dir <path>` (see SpatialConfig.scene_map_dir).

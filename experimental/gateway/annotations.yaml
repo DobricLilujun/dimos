@@ -77,6 +77,24 @@ robots:
         unitree-go2-agentic-ollama:
           title: Go2 agent (Ollama model)
           description: The Go2 agent with a local language model served by Ollama.
+        unitree-go2-agentic-persistent:
+          title: Go2 with a stored map
+          description: 'The Go2 agent on a map it keeps on disk: it relocalizes into a saved map instead of building a new one every run, and can navigate to places tagged in earlier runs.'
+        unitree-go2-agentic-persistent-demo:
+          title: Go2 stored-map agent (demo)
+          description: The stored-map Go2 agent wired for a replay/demo run.
+        unitree-go2-agentic-persistent-person-following:
+          title: Go2 stored map with person following
+          description: The stored-map Go2 agent, also recognizing named people by face, navigating to them and following them.
+        demo-unitree-go2-agentic-person-following:
+          title: 'Demo: Go2 agent finds and follows people'
+          description: The Go2 agent recognizing named people and walking to them.
+        demo-unitree-go2-agentic-persistent-person-following:
+          title: 'Demo: stored map plus person following'
+          description: The stored-map Go2 agent with face recognition, person navigation and following.
+        demo-unitree-go2-dynamic-goal:
+          title: 'Demo: Go2 chases a moving person'
+          description: 'A simulated person walks a loop while the Go2 replans to them every 0.5 m and stops short.'
         unitree-go2-cockpit:
           title: Go2 with a cockpit
           description: 'Map and navigation with an authored cockpit: video over the 3D voxel map.'

@@ -34,9 +34,7 @@ from dimos.agents.skills.person_recognition import (
 from dimos.msgs.sensor_msgs.Image import Image
 
 
-# ---------------------------------------------------------------------------
 # thread cleanup (cv tests start modules; stop them to avoid leaking threads)
-# ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _stop_created_modules(monkeypatch):
     created: list = []
@@ -89,9 +87,7 @@ class _FakeSpeaker:
         self.said.append(text)
 
 
-# ---------------------------------------------------------------------------
 # helpers
-# ---------------------------------------------------------------------------
 def _make_face(seed: int) -> np.ndarray:
     """Synthetic face-like image; LBPH can distinguish different seeds."""
     img = PILImage.fromarray(np.full((120, 120, 3), 30, np.uint8))
@@ -130,18 +126,14 @@ def _cv_ready(m: NamedPersonRecognizerSkillContainer) -> bool:
     return m._cv_recognizer is not None and m._cv_recognizer.is_ready()
 
 
-# ---------------------------------------------------------------------------
 # inert by default
-# ---------------------------------------------------------------------------
 def test_cv_inert_by_default():
     m = _make_cv(None, _FakeSpeaker())
     m.start()
     assert m._enabled is False
 
 
-# ---------------------------------------------------------------------------
 # core: gallery + query + speak
-# ---------------------------------------------------------------------------
 def test_cv_backend_recognizes(tmp_path):
     g = tmp_path / "gallery"
     _make_gallery(g)
@@ -169,9 +161,7 @@ def test_cv_backend_no_match_no_speak(tmp_path):
     assert sp.said == []
 
 
-# ---------------------------------------------------------------------------
 # unit: the LBPH recognizer + centre/whole-frame detector
-# ---------------------------------------------------------------------------
 def test_cv_lbph_recognizer(tmp_path):
     g = tmp_path / "gallery"
     _make_gallery(g)

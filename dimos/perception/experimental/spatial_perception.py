@@ -96,7 +96,7 @@ class SpatialConfig(ModuleConfig):
     chroma_client: Any = None  # Optional ChromaDB client for persistence
     visual_memory: VisualMemory | None = None  # Optional VisualMemory instance for storing images
 
-    # --- VLM-based automatic scene annotation (opt-in) ----------------------
+    # VLM-based automatic scene annotation (opt-in)
     # When ``vlm_url`` is set, SpatialMemory will call the OpenAI-compatible
     # vision endpoint for each stored keyframe and save the caption in the
     # frame metadata.  If ``vlm_enable_place_tagging`` is true, a place name
@@ -113,7 +113,7 @@ class SpatialConfig(ModuleConfig):
         validation_alias=AliasChoices("vlm_api_key", "openai_api_key"),
     )
 
-    # --- Object-level 3D annotation (opt-in) --------------------------------
+    # Object-level 3D annotation (opt-in)
     # When ``vlm_enable_object_tagging`` is true and a VLM endpoint is set,
     # the VLM is asked to also return a list of objects with 2D bboxes. Each
     # object is projected into 3D world coordinates using camera intrinsics,
@@ -124,7 +124,7 @@ class SpatialConfig(ModuleConfig):
     object_sensor_time_tolerance_s: float = 1.0
     object_segmenter: str = "auto"  # "auto" | "vlm" | "yolo"
 
-    # --- Object-tag dedup + ground emphasis ---------------------------------
+    # Object-tag dedup + ground emphasis
     # Fuzzy labels must not merge more distant instances than exact labels.
     tag_exact_name_distance_m: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     tag_dedup_distance_m: float = Field(default=1.0, gt=0, allow_inf_nan=False)

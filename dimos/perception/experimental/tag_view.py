@@ -14,12 +14,13 @@
 
 from typing import Any
 
-import cv2
 import numpy as np
 
 
 def match_tag_view(reference: np.ndarray, current: np.ndarray) -> dict[str, Any]:
     """Verify local feature correspondences, not merely semantic room similarity."""
+    import cv2
+
     orb = cv2.ORB.create(nfeatures=1500)
     keys_a, descriptors_a = orb.detectAndCompute(reference, None)
     keys_b, descriptors_b = orb.detectAndCompute(current, None)

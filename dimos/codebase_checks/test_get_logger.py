@@ -34,6 +34,7 @@ IGNORED_DIRS = {
 WHITELIST = [
     ("dimos/utils/logging_config.py", "logger_obj = logging.getLogger(logger_name)"),
     ("dimos/utils/logging_config.py", "stdlib_logger = logging.getLogger(name)"),
+    ("dimos/utils/logging_config.py", "logger = logging.getLogger(name)"),
     ("dimos/core/coordination/python_worker.py", "lg = logging.getLogger(name)"),
     (
         "dimos/hardware/sensors/camera/gstreamer/gstreamer_sender.py",

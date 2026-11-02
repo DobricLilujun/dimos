@@ -77,9 +77,7 @@ class VoiceActivityGate(AbstractAudioTransform):
 
         instantaneous = self.volume_func(audio_event.data)
         # Smooth the energy so a single spike or dip does not flip the gate.
-        self._energy = (
-            1 - self.smoothing
-        ) * self._energy + self.smoothing * instantaneous
+        self._energy = (1 - self.smoothing) * self._energy + self.smoothing * instantaneous
 
         if not self._active:
             if self._energy >= self.speech_threshold:

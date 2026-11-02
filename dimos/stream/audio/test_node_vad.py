@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import numpy as np
-import pytest
 
 from dimos.stream.audio.base import AudioEvent
 from dimos.stream.audio.node_normalizer import AudioNormalizer
@@ -80,9 +79,7 @@ def test_noise_gate_does_not_amplify_fan():
 
 
 def test_noise_gate_boosts_speech():
-    normalizer = AudioNormalizer(
-        adapt_speed=0.9, noise_gate_threshold=0.03, noise_gate_floor=0.02
-    )
+    normalizer = AudioNormalizer(adapt_speed=0.9, noise_gate_threshold=0.03, noise_gate_floor=0.02)
     out = normalizer._normalize_audio(_frame(_speech(level=0.4)))
     assert calculate_rms_volume(out.data) > 0.2  # speech is boosted
 
@@ -94,7 +91,5 @@ def test_vad_then_normalizer_reacts_to_speech_not_fan():
     for _ in range(40):
         event = gate._gate_frame(_frame(_fan(level=0.01)))
         normalizer._normalize_audio(event)
-    speech = normalizer._normalize_audio(
-        gate._gate_frame(_frame(_speech(level=0.4)))
-    )
+    speech = normalizer._normalize_audio(gate._gate_frame(_frame(_speech(level=0.4))))
     assert calculate_rms_volume(speech.data) > 0.2
