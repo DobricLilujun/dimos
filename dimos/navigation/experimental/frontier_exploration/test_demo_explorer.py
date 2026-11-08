@@ -293,6 +293,23 @@ def test_failed_goal_cooldown_excludes_region_then_expires(explorer, mocker):
     assert explorer.select_goal(pose, costmap) == first
 
 
+def test_continuity_bonus_prefers_the_leg_already_under_way(explorer):
+    """Discount decays with distance from the frontier we are walking toward."""
+    explorer.options = ExploreOptions()
+    explorer._last_selected = Vector3(4.0, 0.0, 0.0)
+
+    assert explorer._continuity_bonus(Vector3(4.0, 0.0, 0.0)) == pytest.approx(0.25)
+    assert explorer._continuity_bonus(Vector3(6.0, 0.0, 0.0)) == pytest.approx(0.125)
+    assert explorer._continuity_bonus(Vector3(8.0, 0.0, 0.0)) == 0.0
+
+    explorer._last_selected = None
+    assert explorer._continuity_bonus(Vector3(4.0, 0.0, 0.0)) == 0.0
+
+    explorer.options = ExploreOptions(continuity_bonus=0.0)
+    explorer._last_selected = Vector3(4.0, 0.0, 0.0)
+    assert explorer._continuity_bonus(Vector3(4.0, 0.0, 0.0)) == 0.0
+
+
 def test_low_gain_does_not_report_completion_before_enclosure(explorer):
     before = explorer.latest_costmap
     for i in range(10):

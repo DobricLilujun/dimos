@@ -22,12 +22,16 @@ for autonomous navigation using the dimos Costmap and Vector types.
 from collections import deque
 from dataclasses import dataclass
 from enum import IntFlag
+import heapq
+import math
 import threading
+import time
 from typing import Any
 
 from dimos_lcm.std_msgs import Bool
 import numpy as np
 from reactivex.disposable import Disposable
+from scipy.ndimage import binary_dilation, label
 
 from dimos.agents.annotation import skill
 from dimos.agents.capabilities import CAP_MOVEMENT
@@ -91,6 +95,46 @@ class WavefrontConfig(ModuleConfig):
     info_gain_threshold: float = 0.03
     num_no_gain_attempts: int = 2
     goal_timeout: float = 15.0
+    # Budget for the leg itself: goal_timeout plus path length / this speed, so a
+    # far frontier is not declared a failure just because it is far.
+    goal_speed: float = 0.4
+    # A target that timed out is cooled off for this long instead of being picked again.
+    failure_cooldown: float = 60.0
+    # Goals already reached are excluded inside this radius, so the robot does not
+    # re-approach the same spot from a new angle.
+    visited_exclusion_radius: float = 0.6
+
+
+def reachable_distances(grid: OccupancyGrid, pose: Vector3) -> np.ndarray[Any, Any]:
+    """Dijkstra over free cells; diagonal steps cannot cut occupied corners.
+
+    Returns metres of *travel* cost from the robot to every cell, ``inf`` where the
+    cell cannot be reached. Straight-line distance is not enough: a frontier on the
+    far side of a wall is close, but unreachable.
+    """
+    free = grid.grid == CostValues.FREE
+    distances = np.full(free.shape, np.inf)
+    start = grid.world_to_grid(pose)
+    x, y = math.floor(start.x), math.floor(start.y)
+    if not (0 <= x < grid.width and 0 <= y < grid.height and free[y, x]):
+        return distances
+    distances[y, x] = 0
+    queue = [(0.0, y, x)]
+    while queue:
+        distance, row, col = heapq.heappop(queue)
+        if distance != distances[row, col]:
+            continue
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+            ny, nx = row + dy, col + dx
+            if not (0 <= nx < grid.width and 0 <= ny < grid.height and free[ny, nx]):
+                continue
+            if dx and dy and not (free[row, nx] and free[ny, col]):
+                continue
+            candidate = distance + grid.resolution * (math.sqrt(2) if dx and dy else 1)
+            if candidate < distances[ny, nx]:
+                distances[ny, nx] = candidate
+                heapq.heappush(queue, (candidate, ny, nx))
+    return distances
 
 
 class WavefrontFrontierExplorer(Module):
@@ -142,6 +186,11 @@ class WavefrontFrontierExplorer(Module):
         # Latest data
         self.latest_costmap: OccupancyGrid | None = None
         self.latest_odometry: PoseStamped | None = None
+
+        # Targets that timed out: (goal, monotonic deadline). Re-selecting a target the
+        # navigator could not reach is the main source of re-walked ground.
+        self._failed: list[tuple[Vector3, float]] = []
+        self._last_goal_cost = 0.0
 
         # Goal reached event
         self.goal_reached_event = threading.Event()
@@ -560,7 +609,7 @@ class WavefrontFrontierExplorer(Module):
         # 5. Direction momentum (already in 0-1 range from dot product)
         momentum_score = self._compute_direction_momentum_score(frontier, robot_pose)
 
-        logger.info(
+        logger.debug(
             f"Distance score: {distance_score:.2f}, Info gain: {info_gain_score:.2f}, Explored goals: {explored_goals_score:.2f}, Obstacles: {obstacles_score:.2f}, Momentum: {momentum_score:.2f}"
         )
 
@@ -608,7 +657,7 @@ class WavefrontFrontierExplorer(Module):
 
             valid_frontiers.append((frontier, score))
 
-        logger.info(f"Valid frontiers: {len(valid_frontiers)}")
+        logger.debug(f"Valid frontiers: {len(valid_frontiers)}")
 
         if not valid_frontiers:
             return []
@@ -619,73 +668,130 @@ class WavefrontFrontierExplorer(Module):
         # Extract just the frontiers (remove scores) and return as list
         return [frontier for frontier, _ in valid_frontiers]
 
-    def get_exploration_goal(self, robot_pose: Vector3, costmap: OccupancyGrid) -> Vector3 | None:
-        """
-        Get the single best exploration goal using comprehensive frontier scoring.
-
-        Args:
-            robot_pose: Current robot position in world coordinates
-            costmap: Costmap for additional analysis
-
-        Returns:
-            Single best frontier goal in world coordinates, or None if no suitable frontiers found
-        """
-        # Check if we should compare costmaps for information gain
-        if len(self.explored_goals) > 5 and self.last_costmap is not None:
-            current_info = self._count_costmap_information(costmap)
-            last_info = self._count_costmap_information(self.last_costmap)
-
-            # Check if information increase meets minimum percentage threshold
-            if last_info > 0:  # Avoid division by zero
-                info_increase_percent = (current_info - last_info) / last_info
-                if info_increase_percent < self.config.info_gain_threshold:
-                    logger.info(
-                        f"Information increase ({info_increase_percent:.2f}) below threshold ({self.config.info_gain_threshold:.2f})"
-                    )
-                    logger.info(
-                        f"Current information: {current_info}, Last information: {last_info}"
-                    )
-                    self.no_gain_counter += 1
-                    if self.no_gain_counter >= self.config.num_no_gain_attempts:
-                        logger.info(
-                            f"No information gain for {self.no_gain_counter} consecutive attempts"
-                        )
-                        self.no_gain_counter = 0  # Reset counter when stopping due to no gain
-                        self.stop_exploration()
-                        return None
-                else:
-                    self.no_gain_counter = 0
-
-        # Always detect new frontiers to get most up-to-date information
-        # The new algorithm filters out explored areas and returns only the best frontier
-        frontiers = self.detect_frontiers(robot_pose, costmap)
-
-        if not frontiers:
-            # Store current costmap before returning
-            self.last_costmap = costmap  # type: ignore[assignment]
-            self.reset_exploration_session()
-            return None
-
-        # Update exploration direction based on best goal selection
-        if frontiers:
-            self._update_exploration_direction(robot_pose, frontiers[0])
-
-            # Store the selected goal as explored
-            selected_goal = frontiers[0]
-            self.mark_explored_goal(selected_goal)
-
-            # Store current costmap for next comparison
-            self.last_costmap = costmap  # type: ignore[assignment]
-
-            return selected_goal
-
-        # Store current costmap before returning
-        self.last_costmap = costmap  # type: ignore[assignment]
-        return None
-
     def mark_explored_goal(self, goal: Vector3) -> None:
         """Mark a goal as explored."""
         self.explored_goals.append(goal)
+
+    @rpc
+    def mark_failed_goal(self, goal: Vector3) -> None:
+        """Cool off a frontier the robot could not reach.
+
+        Without this, a frontier the navigator cannot route to keeps winning the
+        selection every cycle, and the robot walks the same ground indefinitely.
+
+        Args:
+            goal: The frontier that timed out or was reported unreachable.
+        """
+        deadline = time.monotonic() + self.config.failure_cooldown
+        self._failed.append((goal, deadline))
+        logger.info(
+            "Cooling off unreachable frontier",
+            cooldown_s=self.config.failure_cooldown,
+            x=round(goal.x, 2),
+            y=round(goal.y, 2),
+        )
+
+    def _active_failures(self) -> list[tuple[Vector3, float]]:
+        """Cooled-off frontiers that have not expired yet."""
+        now = time.monotonic()
+        self._failed = [entry for entry in self._failed if entry[1] > now]
+        return self._failed
+
+    def select_goal(self, pose: Vector3, grid: OccupancyGrid) -> Vector3 | None:
+        """Choose the cheapest *reachable* frontier.
+
+        Scoring frontiers by straight-line distance keeps sending the robot at walls:
+        a frontier on the far side of a closed door is close, so it wins, the
+        navigator cannot route to it, the goal times out, and next cycle the same
+        frontier wins again. This ranks by travel cost over the costmap, so frontiers
+        the robot cannot get to are never candidates, and cooled-off targets are
+        blocked out while they are fresh.
+
+        Args:
+            pose: Robot position in world coordinates.
+            grid: Inflated costmap to plan over.
+
+        Returns:
+            The frontier to walk to, or None when nothing new is reachable.
+        """
+        failures = self._active_failures()
+        goal = self._select_frontier(pose, grid, failures, block_failures=True)
+        if goal is None and failures:
+            # Cooling off unreachable targets can wall the robot in: it stopped right
+            # where it gave up, and the blocking disc can sit in its only doorway.
+            # Release the blocking so it can drive away. The frontier exclusions still
+            # apply, so it will not simply walk back into that spot.
+            logger.warning("No frontier around the cooled-off goals; releasing the area blocking")
+            goal = self._select_frontier(pose, grid, failures, block_failures=False)
+        return goal
+
+    def _select_frontier(
+        self,
+        pose: Vector3,
+        grid: OccupancyGrid,
+        failures: list[tuple[Vector3, float]],
+        *,
+        block_failures: bool,
+    ) -> Vector3 | None:
+        """Rank reachable frontiers once; see :meth:`select_goal` for why this runs twice."""
+        if failures and block_failures:
+            grid = grid.copy()
+            yy, xx = np.indices(grid.grid.shape)
+            for previous, _ in failures:
+                cell = grid.world_to_grid(previous)
+                limit = (0.75 / grid.resolution) ** 2
+                blocked = (xx - cell.x) ** 2 + (yy - cell.y) ** 2 < limit
+                grid.grid[blocked] = CostValues.OCCUPIED
+
+        distances = reachable_distances(grid, pose)
+        if not np.any(np.isfinite(distances)):
+            return None
+
+        frontier = np.isfinite(distances) & binary_dilation(
+            grid.grid == CostValues.UNKNOWN, structure=np.ones((3, 3), dtype=bool)
+        )
+        yy, xx = np.indices(frontier.shape)
+        for previous in self.explored_goals:
+            cell = grid.world_to_grid(previous)
+            radius = self.config.visited_exclusion_radius / grid.resolution
+            frontier &= (xx - cell.x) ** 2 + (yy - cell.y) ** 2 >= radius**2
+        for previous, _ in failures:
+            cell = grid.world_to_grid(previous)
+            radius = 0.75 / grid.resolution
+            frontier &= (xx - cell.x) ** 2 + (yy - cell.y) ** 2 >= radius**2
+
+        clusters, count = label(frontier)
+        min_cells = max(1, int(self.config.min_frontier_perimeter / grid.resolution))
+        goals: list[Vector3] = []
+        costs: list[float] = []
+        sizes: list[int] = []
+        for cluster in range(1, count + 1):
+            rows, cols = np.where(clusters == cluster)
+            if len(rows) < min_cells:
+                continue
+            # Cheapest cell to walk to inside the cluster, not a centroid that can
+            # land in unknown space or behind the very obstacle we are routing around.
+            index = int(np.argmin(distances[rows, cols]))
+            row, col = int(rows[index]), int(cols[index])
+            world = grid.grid_to_world((col, row, 0))
+            goals.append(Vector3(world.x, world.y, 0.0))
+            costs.append(float(distances[row, col]))
+            sizes.append(len(rows))
+
+        if not goals:
+            return None
+
+        # Information gain per metre walked: a wide opening a few metres away beats a
+        # crack in a wall at our feet, but not by much.
+        best = min(range(len(goals)), key=lambda i: -(math.sqrt(sizes[i]) / (costs[i] + 0.5)))
+        self._last_goal_cost = costs[best]
+        logger.info(
+            f"Frontier selected at ({goals[best].x:.2f}, {goals[best].y:.2f})",
+            path_cost_m=round(self._last_goal_cost, 2),
+            candidates=len(goals),
+            cooling_targets=len(failures),
+        )
+        return goals[best]
 
     def reset_exploration_session(self) -> None:
         """
@@ -698,6 +804,7 @@ class WavefrontFrontierExplorer(Module):
         self.exploration_direction = Vector3(0.0, 0.0, 0.0)  # Reset exploration direction
         self.last_costmap = None  # Clear last costmap comparison
         self.no_gain_counter = 0  # Reset no-gain attempt counter
+        self._failed.clear()  # Forget cooled-off targets
         self._cache.clear()  # Clear frontier point cache
 
         logger.info("Exploration session reset - all state variables cleared")
@@ -797,7 +904,7 @@ class WavefrontFrontierExplorer(Module):
 
             # Get exploration goal
             costmap = simple_inflate(self.latest_costmap, 0.25)
-            goal = self.get_exploration_goal(robot_pose, costmap)
+            goal = self.select_goal(robot_pose, costmap)
 
             if goal:
                 # Publish goal to navigator
@@ -818,14 +925,23 @@ class WavefrontFrontierExplorer(Module):
                 # Clear the goal reached event for next iteration
                 self.goal_reached_event.clear()
 
-                # Wait for goal to be reached or timeout
-                logger.info("Waiting for goal to be reached...")
-                goal_reached = self.goal_reached_event.wait(timeout=self.config.goal_timeout)
+                # The budget grows with the leg, so a frontier is never called failed
+                # merely for being far away; a robot that stops making progress still
+                # gives up on it and cools it off.
+                budget = self.config.goal_timeout + self._last_goal_cost / max(
+                    self.config.goal_speed, 0.05
+                )
+                logger.info(f"Waiting up to {budget:.0f}s for the goal to be reached...")
+                goal_reached = self.goal_reached_event.wait(timeout=budget)
 
                 if goal_reached:
                     logger.info("Goal reached, finding next frontier")
+                    self.mark_explored_goal(goal)
                 else:
-                    logger.warning("Goal timeout after 30 seconds, finding next frontier anyway")
+                    logger.warning(
+                        f"Goal not reached within {budget:.0f}s; cooling it off and replanning"
+                    )
+                    self.mark_failed_goal(goal)
             else:
                 consecutive_failures += 1
 

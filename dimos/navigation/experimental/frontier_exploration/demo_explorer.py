@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import heapq
 import math
 import threading
 import time
@@ -42,6 +41,7 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.experimental.frontier_exploration.wavefront_frontier_goal_selector import (
     WavefrontConfig,
     WavefrontFrontierExplorer,
+    reachable_distances,
 )
 from dimos.navigation.go2.replanning_a_star.spec import NavigationInterfaceSpec
 from dimos.spec.utils import Spec
@@ -64,6 +64,11 @@ class ExploreOptions(BaseModel):
     # detour, so the robot never circles back over covered ground.
     greedy: bool = True
     max_leg_distance_m: float = Field(default=1.5, ge=0.3, le=10, allow_inf_nan=False)
+    # Leg continuity: a frontier in the direction we are already walking counts as
+    # cheaper than its raw metres, so the robot finishes a corridor instead of
+    # crossing back over covered ground for a marginally closer crack in a wall.
+    continuity_bonus: float = Field(default=0.25, ge=0.0, le=0.6)
+    continuity_radius_m: float = Field(default=4.0, ge=1.0, le=20.0, allow_inf_nan=False)
     # Coverage completion: only end when this fraction of reachable free cells
     # has been visited, so the run never stops early on a low-gain plateau.
     coverage_threshold: float = Field(default=0.9, ge=0, le=1, allow_inf_nan=False)
@@ -85,33 +90,6 @@ class DemoExplorerConfig(WavefrontConfig):
     recovery_back_distance: float = Field(default=0.4, ge=0.05, le=3.0, allow_inf_nan=False)
 
 
-def reachable_distances(grid: OccupancyGrid, pose: Vector3) -> np.ndarray[Any, Any]:
-    """Dijkstra over free cells; diagonal steps cannot cut occupied corners."""
-    free = grid.grid == CostValues.FREE
-    distances = np.full(free.shape, np.inf)
-    start = grid.world_to_grid(pose)
-    x, y = math.floor(start.x), math.floor(start.y)
-    if not (0 <= x < grid.width and 0 <= y < grid.height and free[y, x]):
-        return distances
-    distances[y, x] = 0
-    queue = [(0.0, y, x)]
-    while queue:
-        distance, row, col = heapq.heappop(queue)
-        if distance != distances[row, col]:
-            continue
-        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
-            ny, nx = row + dy, col + dx
-            if not (0 <= nx < grid.width and 0 <= ny < grid.height and free[ny, nx]):
-                continue
-            if dx and dy and not (free[row, nx] and free[ny, col]):
-                continue
-            candidate = distance + grid.resolution * (math.sqrt(2) if dx and dy else 1)
-            if candidate < distances[ny, nx]:
-                distances[ny, nx] = candidate
-                heapq.heappush(queue, (candidate, ny, nx))
-    return distances
-
-
 class DemoExplorer(WavefrontFrontierExplorer):
     config: DemoExplorerConfig
     _navigation: NavigationInterfaceSpec
@@ -128,6 +106,8 @@ class DemoExplorer(WavefrontFrontierExplorer):
         self._result: bool | None = None
         self._awaiting_goal = False
         self._failed: list[tuple[Vector3, float]] = []
+        # The frontier this leg is aimed at, used only to bias the next choice.
+        self._last_selected: Vector3 | None = None
         self._phase = "idle"
         self._reason = "Not started"
         self._odom_received = 0.0
@@ -434,10 +414,21 @@ class DemoExplorer(WavefrontFrontierExplorer):
                 grid,
                 stage="goal_selection",
             )
-            self._selection_reason = (
-                "Robot start cell is outside the map or not free after inflation"
-            )
-            return None
+            if self._failed:
+                # Cooling off unreachable targets can wall the robot in, because it
+                # stopped right where it gave up. Release the area blocking so it can
+                # drive away; the frontier exclusions below still stop it from walking
+                # straight back into the same spot.
+                self._status(
+                    "selecting", "Cooled-off goals cover the robot; releasing area blocking"
+                )
+                grid = inflated
+                distances = reachable_distances(grid, pose)
+            if not np.any(np.isfinite(distances)):
+                self._selection_reason = (
+                    "Robot start cell is outside the map or not free after inflation"
+                )
+                return None
         frontier = np.isfinite(distances) & binary_dilation(
             grid.grid == CostValues.UNKNOWN, structure=np.ones((3, 3), dtype=bool)
         )
@@ -514,7 +505,11 @@ class DemoExplorer(WavefrontFrontierExplorer):
         # robot never takes a long detour or circles back over covered ground.
         if selected is None:
             if self.options.greedy:
-                selected = goals[min(range(len(goals)), key=lambda index: costs[index])]
+                effective = [
+                    cost * (1.0 - self._continuity_bonus(goal))
+                    for goal, cost in zip(goals, costs, strict=True)
+                ]
+                selected = goals[min(range(len(goals)), key=lambda index: effective[index])]
             elif self.options.strategy == "frontier":
                 selected = self._rank_frontiers(goals, sizes, pose, grid)[0]
             else:
@@ -522,7 +517,18 @@ class DemoExplorer(WavefrontFrontierExplorer):
                     math.sqrt(size) / (cost + 0.5) for size, cost in zip(sizes, costs, strict=True)
                 ]
                 selected = goals[int(np.argmax(scores))]
+        self._last_selected = selected
         return self._short_leg(pose, selected, grid, distances)
+
+    def _continuity_bonus(self, goal: Vector3) -> float:
+        """Discount for a frontier that continues the leg the robot is already on."""
+        previous = self._last_selected
+        if previous is None or self.options.continuity_bonus <= 0:
+            return 0.0
+        distance = math.hypot(goal.x - previous.x, goal.y - previous.y)
+        if distance >= self.options.continuity_radius_m:
+            return 0.0
+        return self.options.continuity_bonus * (1.0 - distance / self.options.continuity_radius_m)
 
     def _short_leg(
         self, pose: Vector3, goal: Vector3, grid: OccupancyGrid, distances: np.ndarray[Any, Any]
