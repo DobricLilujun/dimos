@@ -214,10 +214,13 @@ class Agent:
         seconds the planner spends looking for one.
         """
         # Unknown is drivable here, because that is what a flat 2D costmap says: the
-        # navigator will happily head into space it has never seen.
-        path = astar(
-            self.costmap().grid, (self.pose.y, self.pose.x), (goal.y, goal.x), self.world
-        )
+        # navigator will happily head into space it has never seen. The walker opens a
+        # hole under the robot the same way the selector does, since it is usually
+        # standing in an obstacle's inflation buffer.
+        planned = self.costmap()
+        if planned.grid[int(self.pose.y / RES), int(self.pose.x / RES)] == WALL:
+            planned = _open_start(planned, self.pose)
+        path = astar(planned.grid, (self.pose.y, self.pose.x), (goal.y, goal.x))
         if path is None:
             self.attempts += 1
             self.failures += 1
@@ -273,11 +276,7 @@ def astar(
     if not (0 <= s[0] < rows and 0 <= s[1] < cols):
         return None
     if belief[s] == WALL:
-        # Standing in the inflation buffer of an obstacle is normal while passing it.
-        opened = _open_start(grid_of(world, belief, inflated=True), Vector3(*reversed(start))).grid
-        if opened[s] == WALL:
-            return None
-        belief = opened
+        return None
     if not (0 <= g[0] < rows and 0 <= g[1] < cols):
         return None
     open_set: list[tuple[float, float, tuple[int, int]]] = [(0.0, 0.0, s)]
