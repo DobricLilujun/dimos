@@ -72,6 +72,10 @@ class World:
     solid: np.ndarray  # obstacles a lidar at SENSOR height can see
     free: np.ndarray  # the cells worth mapping
     start: tuple[float, float]
+    # The footprint of a flight of steps, if the scene has one. A flat costmap reads
+    # those cells as obstacles, so they are never entered; whether the robot drives
+    # onto them is the only upstairs question a height-blind map can answer.
+    flight: np.ndarray | None = None
 
 
 def raster(scene: Scene, *, stairs_free: bool = False) -> World:
@@ -86,6 +90,7 @@ def raster(scene: Scene, *, stairs_free: bool = False) -> World:
     cols = math.ceil((hi[0] - origin_x) / RES) + 1
     rows = math.ceil((hi[1] - origin_y) / RES) + 1
     solid = np.zeros((rows, cols), dtype=bool)
+    flight = np.zeros((rows, cols), dtype=bool)
     for box in scene.boxes:
         if box.half[2] <= 0:
             continue
@@ -103,6 +108,8 @@ def raster(scene: Scene, *, stairs_free: bool = False) -> World:
         if not visible:
             continue
         is_step = box.kind == "stair"
+        if is_step:
+            flight[r0:r1, c0:c1] = True
         if is_step and stairs_free:
             continue
         solid[r0:r1, c0:c1] = True
@@ -115,7 +122,13 @@ def raster(scene: Scene, *, stairs_free: bool = False) -> World:
     start = (sx, sy)
     if not free[int((sy - origin_y) / RES), int((sx - origin_x) / RES)]:
         raise ValueError(f"start of {scene.name} lands inside an obstacle")
-    return World(shape=(rows, cols), solid=solid, free=free, start=start)
+    return World(
+        shape=(rows, cols),
+        solid=solid,
+        free=free,
+        start=start,
+        flight=flight if flight.any() else None,
+    )
 
 
 def inflate(mask: np.ndarray, cells: int) -> np.ndarray:
@@ -233,6 +246,13 @@ class Agent:
                 self.scan()
         self.scan()
         return math.hypot(self.pose.x - goal.x, self.pose.y - goal.y) < 0.5
+
+    def flight_share(self, world: World) -> float:
+        """How much of a flight of steps the robot actually drove onto."""
+
+        if world.flight is None:
+            return 0.0
+        return float(np.count_nonzero(self.visited & world.flight) / np.count_nonzero(world.flight))
 
     def covered(self) -> float:
         """Fraction of the ground-truth free area the belief has resolved."""
@@ -411,6 +431,7 @@ def run(
         "rewalk_pct": 100.0 * agent.rewalked / max(agent.distance, 1e-9),
         "failures": float(agent.failures),
         "goals": float(agent.attempts),
+        "climbed": agent.flight_share(world),
     }
 
 
@@ -440,7 +461,10 @@ def main(seeds: range = range(1, 6), scenes: tuple[str, ...] = ("office", "corri
 
 def _report(seeds: range, scene: str) -> None:
     print(f"\nscene={scene} seeds={list(seeds)} resolution={RES} m lidar={RAYS} rays/{RANGE:g} m\n")
-    header = f"{'policy':<22}{'coverage':>9}{'minutes':>9}{'metres':>9}{'re-walk%':>10}{'failed':>8}{'goals':>7}"
+    header = (
+        f"{'policy':<22}{'coverage':>9}{'minutes':>9}{'metres':>9}"
+        f"{'re-walk%':>10}{'failed':>8}{'goals':>7}{'stairs%':>9}"
+    )
     print(header)
     print("-" * len(header))
     for label, config in POLICIES:
