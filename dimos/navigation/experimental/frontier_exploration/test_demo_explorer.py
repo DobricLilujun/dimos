@@ -31,6 +31,8 @@ from dimos.navigation.experimental.frontier_exploration import demo_explorer
 from dimos.navigation.experimental.frontier_exploration.demo_explorer import (
     DemoExplorer,
     ExploreOptions,
+)
+from dimos.navigation.experimental.frontier_exploration.wavefront_frontier_goal_selector import (
     reachable_distances,
 )
 
