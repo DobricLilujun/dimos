@@ -32,14 +32,19 @@ from dimos.agents.skills.person_navigation import (
 )
 from dimos.agents.system_prompt import SYSTEM_PROMPT
 from dimos.core.coordination.blueprints import autoconnect
+from dimos.mapping.relocalization.go2.persistent import PersistentGo2Planner
+from dimos.navigation.experimental.frontier_exploration.wavefront_frontier_goal_selector import (
+    WavefrontFrontierExplorer,
+)
 from dimos.navigation.go2.replanning_a_star.goal_tracker import GoalTracker
-from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent_console import (
-    unitree_go2_agentic_persistent_demo,
+from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_persistent import (
+    unitree_go2_agentic_persistent,
 )
 
 unitree_go2_agentic_persistent_person_following = (
     autoconnect(
-        unitree_go2_agentic_persistent_demo,
+        unitree_go2_agentic_persistent,
+        PersistentGo2Planner.blueprint(navigation_speed_limit=0.55),
         # Off until the follow skill starts it; the skill supplies the targets.
         GoalTracker.blueprint(),
         PersonNavigationSkillContainer.blueprint(),
@@ -47,7 +52,9 @@ unitree_go2_agentic_persistent_person_following = (
     )
     # follow_person drives cmd_vel directly with no obstacle avoidance and needs a Qwen
     # key; the planner-based skill replaces it.
-    .disabled_modules(PersonFollowSkillContainer)
+    # Following a person drives cmd_vel directly; the stack's own frontier
+    # exploration would fight it for the same stream.
+    .disabled_modules(WavefrontFrontierExplorer, PersonFollowSkillContainer)
     .remappings([(PersonNavigationSkillContainer, "cmd_vel", "session_cmd_vel")])
     .global_config(n_workers=10)
 )
