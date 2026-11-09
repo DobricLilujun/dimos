@@ -144,12 +144,24 @@ def test_no_frontier_when_everything_is_known(explorer):
     assert explorer.select_goal(Vector3(2.0, 2.0, 0.0), grid(values)) is None
 
 
-def test_robot_standing_on_an_obstacle_gets_no_goal(explorer):
+def test_robot_reading_inside_an_obstacle_still_explains(explorer):
+    """Odometry drift puts the robot inside a mapped wall. It is physically there, so
+    the map is wrong under it; refusing to plan would park it forever."""
     values = np.full((5, 5), UNKNOWN, dtype=np.int8)
     values[1:4, 1:4] = FREE
     values[2, 2] = WALL
 
-    assert explorer.select_goal(Vector3(2.5, 2.5, 0.0), grid(values)) is None
+    goal = explorer.select_goal(Vector3(2.5, 2.5, 0.0), grid(values))
+
+    assert goal is not None
+    # A real frontier inside the mapped patch, not a halt.
+    assert 1.0 <= goal.x <= 3.0 and 1.0 <= goal.y <= 3.0
+
+
+def test_robot_off_the_map_gets_no_goal(explorer):
+    values = np.full((3, 3), FREE, dtype=np.int8)
+
+    assert explorer.select_goal(Vector3(50.0, 50.0, 0.0), grid(values)) is None
 
 
 def test_session_reset_forgets_failures(explorer):

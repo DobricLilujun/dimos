@@ -88,6 +88,9 @@ class FrontierCache:
 
 class WavefrontConfig(ModuleConfig):
     min_frontier_perimeter: float = 0.5
+    # Obstacles are grown by this much for planning. It also sets how far a frontier
+    # may sit from unknown space, so it is one number rather than two that can disagree.
+    costmap_inflation: float = 0.25
     occupancy_threshold: int = 99
     safe_distance: float = 3.0
     lookahead_distance: float = 5.0
@@ -100,9 +103,11 @@ class WavefrontConfig(ModuleConfig):
     goal_speed: float = 0.4
     # A target that timed out is cooled off for this long instead of being picked again.
     failure_cooldown: float = 60.0
-    # Goals already reached are excluded inside this radius, so the robot does not
-    # re-approach the same spot from a new angle.
+    # A goal already reached is refused as a repeat for this long, inside this radius.
+    # It expires because reaching the next part of a building often means driving back
+    # through ground already crossed; refusing it forever ends the run early.
     visited_exclusion_radius: float = 0.6
+    visited_exclusion_ttl: float = 30.0
 
 
 def reachable_distances(grid: OccupancyGrid, pose: Vector3) -> np.ndarray[Any, Any]:
@@ -111,6 +116,7 @@ def reachable_distances(grid: OccupancyGrid, pose: Vector3) -> np.ndarray[Any, A
     Returns metres of *travel* cost from the robot to every cell, ``inf`` where the
     cell cannot be reached. Straight-line distance is not enough: a frontier on the
     far side of a wall is close, but unreachable.
+
     """
     free = grid.grid == CostValues.FREE
     distances = np.full(free.shape, np.inf)
@@ -135,6 +141,46 @@ def reachable_distances(grid: OccupancyGrid, pose: Vector3) -> np.ndarray[Any, A
                 distances[ny, nx] = candidate
                 heapq.heappush(queue, (candidate, ny, nx))
     return distances
+
+
+def _open_start(grid: OccupancyGrid, pose: Vector3, metres: float = 0.3) -> OccupancyGrid:
+    """A copy of the map with a drivable hole opened around ``pose``.
+
+    The robot is usually standing inside the inflation buffer of an obstacle it is
+    passing, which makes its own cell read as occupied and the whole map unreachable.
+    """
+
+    opened = grid.copy()
+    centre = grid.world_to_grid(pose)
+    row, col = math.floor(centre.y), math.floor(centre.x)
+    if not (0 <= row < opened.height and 0 <= col < opened.width):
+        return opened
+    reach = max(0, math.ceil(metres / grid.resolution))
+    rows, cols = np.indices(opened.grid.shape)
+    near = (rows - row) ** 2 + (cols - col) ** 2 <= reach**2
+    opened.grid[near & (opened.grid != CostValues.UNKNOWN)] = CostValues.FREE
+    return opened
+
+
+def _nearest_free_cell(
+    free: np.ndarray, row: int, col: int, resolution: float, metres: float = 0.6
+) -> tuple[int, int] | None:
+    """The closest free cell to a blocked start, no further than ``metres`` away."""
+
+    reach = max(1, math.ceil(metres / resolution))
+    rows, cols = free.shape
+    r0, r1 = max(0, row - reach), min(rows, row + reach + 1)
+    c0, c1 = max(0, col - reach), min(cols, col + reach + 1)
+    yy, xx = np.nonzero(free[r0:r1, c0:c1])
+    if not len(yy):
+        return None
+    dy, dx = yy + r0 - row, xx + c0 - col
+    within = (dy**2 + dx**2) * resolution**2 <= metres**2
+    if not within.any():
+        return None
+    dy, dx = dy[within], dx[within]
+    index = int(np.argmin(dy**2 + dx**2))
+    return row + int(dy[index]), col + int(dx[index])
 
 
 class WavefrontFrontierExplorer(Module):
@@ -190,6 +236,8 @@ class WavefrontFrontierExplorer(Module):
         # Targets that timed out: (goal, monotonic deadline). Re-selecting a target the
         # navigator could not reach is the main source of re-walked ground.
         self._failed: list[tuple[Vector3, float]] = []
+        # Goals already reached, with the moment they stop being treated as repeats.
+        self._visited: list[tuple[Vector3, float]] = []
         self._last_goal_cost = 0.0
 
         # Goal reached event
@@ -671,6 +719,7 @@ class WavefrontFrontierExplorer(Module):
     def mark_explored_goal(self, goal: Vector3) -> None:
         """Mark a goal as explored."""
         self.explored_goals.append(goal)
+        self._visited.append((goal, time.monotonic() + self.config.visited_exclusion_ttl))
 
     @rpc
     def mark_failed_goal(self, goal: Vector3) -> None:
@@ -734,49 +783,77 @@ class WavefrontFrontierExplorer(Module):
         block_failures: bool,
     ) -> Vector3 | None:
         """Rank reachable frontiers once; see :meth:`select_goal` for why this runs twice."""
+
+        known = grid
         if failures and block_failures:
             grid = grid.copy()
             yy, xx = np.indices(grid.grid.shape)
             for previous, _ in failures:
                 cell = grid.world_to_grid(previous)
                 limit = (0.75 / grid.resolution) ** 2
-                blocked = (xx - cell.x) ** 2 + (yy - cell.y) ** 2 < limit
-                grid.grid[blocked] = CostValues.OCCUPIED
+                grid.grid[(xx - cell.x) ** 2 + (yy - cell.y) ** 2 < limit] = CostValues.OCCUPIED
 
         distances = reachable_distances(grid, pose)
         if not np.any(np.isfinite(distances)):
+            # The robot normally stands inside the inflation buffer of an obstacle it
+            # is passing. Opening a small hole around it keeps exploration going
+            # instead of reading the whole map as unreachable.
+            grid = _open_start(grid, pose)
+            distances = reachable_distances(grid, pose)
+        if not np.any(np.isfinite(distances)) and failures:
+            # Cooling off unreachable targets can wall the robot in, since it stopped
+            # right where it gave up. Release the blocking so it can drive away; the
+            # goal exclusions still keep it from walking back into that spot.
+            logger.warning("Cooled-off goals enclose the robot; releasing the area blocking")
+            grid = known
+            distances = reachable_distances(grid, pose)
+        if not np.any(np.isfinite(distances)):
             return None
 
-        frontier = np.isfinite(distances) & binary_dilation(
-            grid.grid == CostValues.UNKNOWN, structure=np.ones((3, 3), dtype=bool)
-        )
-        yy, xx = np.indices(frontier.shape)
-        for previous in self.explored_goals:
-            cell = grid.world_to_grid(previous)
-            radius = self.config.visited_exclusion_radius / grid.resolution
-            frontier &= (xx - cell.x) ** 2 + (yy - cell.y) ** 2 >= radius**2
-        for previous, _ in failures:
-            cell = grid.world_to_grid(previous)
-            radius = 0.75 / grid.resolution
-            frontier &= (xx - cell.x) ** 2 + (yy - cell.y) ** 2 >= radius**2
+        frontier, band = self._frontier_mask(distances, grid)
+        if not frontier.any():
+            return None
+
+        # Exclusions apply to the points worth driving to, not to the map. Carving them
+        # out of the map also carves out the corridor that leads onward, and the explorer
+        # then reports the building finished with most of it unmapped.
+        excluded = self._excluded_cells(pose, failures, grid)
 
         clusters, count = label(frontier)
         min_cells = max(1, int(self.config.min_frontier_perimeter / grid.resolution))
+        groups = [
+            (rows, cols)
+            for rows, cols in (np.where(clusters == cid) for cid in range(1, count + 1))
+            if len(rows)
+        ]
+        kept = [group for group in groups if len(group[0]) >= min_cells]
+        if not kept and groups:
+            # The size floor exists to reject sensor noise. Once the easy ground is
+            # mapped, what is left is often reachable only through a door thin enough to
+            # leave a frontier under that floor; rejecting those ends the run early.
+            logger.info(
+                "Only frontiers below the size floor remain; keeping the largest",
+                cells=max(len(rows) for rows, _ in groups),
+                floor=min_cells,
+            )
+            kept = [max(groups, key=lambda group: len(group[0]))]
+
         goals: list[Vector3] = []
         costs: list[float] = []
         sizes: list[int] = []
-        for cluster in range(1, count + 1):
-            rows, cols = np.where(clusters == cluster)
-            if len(rows) < min_cells:
+        for rows, cols in kept:
+            keep = ~excluded[rows, cols]
+            open_rows, open_cols = rows[keep], cols[keep]
+            if not len(open_rows):
                 continue
-            # Cheapest cell to walk to inside the cluster, not a centroid that can
-            # land in unknown space or behind the very obstacle we are routing around.
-            index = int(np.argmin(distances[rows, cols]))
-            row, col = int(rows[index]), int(cols[index])
+            # Cheapest cell to walk to inside the cluster, not a centroid that can land
+            # in unknown space or behind the very obstacle being routed around.
+            index = int(np.argmin(distances[open_rows, open_cols]))
+            row, col = int(open_rows[index]), int(open_cols[index])
             world = grid.grid_to_world((col, row, 0))
             goals.append(Vector3(world.x, world.y, 0.0))
             costs.append(float(distances[row, col]))
-            sizes.append(len(rows))
+            sizes.append(len(open_rows))
 
         if not goals:
             return None
@@ -790,8 +867,60 @@ class WavefrontFrontierExplorer(Module):
             path_cost_m=round(self._last_goal_cost, 2),
             candidates=len(goals),
             cooling_targets=len(failures),
+            frontier_band_cells=band,
         )
         return goals[best]
+
+    def _excluded_cells(
+        self, pose: Vector3, failures: list[tuple[Vector3, float]], grid: OccupancyGrid
+    ) -> np.ndarray[Any, Any]:
+        """Cells that should not be aimed at again yet: reached goals and cooling ones."""
+
+        discs = [
+            *((spot, self.config.visited_exclusion_radius) for spot, _ in self._active_visited()),
+            *((spot, 0.75) for spot, _ in failures),
+        ]
+        excluded = np.zeros(grid.grid.shape, dtype=bool)
+        if not discs:
+            return excluded
+        yy, xx = np.indices(grid.grid.shape)
+        for spot, radius in discs:
+            cell = grid.world_to_grid(spot)
+            reach = radius / grid.resolution
+            excluded |= (xx - cell.x) ** 2 + (yy - cell.y) ** 2 < reach**2
+        return excluded
+
+    def _active_visited(self) -> list[tuple[Vector3, float]]:
+        """Reached goals still recent enough to count as repeats."""
+
+        now = time.monotonic()
+        self._visited = [entry for entry in self._visited if entry[1] > now]
+        return self._visited
+
+    def _frontier_mask(
+        self, distances: np.ndarray[Any, Any], grid: OccupancyGrid
+    ) -> tuple[np.ndarray[Any, Any], int]:
+        """Frontier cells: drivable cells from which unknown space can be reached.
+
+        The map is inflated for planning, and inflation turns the unknown belt hugging a
+        wall into wall too, so the nearest remaining unknown is at least twice the
+        inflation plus the wall's own thickness away from any drivable cell. Requiring a
+        frontier to touch unknown therefore finds nothing in a corridor that is barely
+        wide enough for the robot, and the explorer reports the building finished after
+        a third of it. The band grows until it reaches a drivable cell instead of being
+        a constant that a different corridor width breaks.
+        """
+        unknown = grid.grid == CostValues.UNKNOWN
+        drivable = np.isfinite(distances)
+        widest = max(2, math.ceil((2 * self.config.costmap_inflation + 0.2) / grid.resolution))
+        for band in range(1, widest + 1):
+            near_unknown = binary_dilation(
+                unknown, structure=np.ones((3, 3), dtype=bool), iterations=band
+            )
+            frontier = drivable & near_unknown
+            if frontier.any():
+                return frontier, band
+        return frontier, widest
 
     def reset_exploration_session(self) -> None:
         """
@@ -801,6 +930,7 @@ class WavefrontFrontierExplorer(Module):
         needs to forget its previous exploration history.
         """
         self.explored_goals.clear()  # Clear all previously explored goals
+        self._visited.clear()  # Forget which goals count as repeats
         self.exploration_direction = Vector3(0.0, 0.0, 0.0)  # Reset exploration direction
         self.last_costmap = None  # Clear last costmap comparison
         self.no_gain_counter = 0  # Reset no-gain attempt counter
@@ -903,7 +1033,7 @@ class WavefrontFrontierExplorer(Module):
             )
 
             # Get exploration goal
-            costmap = simple_inflate(self.latest_costmap, 0.25)
+            costmap = simple_inflate(self.latest_costmap, self.config.costmap_inflation)
             goal = self.select_goal(robot_pose, costmap)
 
             if goal:
