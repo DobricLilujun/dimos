@@ -138,7 +138,9 @@ class NamedPersonRecognizerSkillContainer(Module):
         # Embedding model (injectable; default to the person ReID model).
         if self._model is None:
             try:
-                from dimos.models.embedding.treid import TorchReIDModel
+                from dimos.models.embedding.treid import (  # type: ignore[import-untyped]
+                    TorchReIDModel,
+                )
 
                 self._model = TorchReIDModel()
             except Exception as e:  # pragma: no cover - depends on optional deps
