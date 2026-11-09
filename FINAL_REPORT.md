@@ -1,7 +1,22 @@
 # FINAL REPORT — `lujun/feat/upstream-sync`
 
 Branch renamed from `learning-branch-sync` to satisfy the `<who>/<type>/<topic>` rule.
-State as of this commit: **69 commits ahead of `upstream/main`, 0 behind.**
+State as of this commit: **ahead of `upstream/main` (base `f336efa9d5`), 0 behind** — see
+Key numbers for the exact count at each update.
+
+## Default recommendations (one line each, reply to pick or override)
+
+- **A — docs / Pages:** push `lujun/feat/docs-pages-prep` to the fork and open a
+  **docs-only PR**, *provided* the strict mkdocs build passes — which it can only be
+  shown to do by CI or by a machine that may install the `docs` dependency group
+  (see the probe under decision A).
+- **B — fork branches:** keep `learning-branch` as the historical anchor; leave
+  `fix/go2-frontier-early-completion`, `feat/sim-procedural-stairs` and
+  `draft/exploration-policy-rollout` until C is settled, then delete in one batch.
+- **C — feature (2.5D traversability, route ordering):** **do not start** until there is
+  a verifiable host (nix available, or the LFS data already pulled) for
+  `LocalPlannerNative` and the navigation bench.
+
 
 ## Branch topology
 
@@ -37,7 +52,7 @@ Fork-only branches that still exist (`origin`, none on upstream):
 | item | value |
 |---|---|
 | merge base / second parent | `f336efa9d5` (`upstream/main`) |
-| ahead / behind | **69 / 0** (67 non-merge + 2 merge) |
+| ahead / behind | behind is **0** at every update; ahead = `git rev-list --count upstream/main..HEAD` (67 non-merge + 2 merge at the merge commit, growing by 1 per follow-up commit; local is currently ahead of the pushed fork ref) |
 | diff vs `upstream/main` | **92 files, +13,079 / −93** |
 | diff before S2 | 98 files, +16,051 / −157 → **−19%** |
 | LFS-tracked files in diff | **0 / 92** (verified per file with `git check-attr` before `--no-verify`) |
@@ -117,9 +132,31 @@ Decision (A) said *prepare locally only*, and that is done: branch
   `person-recognition.md`, `sit-and-look-up.md`.
 - gates: stale-reference patterns **0 hits**; dangling local links **0**;
   `docs/sedan/.nav.yml` missing pages **0**; blueprint names cited in `cli.md` all registered.
-- **not verified: the docs build.** `mkdocs build --strict` aborts with
-  `The "mkdocstrings" plugin is not installed` (required by upstream's `mkdocs.yml`);
-  no toolchain was installed for this, so link/nav rendering is unproven locally.
+- **docs build: cannot be verified in this environment, and nothing was installed to
+  try.** Probe results, in this checkout's venv:
+  `mkdocs 1.6.1` imports, but `mkdocstrings`, `mkdocs-material`, `mkdocs-awesome-nav`,
+  `mkdocs-glightbox` and `mkdocs-minify-plugin` are all absent, and upstream's
+  `mkdocs.yml` declares all of them as plugins with `theme: material` — so
+  `mkdocs build --strict` aborts on a configuration error before it can check links or nav.
+  **These packages are not missing from the project**: they are upstream's `docs`
+  dependency-group in `pyproject.toml` (lines ~529-535) and all of them are pinned in
+  `uv.lock`. Only the local venv lacks them, because the venv was synced without that group.
+  Shortest paths to a real verification:
+  1. any machine allowed to install dev dependencies:
+     `uv sync --only-group docs --frozen && uv run --no-sync mkdocs build --strict`
+     (no dependency-file change needed — the lock already has them);
+  2. or let CI do it: `.github/workflows/docs-check.yml` runs exactly those two commands
+     and triggers on `docs/**` (plus `mkdocs.yml`, `misc/mkdocs/**`, `pyproject.toml`,
+     `uv.lock`), so a docs-only PR is self-verifying — link and nav warnings would fail it
+     under `--strict`.
+- **correction to carry into the PR:** `docs/venv-dev-requirements.txt` is **not** consumed
+  by anything. Zero references to it exist in the repo, and
+  `scripts/sync-venv-dev.sh` installs with `uv pip install -e ".[sim,web,perception,
+  visualization,misc,dev]"` — it never mentions that file. The commit message on
+  `lujun/feat/docs-pages-prep` (`f3d7b88170`) claims otherwise; that claim is wrong (the
+  commit was left in place rather than rewritten, so this note is the correction).
+  **Treat `docs/venv-dev-requirements.txt` as droppable from the transplant** — 368 lines
+  of pinned requirements with no consumer.
 
 The source branch `learning-branch-docs` was deliberately *not* taken wholesale: it
 reverts 28 upstream docs files to an older copy and deletes 28 others — both were undone,
