@@ -26,6 +26,7 @@ Fork-only branches that still exist (`origin`, none on upstream):
 | branch | what it holds |
 |---|---|
 | `lujun/feat/upstream-sync` | the mergeable branch (this one) |
+| `lujun/feat/docs-pages-prep` | **local only, not pushed** — docs/Pages transplant prepared for decision (a) |
 | `learning-branch` | the original pre-merge state, kept as an anchor |
 | `draft/exploration-policy-rollout` | exploration policy work + offline rollout + ablation notes |
 | `feat/sim-procedural-stairs` | the procedural stairs scene on a clean base |
@@ -96,16 +97,33 @@ Two KEEP calls worth knowing:
 
 ## Three things that need a decision
 
-**a) docs / GitHub Pages PR — reopen, submit new, or leave it?**
-Nothing from the docs work is on the mergeable branch; it lives on `learning-branch-docs`
-(26 files / 3,435 lines, incl. `docs/sedan/*`, 19 pages). Two preconditions before it can go
-upstream:
+**a) docs / GitHub Pages PR — prepared locally, needs go-ahead to push or open a PR.**
+Decision (A) said *prepare locally only*, and that is done: branch
+`lujun/feat/docs-pages-prep` @ `f3d7b88170`, **one commit, never pushed**.
 
-- **delete `docs/sedan/web-console.md`** (+416 lines — documents the console stack this branch dropped)
-- **delete `docs/assets/webconsole.png`** (binary, referenced only by that page)
+- diff: **20 files, +2,369 / −0** — 19 added docs files plus `docs/.nav.yml` at
+  **exactly +1 / −0** (only `- sedan` added; no upstream nav entry removed, and none
+  of upstream's 212 docs files modified or deleted).
+- non-docs files touched: **0** — no code, blueprint registry or `annotations.yaml` change
+  was required.
+- pages dropped because their subject is code this branch does not carry:
+  `docs/sedan/web-console.md`, `docs/assets/webconsole.png`,
+  `docs/sedan/demo-exploration.md` (`DemoExplorer`), `docs/sedan/logging.md`
+  (that whole page is the standalone console's log capture).
+- pages kept with the stale sections cut: `cli.md`, `sedan/index.md`, `docs/index.md`,
+  `testing.md` (console offline-test section), `voice-and-tagging.md` (console tag
+  visualization section), `movement-and-arrival.md`, `perception-vlm.md`,
+  `persistent-maps.md`, `person-following.md`, `quickstart.md`, `scene-graph.md`,
+  `person-recognition.md`, `sit-and-look-up.md`.
+- gates: stale-reference patterns **0 hits**; dangling local links **0**;
+  `docs/sedan/.nav.yml` missing pages **0**; blueprint names cited in `cli.md` all registered.
+- **not verified: the docs build.** `mkdocs build --strict` aborts with
+  `The "mkdocstrings" plugin is not installed` (required by upstream's `mkdocs.yml`);
+  no toolchain was installed for this, so link/nav rendering is unproven locally.
 
-and one structural fix: that branch replaces `docs/.nav.yml` wholesale, hiding all 212 upstream
-docs files from the site nav. It has to become an *added* `sedan` section, not a replacement.
+The source branch `learning-branch-docs` was deliberately *not* taken wholesale: it
+reverts 28 upstream docs files to an older copy and deletes 28 others — both were undone,
+so the transplant is additive only.
 
 **b) fork branches: keep or delete?** Four are still on `origin` and are not referenced by
 anything on the mergeable branch:
