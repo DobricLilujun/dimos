@@ -80,9 +80,6 @@ robots:
         unitree-go2-agentic-persistent:
           title: Go2 with a stored map
           description: 'The Go2 agent on a map it keeps on disk: it relocalizes into a saved map instead of building a new one every run, and can navigate to places tagged in earlier runs.'
-        unitree-go2-agentic-persistent-demo:
-          title: Go2 stored-map agent (demo)
-          description: The stored-map Go2 agent wired for a replay/demo run.
         unitree-go2-agentic-persistent-person-following:
           title: Go2 stored map with person following
           description: The stored-map Go2 agent, also recognizing named people by face, navigating to them and following them.
