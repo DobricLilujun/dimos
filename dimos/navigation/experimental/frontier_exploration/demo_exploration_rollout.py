@@ -30,7 +30,7 @@ what share of that walking was over ground it had already walked.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import heapq
 import math
 from typing import Any
@@ -45,6 +45,7 @@ from dimos.navigation.experimental.frontier_exploration.wavefront_frontier_goal_
     WavefrontConfig,
     WavefrontFrontierExplorer,
     _open_start,
+    reachable_distances,
 )
 from dimos.simulation.scenes.procedural import Scene, corridor_turn, office, stairs
 
@@ -333,21 +334,33 @@ def free_neighbours(
 
 @dataclass
 class StraightLinePolicy:
-    """The behaviour before this branch's fix: nearest frontier in a straight line."""
+    """Nearest frontier in a straight line: the behaviour before this branch.
+
+    ``fixed_detection`` keeps the straight-line ranking but borrows the fixed selector's
+    frontier detection, which separates two questions the raw comparison confuses: do the
+    detection fixes help, and does changing the ranking help?
+
+    Read that row with care: it stalls. Correct detection yields fewer and smaller frontier
+    clusters, and without cooling or a repeat filter this policy re-picks the cell under the
+    robot until the no-progress guard ends the run. That is evidence the detection fixes and
+    the cooling machinery are one change rather than three.
+    """
 
     agent: Agent
-    cooldown_s: float = 0.0
-    _failed: list[tuple[Vector3, float]] = field(default_factory=list)
+    module: WavefrontFrontierExplorer | None = None
+    fixed_detection: bool = False
 
     def select(self) -> Vector3 | None:
-        """The nearest frontier cell in a straight line, reachability not considered.
-
-        Frontier cells come off the inflated map, as they did in the loop this branch
-        replaced, so the goal at least sits on drivable ground.
-        """
-        grid = self.agent.costmap().grid
-        frontier = (grid == FREE) & _dilate(grid == UNKNOWN)
-        cells = np.argwhere(frontier)
+        """The nearest frontier cell in a straight line, reachability not considered."""
+        costmap = self.agent.costmap()
+        if self.fixed_detection and self.module is not None:
+            distances = reachable_distances(costmap, self.agent.pose)
+            frontier, _ = self.module._frontier_mask(distances, costmap)
+            cells = np.argwhere(frontier)
+        else:
+            grid = costmap.grid
+            frontier = (grid == FREE) & _dilate(grid == UNKNOWN)
+            cells = np.argwhere(frontier)
         if not len(cells):
             return None
         pose = self.agent.pose
@@ -386,8 +399,10 @@ def run(
     config: dict[str, float] | None = None,
 ) -> dict[str, float]:
     agent = Agent(world)
-    if policy == "straight":
-        selector = StraightLinePolicy(agent)
+    if policy.startswith("straight"):
+        selector = StraightLinePolicy(agent, production_policy(agent), fixed_detection=True)
+        if policy == "straight":
+            selector.fixed_detection = False
         select, reached, failed = selector.select, selector.reached, selector.failed
     else:
         module = production_policy(agent, **(config or {}))
@@ -449,9 +464,9 @@ SCENES: dict[str, Callable[[int], Scene]] = {
 }
 POLICIES = (
     ("straight line", None),
+    ("straight + fixed detection", None),
     ("reachable cost", None),
     ("reachable no cooling", {"failure_cooldown": 0.0}),
-    ("reachable no repeats off", {"visited_exclusion_radius": 0.0}),
 )
 
 
@@ -469,7 +484,11 @@ def _report(seeds: range, scene: str) -> None:
     print(header)
     print("-" * len(header))
     for label, config in POLICIES:
-        policy = "straight" if label == "straight line" else "reachable"
+        policy = (
+            "straight fixed"
+            if label.startswith("straight +")
+            else ("straight" if label == "straight line" else "reachable")
+        )
         rows = []
         for seed in seeds:
             # The stairs_free case stands in for the 2.5D traversability layer: the
