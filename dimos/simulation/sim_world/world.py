@@ -78,6 +78,8 @@ FRAME_DT = 0.1
 BOX_RGBA = {
     "wall": (0.86, 0.84, 0.78, 1.0),
     "clutter": (0.45, 0.55, 0.70, 1.0),
+    # steps read as concrete, not as furniture: they are a surface to climb, not to avoid
+    "stair": (0.70, 0.63, 0.54, 1.0),
 }
 FLOOR_CHECKER = ((0.62, 0.60, 0.56), (0.70, 0.68, 0.64))
 SCENE_PUBLISH_DT = 2.0
