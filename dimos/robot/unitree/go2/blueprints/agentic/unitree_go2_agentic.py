@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dimos.agents.mcp.mcp_client import McpClient
+from dimos.agents.agent import Agent
 from dimos.agents.mcp.mcp_server import McpServer
 from dimos.agents.skills.person_recognition import NamedPersonRecognizerSkillContainer
 from dimos.agents.skills.scene_graph_server import SceneGraphServerModule
@@ -27,7 +27,7 @@ unitree_go2_agentic = autoconnect(
     # MCP client: an autonomous agent that fetches tools (skills) from the MCP server and
     # executes them. It receives user input via WebInput's input stream.
     McpServer.blueprint(),
-    McpClient.blueprint(),
+    Agent.blueprint(),
     _common_agentic,
     # Three new features (all inert by default; opt-in via CLI flags)
     # (1) Scene map / scene graph: SpatialMemory (in unitree_go2_spatial) already
