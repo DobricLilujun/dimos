@@ -22,7 +22,7 @@ in a white t-shirt and dark trousers. The agent picks one by appearance and foll
 them with the A* planner, re-planning as they move.
 """
 
-from dimos.agents.mcp.mcp_client import McpClient
+from dimos.agents.agent import Agent
 from dimos.agents.skills.person_follow import PersonFollowSkillContainer
 from dimos.agents.skills.person_navigation import (
     PERSON_NAVIGATION_PROMPT,
@@ -45,7 +45,7 @@ demo_unitree_go2_agentic_person_following = (
         MujocoPersonTarget.blueprint(
             publish_target=False, second_person_track=DEFAULT_SECOND_TRACK
         ),
-        McpClient.blueprint(system_prompt=SYSTEM_PROMPT + PERSON_NAVIGATION_PROMPT),
+        Agent.blueprint(system_prompt=SYSTEM_PROMPT + PERSON_NAVIGATION_PROMPT),
     )
     # follow_person drives cmd_vel directly with no obstacle avoidance and needs a Qwen
     # key; the planner-based skill replaces it.

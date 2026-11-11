@@ -24,7 +24,7 @@ publishes to ``session_cmd_vel`` (as ``MovementManager`` does) so the persistent
 sees and gates it instead of the command reaching the robot directly.
 """
 
-from dimos.agents.mcp.mcp_client import McpClient
+from dimos.agents.agent import Agent
 from dimos.agents.skills.person_follow import PersonFollowSkillContainer
 from dimos.agents.skills.person_navigation import (
     PERSON_NAVIGATION_PROMPT,
@@ -48,7 +48,7 @@ unitree_go2_agentic_persistent_person_following = (
         # Off until the follow skill starts it; the skill supplies the targets.
         GoalTracker.blueprint(),
         PersonNavigationSkillContainer.blueprint(),
-        McpClient.blueprint(system_prompt=SYSTEM_PROMPT + PERSON_NAVIGATION_PROMPT),
+        Agent.blueprint(system_prompt=SYSTEM_PROMPT + PERSON_NAVIGATION_PROMPT),
     )
     # follow_person drives cmd_vel directly with no obstacle avoidance and needs a Qwen
     # key; the planner-based skill replaces it.

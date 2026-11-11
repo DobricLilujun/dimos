@@ -16,7 +16,7 @@
 
 A "mode" here is a skill the agent calls that changes what the robot is doing
 (explore, follow, navigate, ...). This module listens on the shared tool-stream
-topic (the same channel ``McpClient`` uses) and speaks a cute English line the
+topic (the same channel ``Agent`` uses) and speaks a cute English line the
 first time a mode's background stream becomes active, and speaks the exit line
 when that stream reports itself stopped. The line is chosen by
 :mod:`cute_phrases`; repeated identical transitions are de-duplicated so a mode
